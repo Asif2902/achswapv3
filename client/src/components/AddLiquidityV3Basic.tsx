@@ -562,20 +562,6 @@ export function AddLiquidityV3Basic() {
         </>
       )}
 
-      {/* Wrapping Notice */}
-      {needsWrapping && tokenA && tokenB && (
-        <div className="flex items-start gap-3 p-4 bg-green-500/10 border border-green-500/20 rounded-lg">
-          <Shield className="h-5 w-5 text-green-400 shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <h3 className="font-semibold text-green-400 text-sm">Efficient Native Token Handling</h3>
-            <p className="text-xs text-slate-300">
-              Your native {needsWrapA ? tokenA.symbol : tokenB.symbol} will be automatically wrapped in a single
-              transaction. No manual wrapping needed – saves gas and time!
-            </p>
-          </div>
-        </div>
-      )}
-
       {/* Add Liquidity Button */}
       {isConnected ? (
         <Button

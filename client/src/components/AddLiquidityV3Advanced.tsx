@@ -21,7 +21,7 @@ import {
 import { calculateAmountsForLiquidity } from "@/lib/v3-liquidity-math";
 import {
   AlertTriangle, Zap, ExternalLink, TrendingUp, TrendingDown,
-  Info, Settings, BarChart3, Shield, Layers, Target, Activity,
+  Info, Settings, BarChart3, Layers, Target, Activity,
 } from "lucide-react";
 import { PriceRangeChart } from "./PriceRangeChart";
 
@@ -718,16 +718,6 @@ export function AddLiquidityV3Advanced() {
           </p>
         </CardContent>
       </Card>
-
-      {(isNativeToken(tokenA?.address || "") || isNativeToken(tokenB?.address || "")) && tokenA && tokenB && (
-        <div className="flex items-start gap-3 p-4 bg-green-500/10 border border-green-500/20 rounded-lg">
-          <Shield className="h-5 w-5 text-green-400 shrink-0 mt-0.5" />
-          <div className="space-y-1">
-            <h3 className="font-semibold text-green-400 text-sm">Automatic Native Token Wrapping</h3>
-            <p className="text-xs text-slate-300">Wrapped via multicall + refundETH — no pre-wrapping needed.</p>
-          </div>
-        </div>
-      )}
 
       {isConnected ? (
         <Button onClick={handleAddLiquidity} className="w-full h-12 text-base font-semibold"

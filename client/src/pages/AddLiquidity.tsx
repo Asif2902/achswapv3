@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { V3ContractStatus } from "@/components/V3ContractStatus";
 import { AddLiquidityV2 } from "@/components/AddLiquidityV2";
 import { AddLiquidityV3Basic } from "@/components/AddLiquidityV3Basic";
 import { AddLiquidityV3Advanced } from "@/components/AddLiquidityV3Advanced";
@@ -13,9 +12,6 @@ export default function AddLiquidity() {
 
   return (
     <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-8 max-w-2xl">
-      {/* V3 Contract Status */}
-      <V3ContractStatus />
-      
       <Card className="bg-slate-900/50 border-slate-700">
         <CardHeader className="p-4 sm:p-6">
           <CardTitle className="text-xl sm:text-2xl md:text-3xl font-bold text-center">
