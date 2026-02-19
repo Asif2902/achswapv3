@@ -8,62 +8,20 @@ import { getContractsForChain } from "@/lib/contracts";
 import { NONFUNGIBLE_POSITION_MANAGER_ABI, V3_POOL_ABI, V3_FACTORY_ABI, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getTokensFromLiquidity } from "@/lib/v3-liquidity-math";
-import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign } from "lucide-react";
+import { getTokensByChainId } from "@/data/tokens";
+import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign, Wallet, ChevronRight, Zap } from "lucide-react";
 
 const ERC20_ABI = [
   "function symbol() view returns (string)",
   "function decimals() view returns (uint8)",
 ];
 
-// uint128 max — used as a sentinel for "collect everything"
 const MAX_UINT128 = 2n ** 128n - 1n;
-
-// uint256 wrap-around modulus for fee subtraction
 const Q128 = 2n ** 128n;
-
-interface V3Position {
-  tokenId: bigint;
-  token0Address: string;
-  token0Symbol: string;
-  token0Decimals: number;
-  token1Address: string;
-  token1Symbol: string;
-  token1Decimals: number;
-  fee: number;
-  liquidity: bigint;
-  tickLower: number;
-  tickUpper: number;
-  // tokensOwed from the NFT contract (already snapshotted fees)
-  tokensOwed0: bigint;
-  tokensOwed1: bigint;
-  // Uncollected fees calculated from feeGrowth (the accurate number)
-  unclaimedFees0: bigint;
-  unclaimedFees1: bigint;
-  // Calculated actual token amounts from liquidity math
-  amount0: bigint;
-  amount1: bigint;
-}
-
-/**
- * Calculate feeGrowthInside for a tick range given the pool's global fee growth
- * and each boundary tick's feeGrowthOutside values.
- *
- * Uniswap V3 spec (section 6.3):
- *   feeGrowthBelow(i) = feeGrowthOutside(i)              if currentTick >= i
- *                     = feeGrowthGlobal − feeGrowthOutside(i)  otherwise
- *
- *   feeGrowthAbove(i) = feeGrowthOutside(i)              if currentTick < i
- *                     = feeGrowthGlobal − feeGrowthOutside(i)  otherwise
- *
- *   feeGrowthInside = feeGrowthGlobal − feeGrowthBelow(lower) − feeGrowthAbove(upper)
- *
- * All arithmetic is done in uint256 with intentional overflow (mod 2^256).
- * We emulate this in BigInt by masking to 256 bits after every subtraction.
- */
 const MASK256 = (1n << 256n) - 1n;
 
 function subU256(a: bigint, b: bigint): bigint {
-  return ((a - b) & MASK256);
+  return (a - b) & MASK256;
 }
 
 function calculateFeeGrowthInside(
@@ -78,20 +36,13 @@ function calculateFeeGrowthInside(
     currentTick >= tickLower
       ? feeGrowthOutsideLower
       : subU256(feeGrowthGlobal, feeGrowthOutsideLower);
-
   const feeGrowthAbove =
     currentTick < tickUpper
       ? feeGrowthOutsideUpper
       : subU256(feeGrowthGlobal, feeGrowthOutsideUpper);
-
   return subU256(subU256(feeGrowthGlobal, feeGrowthBelow), feeGrowthAbove);
 }
 
-/**
- * tokens owed = tokensOwedSnapshot + floor(liquidity × ΔfeeGrowthInside / 2^128)
- *
- * ΔfeeGrowthInside is computed mod 2^256 (same as the Solidity contract).
- */
 function calculateUnclaimedFees(
   liquidity: bigint,
   feeGrowthInsideCurrent: bigint,
@@ -101,6 +52,26 @@ function calculateUnclaimedFees(
   const delta = subU256(feeGrowthInsideCurrent, feeGrowthInsideLast);
   const earned = (liquidity * delta) / Q128;
   return tokensOwedSnapshot + earned;
+}
+
+interface V3Position {
+  tokenId: bigint;
+  token0Address: string;
+  token0Symbol: string;
+  token0Decimals: number;
+  token1Address: string;
+  token1Symbol: string;
+  token1Decimals: number;
+  fee: number;
+  liquidity: bigint;
+  tickLower: number;
+  tickUpper: number;
+  tokensOwed0: bigint;
+  tokensOwed1: bigint;
+  unclaimedFees0: bigint;
+  unclaimedFees1: bigint;
+  amount0: bigint;
+  amount1: bigint;
 }
 
 export function RemoveLiquidityV3() {
@@ -115,20 +86,21 @@ export function RemoveLiquidityV3() {
   const { toast } = useToast();
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
+  const knownTokens = getTokensByChainId(chainId);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Load user's V3 positions with accurate fee & liquidity information
-  // ─────────────────────────────────────────────────────────────────────────
+  const getTokenLogo = (symbol: string): string =>
+    knownTokens.find((t) => t.symbol === symbol)?.logoURI ??
+    "/img/logos/unknown-token.png";
+
   const loadPositions = async () => {
     if (!address || !contracts || !window.ethereum) return;
-
     setIsLoading(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const positionManager = new Contract(
         contracts.v3.nonfungiblePositionManager,
         NONFUNGIBLE_POSITION_MANAGER_ABI,
-        provider
+        provider,
       );
 
       const balance = await positionManager.balanceOf(address);
@@ -139,23 +111,17 @@ export function RemoveLiquidityV3() {
           const tokenId = await positionManager.tokenOfOwnerByIndex(address, i);
           const position = await positionManager.positions(tokenId);
 
-          // positions() tuple:
-          // [0] nonce  [1] operator  [2] token0  [3] token1  [4] fee
-          // [5] tickLower  [6] tickUpper  [7] liquidity
-          // [8] feeGrowthInside0LastX128  [9] feeGrowthInside1LastX128
-          // [10] tokensOwed0  [11] tokensOwed1
-          const token0Address = position[2];
-          const token1Address = position[3];
+          const token0Address: string = position[2];
+          const token1Address: string = position[3];
           const fee = Number(position[4]);
           const tickLower = Number(position[5]);
           const tickUpper = Number(position[6]);
-          const liquidity = position[7];
-          const feeGrowthInside0LastX128 = position[8];
-          const feeGrowthInside1LastX128 = position[9];
-          const tokensOwed0 = position[10];
-          const tokensOwed1 = position[11];
+          const liquidity: bigint = position[7];
+          const feeGrowthInside0LastX128: bigint = position[8];
+          const feeGrowthInside1LastX128: bigint = position[9];
+          const tokensOwed0: bigint = position[10];
+          const tokensOwed1: bigint = position[11];
 
-          // Token metadata
           const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
           const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
 
@@ -167,7 +133,6 @@ export function RemoveLiquidityV3() {
               token1Contract.decimals(),
             ]);
 
-          // Default values
           let amount0 = 0n;
           let amount1 = 0n;
           let unclaimedFees0 = tokensOwed0;
@@ -175,8 +140,6 @@ export function RemoveLiquidityV3() {
 
           try {
             const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
-
-            // Sort tokens for pool lookup (Uniswap V3: token0 < token1 by address)
             const [tokenA, tokenB] =
               token0Address.toLowerCase() < token1Address.toLowerCase()
                 ? [token0Address, token1Address]
@@ -184,13 +147,9 @@ export function RemoveLiquidityV3() {
 
             const poolAddress = await factory.getPool(tokenA, tokenB, fee);
 
-            if (
-              poolAddress &&
-              poolAddress !== "0x0000000000000000000000000000000000000000"
-            ) {
+            if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
               const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
 
-              // Fetch everything we need in one round-trip
               const [
                 slot0,
                 feeGrowthGlobal0X128,
@@ -207,23 +166,13 @@ export function RemoveLiquidityV3() {
 
               let currentSqrtPriceX96: bigint = slot0[0];
               const currentTick: number = Number(slot0[1]);
+              if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
 
-              if (currentSqrtPriceX96 === 0n) {
-                // Pool not initialised — use 1:1 as a safe default
-                currentSqrtPriceX96 = 2n ** 96n;
-              }
-
-              // ticks() returns:
-              // [0] liquidityGross  [1] liquidityNet
-              // [2] feeGrowthOutside0X128  [3] feeGrowthOutside1X128
-              // [4..7] other fields we don't need here
               const feeGrowthOutsideLower0: bigint = tickLowerData[2];
               const feeGrowthOutsideLower1: bigint = tickLowerData[3];
               const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
               const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
 
-              // ── Accurate uncollected fee calculation ──────────────────────
-              // Only positions with liquidity > 0 can accumulate fees.
               if (liquidity > 0n) {
                 const feeGrowthInside0 = calculateFeeGrowthInside(
                   feeGrowthGlobal0X128,
@@ -233,7 +182,6 @@ export function RemoveLiquidityV3() {
                   tickLower,
                   tickUpper,
                 );
-
                 const feeGrowthInside1 = calculateFeeGrowthInside(
                   feeGrowthGlobal1X128,
                   feeGrowthOutsideLower1,
@@ -242,14 +190,12 @@ export function RemoveLiquidityV3() {
                   tickLower,
                   tickUpper,
                 );
-
                 unclaimedFees0 = calculateUnclaimedFees(
                   liquidity,
                   feeGrowthInside0,
                   feeGrowthInside0LastX128,
                   tokensOwed0,
                 );
-
                 unclaimedFees1 = calculateUnclaimedFees(
                   liquidity,
                   feeGrowthInside1,
@@ -258,7 +204,6 @@ export function RemoveLiquidityV3() {
                 );
               }
 
-              // ── Liquidity → token amounts ─────────────────────────────────
               const tokenAmounts = getTokensFromLiquidity(
                 liquidity,
                 currentSqrtPriceX96,
@@ -266,7 +211,6 @@ export function RemoveLiquidityV3() {
                 tickUpper,
               );
 
-              // The pool stores tokens in sorted order; position may have them reversed
               if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
                 amount0 = tokenAmounts.amount1;
                 amount1 = tokenAmounts.amount0;
@@ -274,8 +218,6 @@ export function RemoveLiquidityV3() {
                 amount0 = tokenAmounts.amount0;
                 amount1 = tokenAmounts.amount1;
               }
-            } else {
-              console.warn("Pool not found for token pair");
             }
           } catch (poolError) {
             console.error("Error fetching pool data:", poolError);
@@ -302,12 +244,10 @@ export function RemoveLiquidityV3() {
           });
         } catch (error) {
           console.error(`Error loading position ${i}:`, error);
-          continue;
         }
       }
 
       setPositions(userPositions);
-
       if (userPositions.length === 0) {
         toast({
           title: "No V3 positions found",
@@ -326,41 +266,30 @@ export function RemoveLiquidityV3() {
     }
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Collect fees without removing liquidity
-  // ─────────────────────────────────────────────────────────────────────────
   const handleCollectFees = async () => {
     if (!selectedPosition || !address || !contracts || !window.ethereum) return;
-
     setIsCollecting(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-
       const positionManager = new Contract(
         contracts.v3.nonfungiblePositionManager,
         NONFUNGIBLE_POSITION_MANAGER_ABI,
-        signer
+        signer,
       );
 
-      toast({
-        title: "Collecting fees...",
-        description: "Claiming your trading fees",
-      });
+      toast({ title: "Collecting fees…", description: "Claiming your trading fees" });
 
-      const collectParams = {
+      const collectTx = await positionManager.collect({
         tokenId: selectedPosition.tokenId,
         recipient: address,
         amount0Max: MAX_UINT128,
         amount1Max: MAX_UINT128,
-      };
-
-      const collectTx = await positionManager.collect(collectParams);
+      });
       const receipt = await collectTx.wait();
 
       let amount0Collected = 0n;
       let amount1Collected = 0n;
-
       for (const log of receipt.logs) {
         try {
           const parsed = positionManager.interface.parseLog({
@@ -371,31 +300,26 @@ export function RemoveLiquidityV3() {
             amount0Collected = parsed.args.amount0;
             amount1Collected = parsed.args.amount1;
           }
-        } catch {
-          // Not a Collect event
-        }
+        } catch {}
       }
 
       await loadPositions();
-
-      const formatted0 = formatAmount(amount0Collected, selectedPosition.token0Decimals);
-      const formatted1 = formatAmount(amount1Collected, selectedPosition.token1Decimals);
 
       toast({
         title: "Fees collected!",
         description: (
           <div className="flex flex-col gap-1">
             <span>
-              Collected: {formatted0} {selectedPosition.token0Symbol} +{" "}
-              {formatted1} {selectedPosition.token1Symbol}
+              Collected: {formatAmount(amount0Collected, selectedPosition.token0Decimals)}{" "}
+              {selectedPosition.token0Symbol} +{" "}
+              {formatAmount(amount1Collected, selectedPosition.token1Decimals)}{" "}
+              {selectedPosition.token1Symbol}
             </span>
             <Button
               size="sm"
               variant="ghost"
               className="h-6 px-2 w-fit"
-              onClick={() =>
-                window.open(`${contracts.explorer}${receipt.hash}`, "_blank")
-              }
+              onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}
             >
               <ExternalLink className="h-3 w-3 mr-1" /> View Transaction
             </Button>
@@ -414,47 +338,32 @@ export function RemoveLiquidityV3() {
     }
   };
 
-  useEffect(() => {
-    if (isConnected && address) {
-      loadPositions();
-    }
-  }, [isConnected, address, chainId]);
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Remove all liquidity (decreaseLiquidity → collect → burn) via multicall
-  // ─────────────────────────────────────────────────────────────────────────
   const handleRemove = async () => {
     if (!selectedPosition || !address || !contracts || !window.ethereum) return;
-
     setIsRemoving(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-
       const positionManager = new Contract(
         contracts.v3.nonfungiblePositionManager,
         NONFUNGIBLE_POSITION_MANAGER_ABI,
-        signer
+        signer,
       );
 
       toast({
-        title: "Removing liquidity...",
-        description:
-          "Decreasing liquidity, collecting tokens, and burning NFT in one transaction",
+        title: "Removing liquidity…",
+        description: "Decreasing liquidity, collecting tokens, and burning NFT",
       });
 
-      const decreaseData = positionManager.interface.encodeFunctionData(
-        "decreaseLiquidity",
-        [
-          {
-            tokenId: selectedPosition.tokenId,
-            liquidity: selectedPosition.liquidity,
-            amount0Min: 0n,
-            amount1Min: 0n,
-            deadline: Math.floor(Date.now() / 1000) + 1200,
-          },
-        ]
-      );
+      const decreaseData = positionManager.interface.encodeFunctionData("decreaseLiquidity", [
+        {
+          tokenId: selectedPosition.tokenId,
+          liquidity: selectedPosition.liquidity,
+          amount0Min: 0n,
+          amount1Min: 0n,
+          deadline: Math.floor(Date.now() / 1000) + 1200,
+        },
+      ]);
 
       const collectData = positionManager.interface.encodeFunctionData("collect", [
         {
@@ -469,17 +378,11 @@ export function RemoveLiquidityV3() {
         selectedPosition.tokenId,
       ]);
 
-      const multicallTx = await positionManager.multicall([
-        decreaseData,
-        collectData,
-        burnData,
-      ]);
-
+      const multicallTx = await positionManager.multicall([decreaseData, collectData, burnData]);
       const receipt = await multicallTx.wait();
 
       let amount0Collected = 0n;
       let amount1Collected = 0n;
-
       for (const log of receipt.logs) {
         try {
           const parsed = positionManager.interface.parseLog({
@@ -490,30 +393,25 @@ export function RemoveLiquidityV3() {
             amount0Collected = parsed.args.amount0;
             amount1Collected = parsed.args.amount1;
           }
-        } catch {
-          // Not a Collect event
-        }
+        } catch {}
       }
 
-      const formatted0 = formatAmount(amount0Collected, selectedPosition.token0Decimals);
-      const formatted1 = formatAmount(amount1Collected, selectedPosition.token1Decimals);
-
       toast({
-        title: "Liquidity removed successfully!",
+        title: "Liquidity removed!",
         description: (
           <div className="flex flex-col gap-1">
             <span>
-              Removed: {formatted0} {selectedPosition.token0Symbol} +{" "}
-              {formatted1} {selectedPosition.token1Symbol}
+              Removed: {formatAmount(amount0Collected, selectedPosition.token0Decimals)}{" "}
+              {selectedPosition.token0Symbol} +{" "}
+              {formatAmount(amount1Collected, selectedPosition.token1Decimals)}{" "}
+              {selectedPosition.token1Symbol}
             </span>
-            <span className="text-xs text-slate-400">NFT position burned</span>
+            <span className="text-xs opacity-60">NFT position burned</span>
             <Button
               size="sm"
               variant="ghost"
               className="h-6 px-2 w-fit"
-              onClick={() =>
-                window.open(`${contracts.explorer}${receipt.hash}`, "_blank")
-              }
+              onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}
             >
               <ExternalLink className="h-3 w-3 mr-1" /> View Transaction
             </Button>
@@ -535,252 +433,295 @@ export function RemoveLiquidityV3() {
     }
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Display helpers
-  // ─────────────────────────────────────────────────────────────────────────
-  const formatFeeAmount = (amount: bigint, decimals: number): string => {
-    if (amount === 0n) return "0";
-    return formatAmount(amount, decimals);
-  };
+  useEffect(() => {
+    if (isConnected && address) loadPositions();
+  }, [isConnected, address, chainId]);
 
-  const formatLiquidity = (liquidity: bigint): string => {
-    const n = Number(liquidity);
-    if (n === 0) return "0";
-    if (n >= 1e15) return `${(n / 1e15).toFixed(2)}Q`;
-    if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
-    if (n >= 1e9)  return `${(n / 1e9).toFixed(2)}B`;
-    if (n >= 1e6)  return `${(n / 1e6).toFixed(2)}M`;
-    if (n >= 1e3)  return `${(n / 1e3).toFixed(2)}K`;
-    return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
-  };
+  const fmt = (amount: bigint, decimals: number): string =>
+    amount === 0n ? "0" : formatAmount(amount, decimals);
 
-  // A position "has fees" when the accurate unclaimed total is > 0
-  const hasFees = (position: V3Position): boolean =>
-    position.unclaimedFees0 > 0n || position.unclaimedFees1 > 0n;
+  const hasFees = (p: V3Position) =>
+    p.unclaimedFees0 > 0n || p.unclaimedFees1 > 0n;
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Render
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Not connected ──────────────────────────────────────────────────────────
   if (!isConnected) {
     return (
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 text-center">
-          <p className="text-slate-400">Connect your wallet to view V3 positions</p>
-        </CardContent>
-      </Card>
+      <div className="w-full max-w-md mx-auto px-3 py-4 sm:px-4 sm:py-8">
+        <Card className="border-border/40 bg-card/95 backdrop-blur-sm">
+          <CardContent className="flex flex-col items-center justify-center py-14 px-6 gap-4 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-muted/60 flex items-center justify-center">
+              <Wallet className="w-6 h-6 text-muted-foreground" />
+            </div>
+            <p className="font-semibold text-base">Wallet not connected</p>
+            <p className="text-sm text-muted-foreground">
+              Connect your wallet to view and manage your V3 positions
+            </p>
+          </CardContent>
+        </Card>
+      </div>
     );
   }
 
+  // ── Loading ────────────────────────────────────────────────────────────────
   if (isLoading) {
     return (
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 text-center text-slate-400">
-          Loading your V3 positions...
-        </CardContent>
-      </Card>
-    );
-  }
-
-  if (positions.length === 0) {
-    return (
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 text-center space-y-3">
-          <Trash2 className="h-12 w-12 text-slate-600 mx-auto" />
-          <p className="text-slate-400">No V3 liquidity positions found</p>
-          <Button variant="outline" size="sm" onClick={loadPositions}>
-            Refresh
-          </Button>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      {/* Positions List */}
-      <div className="space-y-3">
-        {positions.map((position, index) => (
-          <Card
-            key={index}
-            className={`bg-slate-900 border-slate-700 cursor-pointer transition-all ${
-              selectedPosition?.tokenId === position.tokenId
-                ? "ring-2 ring-purple-500"
-                : "hover:border-slate-600"
-            }`}
-            onClick={() => setSelectedPosition(position)}
-          >
+      <div className="w-full max-w-md mx-auto px-3 py-4 sm:px-4 sm:py-8 space-y-3">
+        {Array.from({ length: 3 }).map((_, i) => (
+          <Card key={i} className="border-border/40 bg-card/60 animate-pulse">
             <CardContent className="p-4">
-              <div className="flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="font-semibold text-white">
-                    {position.token0Symbol} / {position.token1Symbol}
-                  </div>
-                  <div className="text-xs text-slate-400 mt-1">
-                    Fee:{" "}
-                    {FEE_TIER_LABELS[position.fee as keyof typeof FEE_TIER_LABELS]} |
-                    Token ID: #{position.tokenId.toString()}
-                  </div>
-
-                  {/* Accurate Uncollected Fees */}
-                  <div className="mt-2 p-2 bg-slate-800/50 rounded-md">
-                    <div className="flex items-center gap-2 text-xs">
-                      <DollarSign className="h-3 w-3 text-green-400" />
-                      <span className="text-slate-400">Uncollected Fees:</span>
-                    </div>
-                    <div className="flex gap-4 mt-1">
-                      <div className="text-sm">
-                        <span className="text-green-400 font-medium">
-                          {formatFeeAmount(
-                            position.unclaimedFees0,
-                            position.token0Decimals
-                          )}
-                        </span>
-                        <span className="text-slate-500 ml-1">
-                          {position.token0Symbol}
-                        </span>
-                      </div>
-                      <div className="text-sm">
-                        <span className="text-green-400 font-medium">
-                          {formatFeeAmount(
-                            position.unclaimedFees1,
-                            position.token1Decimals
-                          )}
-                        </span>
-                        <span className="text-slate-500 ml-1">
-                          {position.token1Symbol}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Liquidity Value (token amounts) */}
-                  {(position.amount0 > 0n || position.amount1 > 0n) && (
-                    <div className="mt-2 p-2 bg-slate-800/50 rounded-md">
-                      <div className="flex items-center gap-2 text-xs">
-                        <Coins className="h-3 w-3 text-purple-400" />
-                        <span className="text-slate-400">Liquidity Value:</span>
-                      </div>
-                      <div className="flex gap-4 mt-1">
-                        <div className="text-sm">
-                          <span className="text-purple-400 font-medium">
-                            {formatFeeAmount(
-                              position.amount0,
-                              position.token0Decimals
-                            )}
-                          </span>
-                          <span className="text-slate-500 ml-1">
-                            {position.token0Symbol}
-                          </span>
-                        </div>
-                        <div className="text-sm">
-                          <span className="text-purple-400 font-medium">
-                            {formatFeeAmount(
-                              position.amount1,
-                              position.token1Decimals
-                            )}
-                          </span>
-                          <span className="text-slate-500 ml-1">
-                            {position.token1Symbol}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div className="text-right">
-                  <div className="text-sm font-medium text-purple-400">
-                    V3 Position
-                  </div>
-                  {hasFees(position) && (
-                    <div className="mt-1">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs bg-green-500/20 text-green-400">
-                        <Coins className="h-3 w-3 mr-1" />
-                        Fees Ready
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
+              <div className="h-4 w-1/3 rounded bg-muted/60 mb-3" />
+              <div className="h-3 w-1/2 rounded bg-muted/40 mb-2" />
+              <div className="h-12 rounded-lg bg-muted/30" />
             </CardContent>
           </Card>
         ))}
       </div>
+    );
+  }
 
-      {/* Action Buttons */}
-      {selectedPosition && (
-        <div className="space-y-3">
-          {/* Collect Fees Button */}
-          <Button
-            onClick={handleCollectFees}
-            disabled={isCollecting || !hasFees(selectedPosition)}
-            variant="outline"
-            className="w-full h-12 text-base font-semibold bg-green-600/20 border-green-500/50 hover:bg-green-600/30 text-green-400"
-          >
-            {isCollecting ? (
-              "Collecting..."
-            ) : (
-              <>
-                <Coins className="h-4 w-4 mr-2" />
-                Collect Fees
-                {hasFees(selectedPosition) && (
-                  <span className="ml-2 text-xs">
-                    (
-                    {formatFeeAmount(
-                      selectedPosition.unclaimedFees0,
-                      selectedPosition.token0Decimals
-                    )}{" "}
-                    {selectedPosition.token0Symbol} +{" "}
-                    {formatFeeAmount(
-                      selectedPosition.unclaimedFees1,
-                      selectedPosition.token1Decimals
-                    )}{" "}
-                    {selectedPosition.token1Symbol})
-                  </span>
-                )}
-              </>
-            )}
-          </Button>
+  // ── Empty ──────────────────────────────────────────────────────────────────
+  if (positions.length === 0) {
+    return (
+      <div className="w-full max-w-md mx-auto px-3 py-4 sm:px-4 sm:py-8">
+        <Card className="border-border/40 bg-card/95 backdrop-blur-sm">
+          <CardContent className="flex flex-col items-center justify-center py-14 px-6 gap-4 text-center">
+            <div className="w-14 h-14 rounded-2xl bg-muted/60 flex items-center justify-center">
+              <Trash2 className="w-6 h-6 text-muted-foreground" />
+            </div>
+            <p className="font-semibold text-base">No positions found</p>
+            <p className="text-sm text-muted-foreground">
+              You don't have any V3 liquidity positions yet
+            </p>
+            <Button variant="outline" size="sm" onClick={loadPositions} className="gap-2 mt-1">
+              <RefreshCw className="w-3.5 h-3.5" /> Refresh
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
-          {/* Refresh Button */}
-          <Button
-            onClick={loadPositions}
-            disabled={isLoading}
-            variant="ghost"
-            className="w-full h-10 text-sm"
-          >
-            <RefreshCw
-              className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`}
-            />
-            {isLoading ? "Refreshing..." : "Refresh Positions"}
-          </Button>
+  // ── Main ───────────────────────────────────────────────────────────────────
+  return (
+    <div className="w-full max-w-md mx-auto px-3 py-4 sm:px-4 sm:py-8 space-y-3">
 
-          {/* Remove Liquidity Button */}
-          <Button
-            onClick={handleRemove}
-            disabled={isRemoving || selectedPosition.liquidity === 0n}
-            variant="destructive"
-            className="w-full h-12 text-base font-semibold"
+      {positions.map((position, index) => {
+        const isSelected = selectedPosition?.tokenId === position.tokenId;
+        const feesAvailable = hasFees(position);
+        const feeTierLabel =
+          FEE_TIER_LABELS[position.fee as keyof typeof FEE_TIER_LABELS] ??
+          `${(position.fee / 10_000).toFixed(2)}%`;
+
+        return (
+          <Card
+            key={index}
+            onClick={() => setSelectedPosition(isSelected ? null : position)}
+            className={`border transition-all cursor-pointer overflow-hidden ${
+              isSelected
+                ? "border-primary/50 bg-card/95 shadow-lg shadow-primary/10"
+                : "border-border/40 bg-card/60 hover:border-border/70 hover:bg-card/80"
+            }`}
           >
-            {isRemoving ? "Removing..." : "Remove V3 Liquidity"}
-            {(selectedPosition.amount0 > 0n || selectedPosition.amount1 > 0n) && (
-              <span className="ml-2 text-xs">
-                (
-                {formatFeeAmount(
-                  selectedPosition.amount0,
-                  selectedPosition.token0Decimals
-                )}{" "}
-                {selectedPosition.token0Symbol} +{" "}
-                {formatFeeAmount(
-                  selectedPosition.amount1,
-                  selectedPosition.token1Decimals
-                )}{" "}
-                {selectedPosition.token1Symbol})
-              </span>
-            )}
-          </Button>
-        </div>
-      )}
+            <CardContent className="p-0">
+
+              {/* ── Header row ── */}
+              <div className="flex items-center justify-between px-4 py-3.5">
+                <div className="flex items-center gap-3 min-w-0">
+
+                  {/* Overlapping token logos */}
+                  <div className="relative w-10 h-7 flex-shrink-0">
+                    <img
+                      src={getTokenLogo(position.token0Symbol)}
+                      alt={position.token0Symbol}
+                      className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-0 top-0 z-10"
+                      onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                    />
+                    <img
+                      src={getTokenLogo(position.token1Symbol)}
+                      alt={position.token1Symbol}
+                      className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-4 top-0"
+                      onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                    />
+                  </div>
+
+                  <div className="min-w-0 pl-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="font-bold text-sm">
+                        {position.token0Symbol}/{position.token1Symbol}
+                      </span>
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/20">
+                        {feeTierLabel}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      #{position.tokenId.toString()} · V3 Position
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {feesAvailable && (
+                    <span className="flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-green-500/15 text-green-400 border border-green-500/20">
+                      <Zap className="w-2.5 h-2.5" />
+                      Fees
+                    </span>
+                  )}
+                  <ChevronRight
+                    className={`w-4 h-4 text-muted-foreground transition-transform duration-200 ${
+                      isSelected ? "rotate-90" : ""
+                    }`}
+                  />
+                </div>
+              </div>
+
+              {/* ── Expanded detail ── */}
+              {isSelected && (
+                <div className="border-t border-border/30 divide-y divide-border/20">
+
+                  {/* Liquidity value */}
+                  {(position.amount0 > 0n || position.amount1 > 0n) && (
+                    <div className="px-4 py-3 bg-muted/10">
+                      <div className="flex items-center gap-1.5 mb-2.5">
+                        <Coins className="w-3 h-3 text-primary/70" />
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          Liquidity Value
+                        </span>
+                      </div>
+                      <div className="flex gap-6">
+                        <div className="flex items-center gap-2">
+                          <img
+                            src={getTokenLogo(position.token0Symbol)}
+                            alt={position.token0Symbol}
+                            className="w-5 h-5 rounded-full flex-shrink-0"
+                            onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                          />
+                          <div>
+                            <p className="text-sm font-semibold tabular-nums">
+                              {fmt(position.amount0, position.token0Decimals)}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <img
+                            src={getTokenLogo(position.token1Symbol)}
+                            alt={position.token1Symbol}
+                            className="w-5 h-5 rounded-full flex-shrink-0"
+                            onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                          />
+                          <div>
+                            <p className="text-sm font-semibold tabular-nums">
+                              {fmt(position.amount1, position.token1Decimals)}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Uncollected fees */}
+                  <div className="px-4 py-3 bg-muted/10">
+                    <div className="flex items-center gap-1.5 mb-2.5">
+                      <DollarSign className="w-3 h-3 text-green-400/70" />
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        Uncollected Fees
+                      </span>
+                    </div>
+                    <div className="flex gap-6">
+                      <div className="flex items-center gap-2">
+                        <img
+                          src={getTokenLogo(position.token0Symbol)}
+                          alt={position.token0Symbol}
+                          className="w-5 h-5 rounded-full flex-shrink-0"
+                          onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                        />
+                        <div>
+                          <p className={`text-sm font-semibold tabular-nums ${feesAvailable ? "text-green-400" : "text-muted-foreground"}`}>
+                            {fmt(position.unclaimedFees0, position.token0Decimals)}
+                          </p>
+                          <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <img
+                          src={getTokenLogo(position.token1Symbol)}
+                          alt={position.token1Symbol}
+                          className="w-5 h-5 rounded-full flex-shrink-0"
+                          onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                        />
+                        <div>
+                          <p className={`text-sm font-semibold tabular-nums ${feesAvailable ? "text-green-400" : "text-muted-foreground"}`}>
+                            {fmt(position.unclaimedFees1, position.token1Decimals)}
+                          </p>
+                          <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Action buttons */}
+                  <div className="px-4 py-3 space-y-2 bg-muted/5">
+                    <Button
+                      onClick={(e) => { e.stopPropagation(); handleCollectFees(); }}
+                      disabled={isCollecting || !feesAvailable}
+                      variant="outline"
+                      className="w-full h-11 text-sm font-semibold bg-green-600/20 border border-green-500/40 hover:bg-green-600/30 text-green-400 hover:text-green-300 transition-all"
+                    >
+                      {isCollecting ? (
+                        <span className="flex items-center gap-2">
+                          <span className="w-3.5 h-3.5 border-2 border-green-400/30 border-t-green-400 rounded-full animate-spin" />
+                          Collecting…
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-2">
+                          <Coins className="w-4 h-4" />
+                          Collect Fees
+                          {feesAvailable && (
+                            <span className="text-xs opacity-70">
+                              ({fmt(position.unclaimedFees0, position.token0Decimals)} +{" "}
+                              {fmt(position.unclaimedFees1, position.token1Decimals)})
+                            </span>
+                          )}
+                        </span>
+                      )}
+                    </Button>
+
+                    <Button
+                      onClick={(e) => { e.stopPropagation(); handleRemove(); }}
+                      disabled={isRemoving || position.liquidity === 0n}
+                      variant="destructive"
+                      className="w-full h-11 text-sm font-semibold disabled:opacity-40"
+                    >
+                      {isRemoving ? (
+                        <span className="flex items-center gap-2">
+                          <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          Removing…
+                        </span>
+                      ) : (
+                        "Remove All Liquidity"
+                      )}
+                    </Button>
+                  </div>
+
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        );
+      })}
+
+      {/* ── Refresh ── */}
+      <Button
+        onClick={loadPositions}
+        disabled={isLoading}
+        variant="ghost"
+        className="w-full h-10 text-sm text-muted-foreground hover:text-foreground gap-2"
+      >
+        <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? "animate-spin" : ""}`} />
+        {isLoading ? "Refreshing…" : "Refresh Positions"}
+      </Button>
+
     </div>
   );
 }
