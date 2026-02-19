@@ -1,3 +1,4 @@
+
 import { Contract, BrowserProvider } from "ethers";
 import { formatUnits } from "ethers";
 import type { Token } from "@shared/schema";
@@ -25,14 +26,14 @@ export interface PoolData {
   token0: {
     address: string;
     symbol: string;
-    displaySymbol: string;
+    displaySymbol: string; // Unwrapped symbol for display
     decimals: number;
     name: string;
   };
   token1: {
     address: string;
     symbol: string;
-    displaySymbol: string;
+    displaySymbol: string; // Unwrapped symbol for display
     decimals: number;
     name: string;
   };
@@ -44,98 +45,139 @@ export interface PoolData {
   totalSupply: bigint;
 }
 
-// ─── Stable token set ─────────────────────────────────────────────────────────
-// ARC testnet only — Stable Testnet (2201) has been decommissioned.
-const STABLE_SYMBOLS = new Set(["usdc", "wusdc", "usdt", "wusdt", "usd"]);
-
-function isStable(symbol: string): boolean {
-  return STABLE_SYMBOLS.has(symbol.toLowerCase());
-}
-
-// ─── Provider ────────────────────────────────────────────────────────────────
-function makeProvider(): BrowserProvider {
-  return new BrowserProvider({
-    request: async ({ method, params }: { method: string; params?: unknown[] }) => {
-      const res = await fetch("https://rpc.testnet.arc.network", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-      });
-      const json = await res.json();
-      if (json.error) throw new Error(json.error.message ?? "RPC error");
-      return json.result;
-    },
-  });
-}
-
-// ─── Main fetch ───────────────────────────────────────────────────────────────
 export async function fetchAllPools(
   factoryAddress: string,
   chainId: number,
   knownTokens: Token[]
 ): Promise<PoolData[]> {
   try {
-    const provider = makeProvider();
+    const rpcUrl = chainId === 2201 
+      ? 'https://rpc.testnet.stable.xyz/' 
+      : 'https://rpc.testnet.arc.network';
+
+    const provider = new BrowserProvider({
+      request: async ({ method, params }: any) => {
+        const response = await fetch(rpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method,
+            params,
+          }),
+        });
+        const data = await response.json();
+        if (data.error) throw new Error(data.error.message);
+        return data.result;
+      },
+    });
+
     const factory = new Contract(factoryAddress, FACTORY_ABI, provider);
     const pairsLength = await factory.allPairsLength();
     const length = Number(pairsLength);
 
-    console.log(`[V2] Found ${length} pools on chain ${chainId}`);
+    console.log(`Found ${length} pools on chain ${chainId}`);
 
-    const pairAddresses: string[] = await Promise.all(
-      Array.from({ length }, (_, i) => factory.allPairs(i))
-    );
+    // Fetch all pair addresses
+    const pairAddresses: string[] = [];
+    for (let i = 0; i < length; i++) {
+      const pairAddress = await factory.allPairs(i);
+      pairAddresses.push(pairAddress);
+    }
 
+    // Fetch pool data for each pair
     const pools: PoolData[] = [];
-
+    
     for (const pairAddress of pairAddresses) {
       try {
-        const pair = new Contract(pairAddress, PAIR_ABI, provider);
+        const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
+        
+        // Get basic pair info
+        let token0Address: string;
+        let token1Address: string;
+        let reserves: any;
+        let totalSupply: bigint;
 
-        const [token0Address, token1Address, reserves, totalSupply] =
-          await Promise.all([
-            pair.token0(),
-            pair.token1(),
-            pair.getReserves(),
-            pair.totalSupply(),
+        try {
+          [token0Address, token1Address, reserves, totalSupply] = await Promise.all([
+            pairContract.token0(),
+            pairContract.token1(),
+            pairContract.getReserves(),
+            pairContract.totalSupply(),
           ]);
+        } catch (error) {
+          console.error(`Failed to fetch basic pair info for ${pairAddress}:`, error);
+          continue;
+        }
 
-        const token0 = new Contract(token0Address, ERC20_ABI, provider);
-        const token1 = new Contract(token1Address, ERC20_ABI, provider);
-        const shortAddr = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+        // Fetch token info with fallbacks
+        const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
+        const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
 
-        const [
-          token0Symbol,
-          token0Decimals,
-          token0Name,
-          token1Symbol,
-          token1Decimals,
-          token1Name,
-        ] = await Promise.all([
-          token0.symbol().catch(() => shortAddr(token0Address)),
-          token0.decimals().catch(() => 18),
-          token0.name().catch(() => `Token ${shortAddr(token0Address)}`),
-          token1.symbol().catch(() => shortAddr(token1Address)),
-          token1.decimals().catch(() => 18),
-          token1.name().catch(() => `Token ${shortAddr(token1Address)}`),
-        ]);
+        let token0Symbol = "UNKNOWN";
+        let token0Decimals = 18;
+        let token0Name = "Unknown Token";
+        let token1Symbol = "UNKNOWN";
+        let token1Decimals = 18;
+        let token1Name = "Unknown Token";
 
-        // Skip 1:1 wrap pairs — not real trading pairs
-        if (isWrappedTokenPair(token0Symbol, token1Symbol)) {
-          console.log(`[V2] Skipping wrap pair: ${token0Symbol}/${token1Symbol}`);
+        try {
+          token0Symbol = await token0Contract.symbol().catch(() => "UNKNOWN");
+        } catch (error) {
+          token0Symbol = "UNKNOWN";
+        }
+
+        try {
+          token0Decimals = await token0Contract.decimals().catch(() => 18);
+        } catch (error) {
+          token0Decimals = 18;
+        }
+
+        try {
+          token0Name = await token0Contract.name().catch(() => `Token ${token0Address.substring(0, 6)}`);
+        } catch (error) {
+          token0Name = `Token ${token0Address.substring(0, 6)}`;
+        }
+
+        try {
+          token1Symbol = await token1Contract.symbol().catch(() => "UNKNOWN");
+        } catch (error) {
+          token1Symbol = "UNKNOWN";
+        }
+
+        try {
+          token1Decimals = await token1Contract.decimals().catch(() => 18);
+        } catch (error) {
+          token1Decimals = 18;
+        }
+
+        try {
+          token1Name = await token1Contract.name().catch(() => `Token ${token1Address.substring(0, 6)}`);
+        } catch (error) {
+          token1Name = `Token ${token1Address.substring(0, 6)}`;
+        }
+
+        // Skip wrapped token pairs (wUSDC/USDC, wUSDT/gUSDT) - these are wrap tokens, not trading pairs
+        if (isWrappedTokenPair(token0Symbol, token1Symbol, chainId)) {
+          console.log(`Skipping wrapped token pair: ${token0Symbol}/${token1Symbol}`);
           continue;
         }
 
         const reserve0 = reserves[0];
         const reserve1 = reserves[1];
+
+        // Format reserves
         const reserve0Formatted = formatUnits(reserve0, Number(token0Decimals));
         const reserve1Formatted = formatUnits(reserve1, Number(token1Decimals));
 
+        // Calculate TVL in USD using chain-specific logic
         const tvlUSD = calculateTVL(
           token0Symbol,
           token1Symbol,
           parseFloat(reserve0Formatted),
           parseFloat(reserve1Formatted),
+          chainId
         );
 
         pools.push({
@@ -143,14 +185,14 @@ export async function fetchAllPools(
           token0: {
             address: token0Address,
             symbol: token0Symbol,
-            displaySymbol: getDisplaySymbol(token0Symbol),
+            displaySymbol: getDisplaySymbol(token0Symbol, chainId),
             decimals: Number(token0Decimals),
             name: token0Name,
           },
           token1: {
             address: token1Address,
             symbol: token1Symbol,
-            displaySymbol: getDisplaySymbol(token1Symbol),
+            displaySymbol: getDisplaySymbol(token1Symbol, chainId),
             decimals: Number(token1Decimals),
             name: token1Name,
           },
@@ -162,59 +204,74 @@ export async function fetchAllPools(
           totalSupply,
         });
 
-        console.log(`[V2] Loaded: ${token0Symbol}/${token1Symbol}  TVL=$${tvlUSD.toFixed(2)}`);
+        console.log(`Successfully loaded pool: ${token0Symbol}/${token1Symbol}`);
       } catch (error) {
-        console.error(`[V2] Failed to load pair ${pairAddress}:`, error);
+        console.error(`Failed to fetch data for pair ${pairAddress}:`, error);
+        // Continue to next pool instead of breaking
       }
     }
 
     return pools;
   } catch (error) {
-    console.error("[V2] Failed to fetch pools:", error);
+    console.error('Failed to fetch pools:', error);
     throw error;
   }
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
 function calculateTVL(
-  symbol0: string,
-  symbol1: string,
+  token0Symbol: string,
+  token1Symbol: string,
   reserve0: number,
   reserve1: number,
+  chainId: number
 ): number {
-  const is0 = isStable(symbol0);
-  const is1 = isStable(symbol1);
+  // All stable tokens are pegged to $1 USD
+  // wUSDT, gUSDT, USDT = $1 USD on Stable Testnet
+  // wUSDC, USDC = $1 USD on ARC Testnet
+  const stableTokens = chainId === 2201 
+    ? ['gUSDT', 'wUSDT', 'USDT']
+    : ['USDC', 'wUSDC'];
 
-  if (is0 && is1) return reserve0 + reserve1;
-  if (is0) return 2 * reserve0;
-  if (is1) return 2 * reserve1;
-  return 0;
+  const isToken0Stable = stableTokens.includes(token0Symbol);
+  const isToken1Stable = stableTokens.includes(token1Symbol);
+
+  if (isToken0Stable && isToken1Stable) {
+    // Both stable tokens = direct sum in USD (each token = $1)
+    return reserve0 + reserve1;
+  } else if (isToken0Stable) {
+    // Token0 is $1 stable, so TVL in USD = 2 * reserve0
+    return 2 * reserve0;
+  } else if (isToken1Stable) {
+    // Token1 is $1 stable, so TVL in USD = 2 * reserve1
+    return 2 * reserve1;
+  } else {
+    // Neither is stable - we can't calculate USD value without price data
+    return 0;
+  }
 }
 
-/**
- * 1:1 wrapped-token pairs that should be hidden (e.g. USDC/wUSDC).
- * Only relevant for ARC testnet now.
- */
-function isWrappedTokenPair(sym0: string, sym1: string): boolean {
-  const pairs: [string, string][] = [
-    ["usdc", "wusdc"],
-    ["wusdc", "usdc"],
-    ["usdt", "wusdt"],
-    ["wusdt", "usdt"],
-  ];
-  return pairs.some(
-    ([a, b]) =>
-      sym0.toLowerCase() === a && sym1.toLowerCase() === b,
+function isWrappedTokenPair(token0Symbol: string, token1Symbol: string, chainId: number): boolean {
+  // Wrapped tokens are not trading pairs, they're 1:1 wrappers
+  const wrappedPairs = chainId === 2201
+    ? [['gUSDT', 'wUSDT'], ['wUSDT', 'gUSDT']]
+    : [['USDC', 'wUSDC'], ['wUSDC', 'USDC']];
+  
+  return wrappedPairs.some(
+    ([t0, t1]) => token0Symbol === t0 && token1Symbol === t1
   );
 }
 
-function getDisplaySymbol(symbol: string): string {
-  if (symbol.toLowerCase() === "wusdc") return "USDC";
-  if (symbol.toLowerCase() === "wusdt") return "USDT";
+function getDisplaySymbol(symbol: string, chainId: number): string {
+  // Convert wrapped tokens to their unwrapped display names
+  if (chainId === 2201) {
+    if (symbol === 'wUSDT') return 'USDT';
+    if (symbol === 'gUSDT') return 'USDT';
+  } else {
+    if (symbol === 'wUSDC') return 'USDC';
+  }
   return symbol;
 }
 
 export function calculateTotalTVL(pools: PoolData[]): number {
-  return pools.reduce((sum, p) => sum + p.tvlUSD, 0);
+  return pools.reduce((sum, pool) => sum + pool.tvlUSD, 0);
 }
