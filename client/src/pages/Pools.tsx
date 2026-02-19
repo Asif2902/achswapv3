@@ -1,24 +1,59 @@
-import { useState, useEffect, useCallback, useRef } from "react";
-import { Card, CardContent } from "@/components/ui/card";
+import { useState, useEffect, useCallback } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { RefreshCw, Search, TrendingUp, Droplets, Layers, Clock } from "lucide-react";
 import { useChainId } from "wagmi";
-import { fetchAllPools, type PoolData } from "@/lib/pool-utils";
-import { fetchAllV3Pools, type V3PoolData } from "@/lib/v3-pool-utils";
+import { fetchAllPools, calculateTotalTVL, type PoolData } from "@/lib/pool-utils";
+import { fetchAllV3Pools, calculateV3TotalTVL, type V3PoolData } from "@/lib/v3-pool-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getTokensByChainId } from "@/data/tokens";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Cache helpers ──────────────────────────────────────────────────────────
+const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+}
+
+function readCache<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const entry: CacheEntry<T> = JSON.parse(raw);
+    if (Date.now() - entry.timestamp > CACHE_TTL_MS) return null;
+    return entry.data;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache<T>(key: string, data: T): void {
+  try {
+    const entry: CacheEntry<T> = { data, timestamp: Date.now() };
+    localStorage.setItem(key, JSON.stringify(entry));
+  } catch {
+    // quota exceeded or SSR — ignore
+  }
+}
+
+function cacheAge(key: string): number | null {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const entry: CacheEntry<unknown> = JSON.parse(raw);
+    return Date.now() - entry.timestamp;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Combined pool type ──────────────────────────────────────────────────────
 type PoolVersion = "v2" | "v3";
 
-/**
- * Display-only shape — contains NO BigInt fields.
- * This is what gets cached in localStorage so JSON serialization always works.
- */
 interface DisplayPool {
   key: string;
   version: PoolVersion;
@@ -30,193 +65,116 @@ interface DisplayPool {
   logo0: string;
   logo1: string;
   tvlUSD: number;
-  reserve0: string; // pre-formatted string, e.g. "100,000.0000"
+  reserve0: string;
   reserve1: string;
   fee?: string;
 }
 
-interface PoolCache {
-  pools: DisplayPool[];
-  timestamp: number;
-}
-
-// ─── Cache helpers ────────────────────────────────────────────────────────────
-// We cache DisplayPool[] directly — it contains only primitives (strings &
-// numbers) so JSON.stringify/parse work without any BigInt issues.
-
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-function cacheKey(chainId: number) {
-  return `display_pools_${chainId}`;
-}
-
-function readCache(chainId: number): PoolCache | null {
-  try {
-    const raw = localStorage.getItem(cacheKey(chainId));
-    if (!raw) return null;
-    const entry: PoolCache = JSON.parse(raw);
-    if (Date.now() - entry.timestamp > CACHE_TTL_MS) return null;
-    return entry;
-  } catch {
-    return null;
-  }
-}
-
-function writeCache(chainId: number, pools: DisplayPool[]): void {
-  try {
-    const entry: PoolCache = { pools, timestamp: Date.now() };
-    localStorage.setItem(cacheKey(chainId), JSON.stringify(entry));
-  } catch {
-    // storage quota exceeded — non-fatal
-  }
-}
-
-// ─── Normalisation helpers ────────────────────────────────────────────────────
-
-const FALLBACK_LOGO = "/img/logos/unknown-token.png";
-
-function fmtReserve(value: string): string {
-  const n = parseFloat(value);
-  if (Number.isNaN(n)) return "0";
-  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
-}
-
-function bestLogo(
-  tokens: ReturnType<typeof getTokensByChainId>,
-  ...symbols: string[]
-): string {
-  for (const sym of symbols) {
-    const found = tokens.find((t) => t.symbol === sym)?.logoURI;
-    if (found) return found;
-  }
-  return FALLBACK_LOGO;
-}
-
-function normaliseV2(
-  raw: PoolData[],
-  tokens: ReturnType<typeof getTokensByChainId>,
-): DisplayPool[] {
-  return raw.map((p) => ({
-    key: p.pairAddress,
-    version: "v2" as const,
-    address: p.pairAddress,
-    symbol0: p.token0.displaySymbol,
-    symbol1: p.token1.displaySymbol,
-    name0: p.token0.name || p.token0.displaySymbol,
-    name1: p.token1.name || p.token1.displaySymbol,
-    logo0: bestLogo(tokens, p.token0.symbol, p.token0.displaySymbol),
-    logo1: bestLogo(tokens, p.token1.symbol, p.token1.displaySymbol),
-    tvlUSD: p.tvlUSD,
-    reserve0: fmtReserve(p.reserve0Formatted),
-    reserve1: fmtReserve(p.reserve1Formatted),
-  }));
-}
-
-function normaliseV3(
-  raw: V3PoolData[],
-  tokens: ReturnType<typeof getTokensByChainId>,
-): DisplayPool[] {
-  return raw.map((p) => ({
-    key: p.poolAddress,
-    version: "v3" as const,
-    address: p.poolAddress,
-    symbol0: p.token0.symbol,
-    symbol1: p.token1.symbol,
-    name0: p.token0.name || p.token0.symbol,
-    name1: p.token1.name || p.token1.symbol,
-    logo0: bestLogo(tokens, p.token0.symbol),
-    logo1: bestLogo(tokens, p.token1.symbol),
-    tvlUSD: p.tvlUSD,
-    reserve0: fmtReserve(p.token0Formatted),
-    reserve1: fmtReserve(p.token1Formatted),
-    fee: p.feeLabel,
-  }));
-}
-
-function combine(v2: DisplayPool[], v3: DisplayPool[]): DisplayPool[] {
-  return [...v2, ...v3].sort((a, b) => b.tvlUSD - a.tvlUSD);
-}
-
-// ─── Component ───────────────────────────────────────────────────────────────
-
+// ─── Component ──────────────────────────────────────────────────────────────
 export default function Pools() {
-  const chainId = useChainId();
-
-  // Restore from cache synchronously on first render so there's no flicker.
-  const [pools, setPools] = useState<DisplayPool[]>(() => {
-    if (typeof window === "undefined" || !chainId) return [];
-    return readCache(chainId)?.pools ?? [];
-  });
-
-  const [cacheTimestamp, setCacheTimestamp] = useState<number | null>(() => {
-    if (typeof window === "undefined" || !chainId) return null;
-    return readCache(chainId)?.timestamp ?? null;
-  });
-
+  const [pools, setPools] = useState<DisplayPool[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [lastRefresh, setLastRefresh] = useState<number | null>(null);
   const [activeFilter, setActiveFilter] = useState<"all" | "v2" | "v3">("all");
 
-  // Prevent double-fetch on StrictMode double-invoke
-  const fetchingRef = useRef(false);
-
-  let contracts: ReturnType<typeof getContractsForChain> | null = null;
-  try { contracts = chainId ? getContractsForChain(chainId) : null; } catch { /* unknown chain */ }
+  const chainId = useChainId();
+  const contracts = chainId ? getContractsForChain(chainId) : null;
   const tokens = chainId ? getTokensByChainId(chainId) : [];
+
+  const cacheKeyV2 = `pools_v2_${chainId}`;
+  const cacheKeyV3 = `pools_v3_${chainId}`;
+
+  const getTokenLogo = useCallback(
+    (symbol: string) =>
+      tokens.find((t) => t.symbol === symbol)?.logoURI ?? "/img/logos/unknown-token.png",
+    [tokens]
+  );
+
+  const normalise = useCallback(
+    (v2: PoolData[], v3: V3PoolData[]): DisplayPool[] => {
+      const mapped2: DisplayPool[] = v2.map((p) => ({
+        key: p.pairAddress,
+        version: "v2" as const,
+        address: p.pairAddress,
+        symbol0: p.token0.displaySymbol,
+        symbol1: p.token1.displaySymbol,
+        name0: p.token0.name,
+        name1: p.token1.name,
+        logo0: getTokenLogo(p.token0.symbol) || getTokenLogo(p.token0.displaySymbol),
+        logo1: getTokenLogo(p.token1.symbol) || getTokenLogo(p.token1.displaySymbol),
+        tvlUSD: p.tvlUSD,
+        reserve0: parseFloat(p.reserve0Formatted).toLocaleString(undefined, {
+          maximumFractionDigits: 4,
+        }),
+        reserve1: parseFloat(p.reserve1Formatted).toLocaleString(undefined, {
+          maximumFractionDigits: 4,
+        }),
+      }));
+
+      const mapped3: DisplayPool[] = v3.map((p) => ({
+        key: p.poolAddress,
+        version: "v3" as const,
+        address: p.poolAddress,
+        symbol0: p.token0.symbol,
+        symbol1: p.token1.symbol,
+        name0: p.token0.name,
+        name1: p.token1.name,
+        logo0: getTokenLogo(p.token0.symbol),
+        logo1: getTokenLogo(p.token1.symbol),
+        tvlUSD: p.tvlUSD,
+        reserve0: parseFloat(p.token0Formatted).toLocaleString(undefined, {
+          maximumFractionDigits: 4,
+        }),
+        reserve1: parseFloat(p.token1Formatted).toLocaleString(undefined, {
+          maximumFractionDigits: 4,
+        }),
+        fee: p.feeLabel,
+      }));
+
+      return [...mapped2, ...mapped3].sort((a, b) => b.tvlUSD - a.tvlUSD);
+    },
+    [getTokenLogo]
+  );
 
   const loadPools = useCallback(
     async (forceRefresh = false) => {
-      if (!contracts || !chainId || fetchingRef.current) return;
-
-      // If cache is still fresh and not force-refreshing, nothing to do.
-      if (!forceRefresh) {
-        const cached = readCache(chainId);
-        if (cached) {
-          setPools(cached.pools);
-          setCacheTimestamp(cached.timestamp);
-          return;
-        }
-      }
-
-      fetchingRef.current = true;
+      if (!contracts || !chainId) return;
       setIsLoading(true);
 
       try {
-        // Fetch V2 and V3 fully in parallel — UI only updates once both are done.
-        const [rawV2, rawV3] = await Promise.all([
-          fetchAllPools(contracts.v2.factory, chainId, tokens),
-          fetchAllV3Pools(contracts.v3.factory, chainId, tokens),
-        ]);
+        // Try cache first (unless force refresh)
+        let v2Data: PoolData[] | null = forceRefresh ? null : readCache<PoolData[]>(cacheKeyV2);
+        let v3Data: V3PoolData[] | null = forceRefresh ? null : readCache<V3PoolData[]>(cacheKeyV3);
 
-        const display = combine(normaliseV2(rawV2, tokens), normaliseV3(rawV3, tokens));
+        const needsV2 = !v2Data;
+        const needsV3 = !v3Data;
 
-        writeCache(chainId, display);
-        setPools(display);
-        setCacheTimestamp(Date.now());
+        if (needsV2 || needsV3) {
+          // Fetch only what's missing in parallel
+          const [freshV2, freshV3] = await Promise.all([
+            needsV2 ? fetchAllPools(contracts.v2.factory, chainId, tokens) : Promise.resolve(v2Data!),
+            needsV3 ? fetchAllV3Pools(contracts.v3.factory, chainId, tokens) : Promise.resolve(v3Data!),
+          ]);
+
+          if (needsV2) { v2Data = freshV2; writeCache(cacheKeyV2, freshV2); }
+          if (needsV3) { v3Data = freshV3; writeCache(cacheKeyV3, freshV3); }
+        }
+
+        // Both fetches complete — update UI atomically
+        setPools(normalise(v2Data!, v3Data!));
+        setLastRefresh(Date.now());
       } catch (err) {
-        console.error("[Pools] Failed to load:", err);
+        console.error("Failed to load pools:", err);
       } finally {
         setIsLoading(false);
-        fetchingRef.current = false;
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [chainId],
+    [chainId, contracts, tokens, normalise, cacheKeyV2, cacheKeyV3]
   );
 
   useEffect(() => {
-    if (!chainId || !contracts) return;
-
-    // If we already have fresh cached pools, skip the network fetch entirely.
-    const cached = readCache(chainId);
-    if (cached) {
-      setPools(cached.pools);
-      setCacheTimestamp(cached.timestamp);
-      return;
-    }
-
-    loadPools();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (chainId && contracts) loadPools();
   }, [chainId]);
 
   // ── Derived data ──────────────────────────────────────────────────────────
@@ -235,6 +193,7 @@ export default function Pools() {
   const totalTVL = pools.reduce((s, p) => s + p.tvlUSD, 0);
   const v2Count = pools.filter((p) => p.version === "v2").length;
   const v3Count = pools.filter((p) => p.version === "v3").length;
+  const activePairs = pools.filter((p) => p.tvlUSD > 0).length;
 
   const fmt = (n: number) =>
     n >= 1_000_000
@@ -261,10 +220,10 @@ export default function Pools() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          {cacheTimestamp && (
+          {lastRefresh && (
             <span className="hidden sm:flex items-center gap-1 text-xs text-muted-foreground">
               <Clock className="h-3 w-3" />
-              {fmtAge(Date.now() - cacheTimestamp)}
+              {fmtAge(Date.now() - lastRefresh)}
             </span>
           )}
           <Button
@@ -470,11 +429,11 @@ export default function Pools() {
               Showing <span className="font-semibold text-foreground">{filtered.length}</span> of{" "}
               <span className="font-semibold text-foreground">{pools.length}</span> pools
             </span>
-            {cacheTimestamp && (
+            {lastRefresh && (
               <span className="flex items-center gap-1 text-xs text-muted-foreground">
                 <Clock className="h-3 w-3" />
                 Cached · refreshes in{" "}
-                {Math.max(0, Math.round((CACHE_TTL_MS - (Date.now() - cacheTimestamp)) / 60000))}m
+                {Math.max(0, Math.round((CACHE_TTL_MS - (Date.now() - lastRefresh)) / 60000))}m
               </span>
             )}
           </div>
