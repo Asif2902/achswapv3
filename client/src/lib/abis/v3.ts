@@ -72,6 +72,9 @@ export const V3_POOL_ABI = [
   "function tickSpacing() external view returns (int24)",
   "function liquidity() external view returns (uint128)",
   "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
+  // Fee growth globals — needed for accurate uncollected fee calculation
+  "function feeGrowthGlobal0X128() external view returns (uint256)",
+  "function feeGrowthGlobal1X128() external view returns (uint256)",
   "function observe(uint32[] calldata secondsAgos) external view returns (int56[] memory tickCumulatives, uint160[] memory secondsPerLiquidityCumulativeX128s)",
   "function initialize(uint160 sqrtPriceX96) external",
   "function ticks(int24 tick) external view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128, int56 tickCumulativeOutside, uint160 secondsPerLiquidityOutsideX128, uint32 secondsOutside, bool initialized)",
