@@ -452,7 +452,7 @@ export default function Pools() {
                     size="sm"
                     className="text-xs h-7 px-3 opacity-70 group-hover:opacity-100 transition-opacity"
                     onClick={() =>
-                      window.location.href = pool.version === "v3" ? "/add-liquidity-v3" : "/add-liquidity"
+                      window.location.href = pool.version === "v3" ? "/add-liquidity" : "/add-liquidity"
                     }
                   >
                     + Add
