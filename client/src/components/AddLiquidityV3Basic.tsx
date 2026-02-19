@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,7 +7,7 @@ import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
-import { Contract, BrowserProvider, parseUnits } from "ethers";
+import { Contract, BrowserProvider, parseUnits, formatUnits } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
@@ -34,6 +34,7 @@ import { AlertTriangle, Info, Shield, ExternalLink } from "lucide-react";
 const ERC20_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
   "function allowance(address owner, address spender) view returns (uint256)",
+  "function balanceOf(address account) view returns (uint256)",
 ];
 
 function getERC20Address(token: Token, chainId: number): string {
@@ -42,6 +43,16 @@ function getERC20Address(token: Token, chainId: number): string {
     return wrapped || token.address;
   }
   return token.address;
+}
+
+/** Format a raw BigInt balance to a compact human-readable string */
+function formatBalance(raw: bigint, decimals: number): string {
+  const full = parseFloat(formatUnits(raw, decimals));
+  if (full === 0) return "0";
+  if (full < 0.0001) return "<0.0001";
+  if (full >= 1_000_000) return `${(full / 1_000_000).toFixed(2)}M`;
+  if (full >= 1_000) return `${(full / 1_000).toFixed(2)}K`;
+  return full.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
 export function AddLiquidityV3Basic() {
@@ -55,8 +66,12 @@ export function AddLiquidityV3Basic() {
   const [selectedFee, setSelectedFee] = useState<number>(V3_FEE_TIERS.MEDIUM);
   const [isAdding, setIsAdding] = useState(false);
 
+  // ── Balances ───────────────────────────────────────────────────────────────
+  const [balanceA, setBalanceA] = useState<bigint | null>(null);
+  const [balanceB, setBalanceB] = useState<bigint | null>(null);
+  const [isFetchingBalances, setIsFetchingBalances] = useState(false);
+
   // ── Pool state – fetched once, passed down to PoolHealthChecker as props ──
-  // This is the single source of truth. The checker never re-fetches anything.
   const [poolAddress, setPoolAddress]         = useState<string | null>(null);
   const [poolExists, setPoolExists]           = useState(false);
   const [isCheckingPool, setIsCheckingPool]   = useState(false);
@@ -64,7 +79,6 @@ export function AddLiquidityV3Basic() {
   const [currentSqrtPriceX96, setCurrentSqrtPriceX96] = useState<bigint | null>(null);
   const [currentTick, setCurrentTick]         = useState<number | null>(null);
   const [activeLiquidity, setActiveLiquidity] = useState<bigint | null>(null);
-  // Sorted token symbols for the checker display
   const [token0Symbol, setToken0Symbol]       = useState<string>("");
   const [token1Symbol, setToken1Symbol]       = useState<string>("");
 
@@ -180,9 +194,52 @@ export function AddLiquidityV3Basic() {
   const needsWrapB = tokenB ? isNativeToken(tokenB.address) : false;
   const needsWrapping = needsWrapA || needsWrapB;
 
+  // ── Fetch balances ─────────────────────────────────────────────────────────
+  const fetchBalances = useCallback(async () => {
+    if (!address || !chainId || !window.ethereum) {
+      setBalanceA(null);
+      setBalanceB(null);
+      return;
+    }
+
+    setIsFetchingBalances(true);
+    try {
+      const provider = new BrowserProvider(window.ethereum);
+
+      const fetchTokenBalance = async (token: Token | null): Promise<bigint | null> => {
+        if (!token) return null;
+        try {
+          if (isNativeToken(token.address)) {
+            // Native token → use provider.getBalance
+            return await provider.getBalance(address);
+          }
+          const contract = new Contract(token.address, ERC20_ABI, provider);
+          return await contract.balanceOf(address);
+        } catch {
+          return null;
+        }
+      };
+
+      const [rawA, rawB] = await Promise.all([
+        fetchTokenBalance(tokenA),
+        fetchTokenBalance(tokenB),
+      ]);
+
+      setBalanceA(rawA);
+      setBalanceB(rawB);
+    } catch (err) {
+      console.error("Balance fetch error:", err);
+    } finally {
+      setIsFetchingBalances(false);
+    }
+  }, [address, chainId, tokenA, tokenB]);
+
+  // Re-fetch whenever wallet, chain, or selected tokens change
+  useEffect(() => {
+    fetchBalances();
+  }, [fetchBalances]);
+
   // ── Fetch pool state ───────────────────────────────────────────────────────
-  // Single canonical fetch – result is passed to PoolHealthChecker via props.
-  // We also fetch pool.liquidity() here so the checker can detect empty pools.
   const fetchPoolState = async () => {
     if (!tokenA || !tokenB || !contracts || !window.ethereum || !chainId) return;
 
@@ -198,7 +255,6 @@ export function AddLiquidityV3Basic() {
         { ...tokenB, address: erc20B }
       );
 
-      // Store sorted symbols for the checker
       setToken0Symbol(tok0.symbol);
       setToken1Symbol(tok1.symbol);
 
@@ -206,7 +262,6 @@ export function AddLiquidityV3Basic() {
       const ZERO = "0x0000000000000000000000000000000000000000";
 
       if (!addr || addr === ZERO) {
-        // Pool doesn't exist yet
         setPoolAddress(null);
         setPoolExists(false);
         setCurrentPrice(null);
@@ -220,8 +275,6 @@ export function AddLiquidityV3Basic() {
       setPoolExists(true);
 
       const pool = new Contract(addr, V3_POOL_ABI, provider);
-
-      // Fetch slot0 + liquidity in parallel
       const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()]);
 
       const sqrtPriceX96: bigint = slot0[0];
@@ -253,8 +306,7 @@ export function AddLiquidityV3Basic() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokenA, tokenB, selectedFee, contracts, chainId]);
 
-  // ── Expected price ratio (token1/token0 sorted) ────────────────────────────
-  // Passed to the checker for price-mismatch detection and pool initialisation.
+  // ── Expected price ratio ───────────────────────────────────────────────────
   const expectedPriceRatio = useMemo(() => {
     if (!tokenA || !tokenB || !amountA || !amountB || !chainId) return null;
     const a = parseFloat(amountA);
@@ -289,6 +341,17 @@ export function AddLiquidityV3Basic() {
     }
   }, [amountA, currentPrice, tokenA, tokenB, chainId]);
 
+  // ── "Max" helpers ──────────────────────────────────────────────────────────
+  const handleMaxA = () => {
+    if (balanceA === null || !tokenA) return;
+    setAmountA(formatUnits(balanceA, tokenA.decimals));
+  };
+
+  const handleMaxB = () => {
+    if (balanceB === null || !tokenB) return;
+    setAmountB(formatUnits(balanceB, tokenB.decimals));
+  };
+
   // ── Add liquidity ──────────────────────────────────────────────────────────
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !amountA || !amountB || !address || !contracts || !window.ethereum || !chainId) return;
@@ -322,7 +385,6 @@ export function AddLiquidityV3Basic() {
       if (tokenAIsNative) nativeAmount = parseAmount(amountA, tokenA.decimals);
       else if (tokenBIsNative) nativeAmount = parseAmount(amountB, tokenB.decimals);
 
-      // Create pool if it doesn't exist yet
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const existingPool = await factory.getPool(token0.address, token1.address, selectedFee);
       const ZERO = "0x0000000000000000000000000000000000000000";
@@ -407,8 +469,8 @@ export function AddLiquidityV3Basic() {
       setAmountA("");
       setAmountB("");
 
-      // Refresh pool state after successful add
-      await fetchPoolState();
+      // Refresh pool state and balances after successful add
+      await Promise.all([fetchPoolState(), fetchBalances()]);
 
       toast({
         title: "Liquidity added!",
@@ -444,13 +506,30 @@ export function AddLiquidityV3Basic() {
     return "Add V3 Liquidity (Safe Mode)";
   };
 
+  // ── Derived: is amountA over balance? ─────────────────────────────────────
+  const amountAExceedsBalance =
+    isConnected &&
+    balanceA !== null &&
+    tokenA !== null &&
+    amountA !== "" &&
+    parseFloat(amountA) > 0 &&
+    parseAmount(amountA, tokenA.decimals) > balanceA;
+
+  const amountBExceedsBalance =
+    isConnected &&
+    balanceB !== null &&
+    tokenB !== null &&
+    amountB !== "" &&
+    parseFloat(amountB) > 0 &&
+    parseAmount(amountB, tokenB.decimals) > balanceB;
+
   return (
     <div className="space-y-4">
       {/* Info Banner */}
       <div className="flex items-start gap-3 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
         <Shield className="h-5 w-5 text-blue-400 shrink-0 mt-0.5" />
         <div className="space-y-1">
-          <h3 className="font-semibold text-blue-400 text-sm">Basic Mode – Safe & Simple</h3>
+          <h3 className="font-semibold text-blue-400 text-sm">Basic Mode – Safe &amp; Simple</h3>
           <p className="text-xs text-slate-300">
             Your liquidity will be placed in a wide price range for safety. Recommended for beginners and provides
             protection against impermanent loss.
@@ -461,16 +540,42 @@ export function AddLiquidityV3Basic() {
       {/* Token Selection */}
       <Card className="bg-slate-900 border-slate-700">
         <CardContent className="p-6 space-y-4">
+
+          {/* ── Token A ── */}
           <div className="space-y-2">
-            <Label className="text-sm text-slate-400">Token A</Label>
+            {/* Label row: left = "Token A", right = balance */}
+            <div className="flex items-center justify-between">
+              <Label className="text-sm text-slate-400">Token A</Label>
+              {isConnected && tokenA && (
+                <button
+                  type="button"
+                  onClick={handleMaxA}
+                  className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+                  disabled={balanceA === null}
+                >
+                  {balanceA !== null
+                    ? `Balance: ${formatBalance(balanceA, tokenA.decimals)} ${tokenA.symbol}`
+                    : "Balance: —"}
+                </button>
+              )}
+            </div>
             <div className="flex gap-2">
-              <Input
-                type="number"
-                placeholder="0.00"
-                value={amountA}
-                onChange={(e) => setAmountA(e.target.value)}
-                className="flex-1 bg-slate-800 border-slate-600"
-              />
+              <div className="relative flex-1">
+                <Input
+                  type="number"
+                  placeholder="0.00"
+                  value={amountA}
+                  onChange={(e) => setAmountA(e.target.value)}
+                  className={`w-full bg-slate-800 border-slate-600 ${
+                    amountAExceedsBalance ? "border-red-500 focus-visible:ring-red-500" : ""
+                  }`}
+                />
+                {amountAExceedsBalance && (
+                  <p className="absolute -bottom-4 left-0 text-xs text-red-400">
+                    Exceeds balance
+                  </p>
+                )}
+              </div>
               <Button variant="outline" onClick={() => setShowTokenASelector(true)} className="min-w-[120px]">
                 {tokenA ? (
                   <div className="flex items-center gap-2">
@@ -484,17 +589,42 @@ export function AddLiquidityV3Basic() {
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label className="text-sm text-slate-400">Token B</Label>
+          {/* ── Token B ── */}
+          <div className="space-y-2 pt-2">
+            {/* Label row: left = "Token B", right = balance */}
+            <div className="flex items-center justify-between">
+              <Label className="text-sm text-slate-400">Token B</Label>
+              {isConnected && tokenB && (
+                <button
+                  type="button"
+                  onClick={handleMaxB}
+                  className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
+                  disabled={balanceB === null || (poolExists && !!currentPrice)}
+                >
+                  {balanceB !== null
+                    ? `Balance: ${formatBalance(balanceB, tokenB.decimals)} ${tokenB.symbol}`
+                    : "Balance: —"}
+                </button>
+              )}
+            </div>
             <div className="flex gap-2">
-              <Input
-                type="number"
-                placeholder="0.00"
-                value={amountB}
-                onChange={(e) => setAmountB(e.target.value)}
-                className="flex-1 bg-slate-800 border-slate-600"
-                disabled={poolExists && !!currentPrice}
-              />
+              <div className="relative flex-1">
+                <Input
+                  type="number"
+                  placeholder="0.00"
+                  value={amountB}
+                  onChange={(e) => setAmountB(e.target.value)}
+                  className={`w-full bg-slate-800 border-slate-600 ${
+                    amountBExceedsBalance ? "border-red-500 focus-visible:ring-red-500" : ""
+                  }`}
+                  disabled={poolExists && !!currentPrice}
+                />
+                {amountBExceedsBalance && (
+                  <p className="absolute -bottom-4 left-0 text-xs text-red-400">
+                    Exceeds balance
+                  </p>
+                )}
+              </div>
               <Button variant="outline" onClick={() => setShowTokenBSelector(true)} className="min-w-[120px]">
                 {tokenB ? (
                   <div className="flex items-center gap-2">
@@ -507,6 +637,7 @@ export function AddLiquidityV3Basic() {
               </Button>
             </div>
           </div>
+
         </CardContent>
       </Card>
 
@@ -530,9 +661,7 @@ export function AddLiquidityV3Basic() {
         </CardContent>
       </Card>
 
-      {/* Pool Health Checker ─────────────────────────────────────────────────
-          Receives pre-fetched pool state – no internal fetching, no address
-          resolution. Shows green OK, yellow warnings, or red errors + fixes.  */}
+      {/* Pool Health Checker */}
       {tokenA && tokenB && (
         <>
           {isCheckingPool ? (
@@ -574,8 +703,8 @@ export function AddLiquidityV3Basic() {
             isAdding ||
             parseFloat(amountA) <= 0 ||
             parseFloat(amountB) <= 0 ||
-            // Block on critical errors (broken price, uninitialized).
-            // Warn states (mismatch, no liquidity) still allow adding.
+            amountAExceedsBalance ||
+            amountBExceedsBalance ||
             poolHealth?.severity === "error"
           }
           className="w-full h-12 text-base font-semibold"
