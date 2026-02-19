@@ -44,22 +44,29 @@ type DepositMode = "dual" | "token0-only" | "token1-only" | "unknown";
 /**
  * Format a counterpart amount for display.
  * Uses full formatUnits precision to avoid rounding very small values to "0.000000".
- * Shows up to 8 significant decimal places for reasonable UX, but never loses precision
- * that would cause amount to display as zero.
  */
 function formatCounterpartAmount(raw: bigint, decimals: number): string {
-  const full = formatUnits(raw, decimals); // e.g. "0.000000000123456789"
+  const full = formatUnits(raw, decimals);
   const num = parseFloat(full);
-  if (num === 0 && raw > 0n) {
-    // Too small for float representation — return raw string so parseAmount can recover it
-    return full;
-  }
-  if (num !== 0 && Math.abs(num) < 0.00000001) {
-    // Very small but representable — show enough sig figs
-    return num.toPrecision(6);
-  }
-  // Normal range — 8 decimal places, strip trailing zeros
+  if (num === 0 && raw > 0n) return full;
+  if (num !== 0 && Math.abs(num) < 0.00000001) return num.toPrecision(6);
   return parseFloat(num.toFixed(8)).toString();
+}
+
+/**
+ * Format a pool reserve amount in a human-friendly compact form.
+ * e.g. 1_234_567.89 → "1.23M"  |  0.000123 → "0.000123"
+ */
+function formatPoolReserve(raw: bigint, decimals: number): string {
+  const full = formatUnits(raw, decimals);
+  const n = parseFloat(full);
+  if (n === 0) return "0";
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+  if (n >= 1_000_000)     return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000)         return `${(n / 1_000).toFixed(2)}K`;
+  if (n >= 1)             return n.toFixed(2);
+  if (n >= 0.0001)        return n.toFixed(6);
+  return n.toPrecision(3);
 }
 
 export function AddLiquidityV3Advanced() {
@@ -82,20 +89,23 @@ export function AddLiquidityV3Advanced() {
   const [currentSqrtPriceX96, setCurrentSqrtPriceX96] = useState<bigint | null>(null);
   const [currentTick, setCurrentTick] = useState<number | null>(null);
   const [poolLiquidity, setPoolLiquidity] = useState<bigint>(0n);
+  // ── Pool token reserves (human-readable alternative to raw liquidity) ──
+  const [poolToken0Reserve, setPoolToken0Reserve] = useState<bigint | null>(null);
+  const [poolToken1Reserve, setPoolToken1Reserve] = useState<bigint | null>(null);
+  const [poolAddress, setPoolAddress] = useState<string | null>(null);
   const [token0Symbol, setToken0Symbol] = useState("");
   const [token1Symbol, setToken1Symbol] = useState("");
+  const [token0Decimals, setToken0Decimals] = useState(18);
+  const [token1Decimals, setToken1Decimals] = useState(18);
   const [isAdding, setIsAdding] = useState(false);
   const [balanceA, setBalanceA] = useState<bigint | null>(null);
   const [balanceB, setBalanceB] = useState<bigint | null>(null);
   const [amountBIsAuto, setAmountBIsAuto] = useState(false);
 
-  // ─── Store raw bigint amounts calculated by V3 math so handleAddLiquidity
-  // can use them directly without re-parsing the (possibly-rounded) display string.
-  // Keyed to the current amountA value so they stay in sync.
   const [autoCalcAmounts, setAutoCalcAmounts] = useState<{
     amount0: bigint;
     amount1: bigint;
-    forAmountA: string; // the amountA these were calculated from
+    forAmountA: string;
   } | null>(null);
 
   const { address, isConnected } = useAccount();
@@ -120,13 +130,12 @@ export function AddLiquidityV3Advanced() {
     return { tok0, tok1, isToken0A };
   }, [tokenA, tokenB, chainId]);
 
-  // What the pool will accept given current price vs selected range
   const depositMode = useMemo((): DepositMode => {
     if (currentTick === null || !minTick || !maxTick) return "unknown";
     const tl = parseInt(minTick), tu = parseInt(maxTick);
     if (isNaN(tl) || isNaN(tu) || tl >= tu) return "unknown";
-    if (currentTick < tl) return "token0-only";   // price below range
-    if (currentTick >= tu) return "token1-only";  // price above range
+    if (currentTick < tl) return "token0-only";
+    if (currentTick >= tu) return "token1-only";
     return "dual";
   }, [currentTick, minTick, maxTick]);
 
@@ -195,6 +204,7 @@ export function AddLiquidityV3Advanced() {
     })();
   }, [address, tokenA, tokenB, chainId]);
 
+  // ── Fetch pool info + token reserves ─────────────────────────────────────
   useEffect(() => {
     if (!tokenA || !tokenB || !contracts || !window.ethereum || !chainId) return;
     (async () => {
@@ -203,28 +213,66 @@ export function AddLiquidityV3Advanced() {
         const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
         const s = getSortedTokens(); if (!s) return;
         const { tok0, tok1 } = s;
-        setToken0Symbol(tok0.symbol); setToken1Symbol(tok1.symbol);
+        setToken0Symbol(tok0.symbol);
+        setToken1Symbol(tok1.symbol);
+        setToken0Decimals(tok0.decimals);
+        setToken1Decimals(tok1.decimals);
+
         const poolAddr = await factory.getPool(tok0.address, tok1.address, selectedFee);
         const ZERO = "0x0000000000000000000000000000000000000000";
         if (!poolAddr || poolAddr === ZERO) {
-          setPoolExists(false); setCurrentPrice(null); setCurrentSqrtPriceX96(null); setCurrentTick(null); setPoolLiquidity(0n); return;
+          setPoolExists(false);
+          setCurrentPrice(null);
+          setCurrentSqrtPriceX96(null);
+          setCurrentTick(null);
+          setPoolLiquidity(0n);
+          setPoolAddress(null);
+          setPoolToken0Reserve(null);
+          setPoolToken1Reserve(null);
+          return;
         }
+
         setPoolExists(true);
+        setPoolAddress(poolAddr);
+
         const pool = new Contract(poolAddr, V3_POOL_ABI, provider);
         const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()]);
         const sqrtPX96: bigint = slot0[0];
         const tick = Number(slot0[1]);
         const price = sqrtPriceX96ToPrice(sqrtPX96, tok0.decimals, tok1.decimals);
-        setCurrentSqrtPriceX96(sqrtPX96); setCurrentPrice(price); setCurrentTick(tick); setPoolLiquidity(liq);
+        setCurrentSqrtPriceX96(sqrtPX96);
+        setCurrentPrice(price);
+        setCurrentTick(tick);
+        setPoolLiquidity(liq);
+
+        // ── Fetch actual token reserves held by the pool ──────────────────
+        try {
+          const tok0Contract = new Contract(tok0.address, ERC20_ABI, provider);
+          const tok1Contract = new Contract(tok1.address, ERC20_ABI, provider);
+          const [res0, res1] = await Promise.all([
+            tok0Contract.balanceOf(poolAddr),
+            tok1Contract.balanceOf(poolAddr),
+          ]);
+          setPoolToken0Reserve(res0 as bigint);
+          setPoolToken1Reserve(res1 as bigint);
+        } catch (resErr) {
+          console.warn("Could not fetch pool reserves:", resErr);
+          setPoolToken0Reserve(null);
+          setPoolToken1Reserve(null);
+        }
+
         if (!minPrice && !maxPrice) applyRangePresetValues("wide", price, tick, tok0 as any, tok1 as any);
-      } catch (err) { console.error("Pool check error:", err); setPoolExists(false); }
+      } catch (err) {
+        console.error("Pool check error:", err);
+        setPoolExists(false);
+        setPoolToken0Reserve(null);
+        setPoolToken1Reserve(null);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokenA, tokenB, selectedFee, contracts, chainId]);
 
-  // Auto-calculate amountB using V3 liquidity math.
-  // IMPORTANT: also stores the raw bigint amounts in `autoCalcAmounts` so
-  // handleAddLiquidity can use them without re-parsing the display string.
+  // ── Auto-calculate amountB ────────────────────────────────────────────────
   useEffect(() => {
     if (!amountA || !tokenA || !tokenB || !chainId) return;
     const aFloat = parseFloat(amountA);
@@ -237,17 +285,14 @@ export function AddLiquidityV3Advanced() {
     const tu = maxTick ? parseInt(maxTick) : null;
     const validTicks = tl !== null && tu !== null && !isNaN(tl) && !isNaN(tu) && tl < tu;
 
-    // Out-of-range: single-sided
     if (validTicks && currentTick !== null) {
       if (currentTick < tl!) {
-        // price below range → only token0
         const amount0 = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
         setAmountB("0"); setAmountBIsAuto(true);
         setAutoCalcAmounts({ amount0: isToken0A ? amount0 : 0n, amount1: isToken0A ? 0n : amount0, forAmountA: amountA });
         return;
       }
       if (currentTick >= tu!) {
-        // price above range → only token1
         const amount1 = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
         setAmountB("0"); setAmountBIsAuto(true);
         setAutoCalcAmounts({ amount0: isToken0A ? 0n : amount1, amount1: isToken0A ? amount1 : 0n, forAmountA: amountA });
@@ -255,7 +300,6 @@ export function AddLiquidityV3Advanced() {
       }
     }
 
-    // In-range: use corrected V3 math
     if (validTicks && currentSqrtPriceX96) {
       try {
         const inputBig = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
@@ -264,20 +308,13 @@ export function AddLiquidityV3Advanced() {
         );
         const counterpart = isToken0A ? amount1 : amount0;
         const counterpartDec = isToken0A ? tok1.decimals : tok0.decimals;
-
-        // Store raw bigints so tx can use them directly (avoids display-rounding loss)
         setAutoCalcAmounts({ amount0, amount1, forAmountA: amountA });
-
         if (counterpart > 0n) {
-          // Use formatCounterpartAmount to preserve precision in display
           setAmountB(formatCounterpartAmount(counterpart, counterpartDec));
           setAmountBIsAuto(true);
           return;
         } else {
-          // Math returned 0 for counterpart (e.g. price exactly at boundary)
-          setAmountB("0");
-          setAmountBIsAuto(true);
-          return;
+          setAmountB("0"); setAmountBIsAuto(true); return;
         }
       } catch (err) {
         console.warn("V3 math fallback:", err);
@@ -285,16 +322,18 @@ export function AddLiquidityV3Advanced() {
       }
     }
 
-    // Fallback: spot price
     if (currentPrice) {
-      const calc = isToken0A ? aFloat * currentPrice : aFloat / currentPrice;
+      const calc = (() => {
+        const s2 = getSortedTokens();
+        if (!s2) return aFloat * currentPrice;
+        return s2.isToken0A ? aFloat * currentPrice : aFloat / currentPrice;
+      })();
       setAmountB(calc.toFixed(8)); setAmountBIsAuto(true);
-      setAutoCalcAmounts(null); // can't store precise bigints for this path
+      setAutoCalcAmounts(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amountA, minTick, maxTick, currentSqrtPriceX96, currentPrice, currentTick, tokenA, tokenB, chainId]);
 
-  // One-way price<->tick handlers — no feedback loops
   const handleMinPriceChange = (v: string) => { setMinPrice(v); const p = parseFloat(v); if (isNaN(p) || p <= 0) return; const s = getSortedTokens(); if (!s) return; setMinTick(getNearestUsableTick(priceToTick(p, s.tok0.decimals, s.tok1.decimals), getTickSpacing(selectedFee)).toString()); };
   const handleMaxPriceChange = (v: string) => { setMaxPrice(v); const p = parseFloat(v); if (isNaN(p) || p <= 0) return; const s = getSortedTokens(); if (!s) return; setMaxTick(getNearestUsableTick(priceToTick(p, s.tok0.decimals, s.tok1.decimals), getTickSpacing(selectedFee)).toString()); };
   const handleMinTickChange  = (v: string) => { setMinTick(v); const t = parseInt(v); if (isNaN(t)) return; const s = getSortedTokens(); if (!s) return; setMinPrice(tickToPrice(t, s.tok0.decimals, s.tok1.decimals).toFixed(6)); };
@@ -305,7 +344,6 @@ export function AddLiquidityV3Advanced() {
     if (preset === "full") {
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
       setMinTick(tickLower.toString()); setMaxTick(tickUpper.toString());
-      // Use tick→price (not price→tick) so the displayed prices exactly match the ticks
       setMinPrice(tickToPrice(tickLower, tok0.decimals, tok1.decimals).toFixed(10));
       setMaxPrice(tickToPrice(tickUpper, tok0.decimals, tok1.decimals).toFixed(10));
     } else if (preset === "wide") {
@@ -317,7 +355,6 @@ export function AddLiquidityV3Advanced() {
       const lp = price * 0.9, up = price * 1.1;
       let tl = getNearestUsableTick(priceToTick(lp, tok0.decimals, tok1.decimals), ts);
       let tu = getNearestUsableTick(priceToTick(up, tok0.decimals, tok1.decimals), ts);
-      // Guard: if spacing too large for ±10%, force 1-spacing separation
       if (tl >= tu) { const c = getNearestUsableTick(tick, ts); tl = c - ts; tu = c + ts; }
       setMinTick(tl.toString()); setMaxTick(tu.toString());
       setMinPrice(tickToPrice(tl, tok0.decimals, tok1.decimals).toFixed(6));
@@ -371,42 +408,24 @@ export function AddLiquidityV3Advanced() {
         toast({ title: "Invalid tick range", description: `Ticks must differ by at least ${ts}`, variant: "destructive" }); return;
       }
 
-      // ─── Compute amounts ────────────────────────────────────────────────────
-      //
-      // PREFERRED PATH: if amountB was auto-calculated from V3 math AND the
-      // autoCalcAmounts are still in sync with the current amountA, use the
-      // stored bigints directly.  This avoids re-parsing the display string which
-      // may have been rounded (e.g. "0.000000" for a very small counterpart).
-      //
-      // FALLBACK: re-compute from V3 math fresh at tx time.
-      // LAST RESORT: parse the display strings (manual entry / spot-price fallback).
-      //
       let amount0Desired: bigint, amount1Desired: bigint;
 
       if (depositMode === "token0-only") {
-        // Only token0; token1 side must be 0
         amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
         amount1Desired = 0n;
-
       } else if (depositMode === "token1-only") {
-        // Only token1; token0 side must be 0
         amount0Desired = 0n;
         amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
-
       } else {
-        // Dual mode — try to get precision-safe amounts
-
         const useStoredAmounts =
           amountBIsAuto &&
           autoCalcAmounts !== null &&
           autoCalcAmounts.forAmountA === amountA;
 
         if (useStoredAmounts && autoCalcAmounts) {
-          // Best path: use the exact bigints from the last auto-calc run
           amount0Desired = autoCalcAmounts.amount0;
           amount1Desired = autoCalcAmounts.amount1;
         } else if (currentSqrtPriceX96 && ticksValid) {
-          // Re-compute fresh V3 math (handles cases where state drifted)
           try {
             const inputBig = parseAmount(amountA, isToken0A ? token0.decimals : token1.decimals);
             const { amount0, amount1 } = calculateAmountsForLiquidity(
@@ -421,13 +440,11 @@ export function AddLiquidityV3Advanced() {
             amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
           }
         } else {
-          // Manual entry or spot-price fallback — parse display strings
           amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
           amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
         }
       }
 
-      // Guard: if both desired amounts are 0 something went wrong
       if (amount0Desired === 0n && amount1Desired === 0n) {
         toast({ title: "Amount error", description: "Could not compute valid token amounts. Please enter amounts manually.", variant: "destructive" });
         return;
@@ -461,17 +478,6 @@ export function AddLiquidityV3Advanced() {
         if (await c.allowance(address, pmAddr) < amount1Desired) await (await c.approve(pmAddr, amount1Desired)).wait();
       }
 
-      // ─── Minimums MUST be 0n ────────────────────────────────────────────────
-      //
-      // The NonfungiblePositionManager always takes AT MOST the desired amounts,
-      // adjusting one side down to match the exact pool ratio.  Any non-zero
-      // minimum derived from off-chain math will trigger "Price slippage check"
-      // whenever our computed ratio differs even slightly from the on-chain ratio.
-      // This is the root cause of all "Price slippage check" failures for narrow,
-      // at-current, and full-range positions.
-      //
-      // The desired amounts already cap the maximum spend — 0n minimums are safe.
-      //
       const amount0Min = 0n;
       const amount1Min = 0n;
       const deadline   = Math.floor(Date.now() / 1000) + 1200;
@@ -522,6 +528,14 @@ export function AddLiquidityV3Advanced() {
     if (depositMode === "token1-only") return `Deposit ${token1Symbol || tokenB?.symbol} Only (Price Above Range)`;
     return "Add V3 Liquidity (Advanced)";
   };
+
+  // ── Pool reserves display string ─────────────────────────────────────────
+  const poolReservesLabel = useMemo(() => {
+    if (poolToken0Reserve === null || poolToken1Reserve === null) return null;
+    const r0 = formatPoolReserve(poolToken0Reserve, token0Decimals);
+    const r1 = formatPoolReserve(poolToken1Reserve, token1Decimals);
+    return `${r0} ${token0Symbol} / ${r1} ${token1Symbol}`;
+  }, [poolToken0Reserve, poolToken1Reserve, token0Decimals, token1Decimals, token0Symbol, token1Symbol]);
 
   return (
     <div className="space-y-4">
@@ -574,9 +588,30 @@ export function AddLiquidityV3Advanced() {
       <Card className="bg-slate-900 border-slate-700">
         <CardContent className="p-6 space-y-3">
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2"><Label className="text-sm text-slate-400">Fee Tier</Label><Info className="h-4 w-4 text-slate-500" /></div>
-            {poolExists && <div className="flex items-center gap-2 text-xs text-slate-400"><BarChart3 className="h-3 w-3" /><span>Pool liquidity: {formatAmount(poolLiquidity, 18)}</span></div>}
+            <div className="flex items-center gap-2">
+              <Label className="text-sm text-slate-400">Fee Tier</Label>
+              <Info className="h-4 w-4 text-slate-500" />
+            </div>
+
+            {/* ── Pool reserves display ── */}
+            {poolExists && (
+              <div className="text-right">
+                {poolReservesLabel ? (
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <BarChart3 className="h-3 w-3 text-slate-500" />
+                    <span className="text-slate-400">Pool reserves:</span>
+                    <span className="font-mono text-slate-200 font-medium">{poolReservesLabel}</span>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1.5 text-xs text-slate-500">
+                    <BarChart3 className="h-3 w-3" />
+                    <span>Pool exists</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
+
           <div className="flex gap-2 flex-wrap">
             {feeOptions.map((opt) => (
               <Button key={opt.value} variant={selectedFee === opt.value ? "default" : "outline"} onClick={() => setSelectedFee(opt.value)} title={opt.description} className="flex-1 min-w-[72px] flex-col h-auto py-2">
@@ -609,10 +644,10 @@ export function AddLiquidityV3Advanced() {
               <Label className="text-xs text-slate-500">Quick Range Presets</Label>
               <div className="grid grid-cols-4 gap-2">
                 {([
-                  { key: "full",    label: "Full Range",  Icon: Layers,    tip: "Min/max ticks" },
-                  { key: "wide",    label: "Wide ±50%",   Icon: TrendingUp, tip: "0.5x–2x price" },
-                  { key: "narrow",  label: "Narrow ±10%", Icon: Target,    tip: "90%–110%" },
-                  { key: "current", label: "At Current",  Icon: Activity,  tip: `${getTickSpacing(selectedFee)}-tick range` },
+                  { key: "full",    label: "Full Range",  Icon: Layers,     tip: "Min/max ticks" },
+                  { key: "wide",    label: "Wide ±50%",   Icon: TrendingUp,  tip: "0.5x–2x price" },
+                  { key: "narrow",  label: "Narrow ±10%", Icon: Target,     tip: "90%–110%" },
+                  { key: "current", label: "At Current",  Icon: Activity,   tip: `${getTickSpacing(selectedFee)}-tick range` },
                 ] as const).map(({ key, label, Icon, tip }) => (
                   <Button key={key} variant="outline" size="sm" title={tip} onClick={() => applyRangePreset(key as any)} className="flex flex-col h-auto py-2 gap-1">
                     <Icon className="h-3 w-3" /><span className="text-xs">{label}</span>
