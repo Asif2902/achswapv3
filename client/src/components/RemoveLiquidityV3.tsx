@@ -15,6 +15,12 @@ const ERC20_ABI = [
   "function decimals() view returns (uint8)",
 ];
 
+// uint128 max — used as a sentinel for "collect everything"
+const MAX_UINT128 = 2n ** 128n - 1n;
+
+// uint256 wrap-around modulus for fee subtraction
+const Q128 = 2n ** 128n;
+
 interface V3Position {
   tokenId: bigint;
   token0Address: string;
@@ -27,11 +33,74 @@ interface V3Position {
   liquidity: bigint;
   tickLower: number;
   tickUpper: number;
+  // tokensOwed from the NFT contract (already snapshotted fees)
   tokensOwed0: bigint;
   tokensOwed1: bigint;
-  // Calculated actual token amounts from liquidity
+  // Uncollected fees calculated from feeGrowth (the accurate number)
+  unclaimedFees0: bigint;
+  unclaimedFees1: bigint;
+  // Calculated actual token amounts from liquidity math
   amount0: bigint;
   amount1: bigint;
+}
+
+/**
+ * Calculate feeGrowthInside for a tick range given the pool's global fee growth
+ * and each boundary tick's feeGrowthOutside values.
+ *
+ * Uniswap V3 spec (section 6.3):
+ *   feeGrowthBelow(i) = feeGrowthOutside(i)              if currentTick >= i
+ *                     = feeGrowthGlobal − feeGrowthOutside(i)  otherwise
+ *
+ *   feeGrowthAbove(i) = feeGrowthOutside(i)              if currentTick < i
+ *                     = feeGrowthGlobal − feeGrowthOutside(i)  otherwise
+ *
+ *   feeGrowthInside = feeGrowthGlobal − feeGrowthBelow(lower) − feeGrowthAbove(upper)
+ *
+ * All arithmetic is done in uint256 with intentional overflow (mod 2^256).
+ * We emulate this in BigInt by masking to 256 bits after every subtraction.
+ */
+const MASK256 = (1n << 256n) - 1n;
+
+function subU256(a: bigint, b: bigint): bigint {
+  return ((a - b) & MASK256);
+}
+
+function calculateFeeGrowthInside(
+  feeGrowthGlobal: bigint,
+  feeGrowthOutsideLower: bigint,
+  feeGrowthOutsideUpper: bigint,
+  currentTick: number,
+  tickLower: number,
+  tickUpper: number,
+): bigint {
+  const feeGrowthBelow =
+    currentTick >= tickLower
+      ? feeGrowthOutsideLower
+      : subU256(feeGrowthGlobal, feeGrowthOutsideLower);
+
+  const feeGrowthAbove =
+    currentTick < tickUpper
+      ? feeGrowthOutsideUpper
+      : subU256(feeGrowthGlobal, feeGrowthOutsideUpper);
+
+  return subU256(subU256(feeGrowthGlobal, feeGrowthBelow), feeGrowthAbove);
+}
+
+/**
+ * tokens owed = tokensOwedSnapshot + floor(liquidity × ΔfeeGrowthInside / 2^128)
+ *
+ * ΔfeeGrowthInside is computed mod 2^256 (same as the Solidity contract).
+ */
+function calculateUnclaimedFees(
+  liquidity: bigint,
+  feeGrowthInsideCurrent: bigint,
+  feeGrowthInsideLast: bigint,
+  tokensOwedSnapshot: bigint,
+): bigint {
+  const delta = subU256(feeGrowthInsideCurrent, feeGrowthInsideLast);
+  const earned = (liquidity * delta) / Q128;
+  return tokensOwedSnapshot + earned;
 }
 
 export function RemoveLiquidityV3() {
@@ -47,7 +116,9 @@ export function RemoveLiquidityV3() {
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
 
-  // Load user's V3 positions with fee information
+  // ─────────────────────────────────────────────────────────────────────────
+  // Load user's V3 positions with accurate fee & liquidity information
+  // ─────────────────────────────────────────────────────────────────────────
   const loadPositions = async () => {
     if (!address || !contracts || !window.ethereum) return;
 
@@ -68,63 +139,134 @@ export function RemoveLiquidityV3() {
           const tokenId = await positionManager.tokenOfOwnerByIndex(address, i);
           const position = await positionManager.positions(tokenId);
 
-          // position returns: nonce, operator, token0, token1, fee, tickLower, tickUpper, liquidity, feeGrowthInside0LastX128, feeGrowthInside1LastX128, tokensOwed0, tokensOwed1
+          // positions() tuple:
+          // [0] nonce  [1] operator  [2] token0  [3] token1  [4] fee
+          // [5] tickLower  [6] tickUpper  [7] liquidity
+          // [8] feeGrowthInside0LastX128  [9] feeGrowthInside1LastX128
+          // [10] tokensOwed0  [11] tokensOwed1
           const token0Address = position[2];
           const token1Address = position[3];
           const fee = Number(position[4]);
           const tickLower = Number(position[5]);
           const tickUpper = Number(position[6]);
           const liquidity = position[7];
+          const feeGrowthInside0LastX128 = position[8];
+          const feeGrowthInside1LastX128 = position[9];
           const tokensOwed0 = position[10];
           const tokensOwed1 = position[11];
 
-          // Get token symbols and decimals
+          // Token metadata
           const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
           const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
 
-          const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = await Promise.all([
-            token0Contract.symbol(),
-            token0Contract.decimals(),
-            token1Contract.symbol(),
-            token1Contract.decimals(),
-          ]);
+          const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
+            await Promise.all([
+              token0Contract.symbol(),
+              token0Contract.decimals(),
+              token1Contract.symbol(),
+              token1Contract.decimals(),
+            ]);
 
-          // Get pool address and current price
+          // Default values
           let amount0 = 0n;
           let amount1 = 0n;
+          let unclaimedFees0 = tokensOwed0;
+          let unclaimedFees1 = tokensOwed1;
 
           try {
             const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
-            
-            // Sort tokens for pool lookup (Uniswap V3 requires token0 < token1 by address)
-            const [tokenA, tokenB] = token0Address.toLowerCase() < token1Address.toLowerCase()
-              ? [token0Address, token1Address]
-              : [token1Address, token0Address];
-            
+
+            // Sort tokens for pool lookup (Uniswap V3: token0 < token1 by address)
+            const [tokenA, tokenB] =
+              token0Address.toLowerCase() < token1Address.toLowerCase()
+                ? [token0Address, token1Address]
+                : [token1Address, token0Address];
+
             const poolAddress = await factory.getPool(tokenA, tokenB, fee);
 
-            if (poolAddress && poolAddress !== '0x0000000000000000000000000000000000000000') {
+            if (
+              poolAddress &&
+              poolAddress !== "0x0000000000000000000000000000000000000000"
+            ) {
               const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
-              const slot0 = await pool.slot0();
-              let currentSqrtPriceX96 = slot0[0];
-              
-              // If pool not initialized (sqrtPriceX96 = 0), use a default or skip
+
+              // Fetch everything we need in one round-trip
+              const [
+                slot0,
+                feeGrowthGlobal0X128,
+                feeGrowthGlobal1X128,
+                tickLowerData,
+                tickUpperData,
+              ] = await Promise.all([
+                pool.slot0(),
+                pool.feeGrowthGlobal0X128(),
+                pool.feeGrowthGlobal1X128(),
+                pool.ticks(tickLower),
+                pool.ticks(tickUpper),
+              ]);
+
+              let currentSqrtPriceX96: bigint = slot0[0];
+              const currentTick: number = Number(slot0[1]);
+
               if (currentSqrtPriceX96 === 0n) {
-                console.warn("Pool not initialized, using default sqrtPriceX96");
-                // Use a default price of 1:1 (sqrtPriceX96 = 2^96)
+                // Pool not initialised — use 1:1 as a safe default
                 currentSqrtPriceX96 = 2n ** 96n;
               }
 
-              // Calculate actual token amounts from liquidity using Uniswap V3 math
+              // ticks() returns:
+              // [0] liquidityGross  [1] liquidityNet
+              // [2] feeGrowthOutside0X128  [3] feeGrowthOutside1X128
+              // [4..7] other fields we don't need here
+              const feeGrowthOutsideLower0: bigint = tickLowerData[2];
+              const feeGrowthOutsideLower1: bigint = tickLowerData[3];
+              const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
+              const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
+
+              // ── Accurate uncollected fee calculation ──────────────────────
+              // Only positions with liquidity > 0 can accumulate fees.
+              if (liquidity > 0n) {
+                const feeGrowthInside0 = calculateFeeGrowthInside(
+                  feeGrowthGlobal0X128,
+                  feeGrowthOutsideLower0,
+                  feeGrowthOutsideUpper0,
+                  currentTick,
+                  tickLower,
+                  tickUpper,
+                );
+
+                const feeGrowthInside1 = calculateFeeGrowthInside(
+                  feeGrowthGlobal1X128,
+                  feeGrowthOutsideLower1,
+                  feeGrowthOutsideUpper1,
+                  currentTick,
+                  tickLower,
+                  tickUpper,
+                );
+
+                unclaimedFees0 = calculateUnclaimedFees(
+                  liquidity,
+                  feeGrowthInside0,
+                  feeGrowthInside0LastX128,
+                  tokensOwed0,
+                );
+
+                unclaimedFees1 = calculateUnclaimedFees(
+                  liquidity,
+                  feeGrowthInside1,
+                  feeGrowthInside1LastX128,
+                  tokensOwed1,
+                );
+              }
+
+              // ── Liquidity → token amounts ─────────────────────────────────
               const tokenAmounts = getTokensFromLiquidity(
                 liquidity,
                 currentSqrtPriceX96,
                 tickLower,
-                tickUpper
+                tickUpper,
               );
-              
-              // The pool stores token0/token1 in sorted order, but position might have them reversed
-              // We need to swap amounts if token order is reversed
+
+              // The pool stores tokens in sorted order; position may have them reversed
               if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
                 amount0 = tokenAmounts.amount1;
                 amount1 = tokenAmounts.amount0;
@@ -137,7 +279,6 @@ export function RemoveLiquidityV3() {
             }
           } catch (poolError) {
             console.error("Error fetching pool data:", poolError);
-            // If we can't get pool data, use 0 for amounts
           }
 
           userPositions.push({
@@ -154,6 +295,8 @@ export function RemoveLiquidityV3() {
             tickUpper,
             tokensOwed0,
             tokensOwed1,
+            unclaimedFees0,
+            unclaimedFees1,
             amount0,
             amount1,
           });
@@ -183,7 +326,9 @@ export function RemoveLiquidityV3() {
     }
   };
 
+  // ─────────────────────────────────────────────────────────────────────────
   // Collect fees without removing liquidity
+  // ─────────────────────────────────────────────────────────────────────────
   const handleCollectFees = async () => {
     if (!selectedPosition || !address || !contracts || !window.ethereum) return;
 
@@ -203,21 +348,19 @@ export function RemoveLiquidityV3() {
         description: "Claiming your trading fees",
       });
 
-      // Collect all available fees
       const collectParams = {
         tokenId: selectedPosition.tokenId,
         recipient: address,
-        amount0Max: 2n ** 128n - 1n, // Max uint128
-        amount1Max: 2n ** 128n - 1n,
+        amount0Max: MAX_UINT128,
+        amount1Max: MAX_UINT128,
       };
 
       const collectTx = await positionManager.collect(collectParams);
       const receipt = await collectTx.wait();
 
-      // Parse the Collect event to get amounts
       let amount0Collected = 0n;
       let amount1Collected = 0n;
-      
+
       for (const log of receipt.logs) {
         try {
           const parsed = positionManager.interface.parseLog({
@@ -233,7 +376,6 @@ export function RemoveLiquidityV3() {
         }
       }
 
-      // Reload positions
       await loadPositions();
 
       const formatted0 = formatAmount(amount0Collected, selectedPosition.token0Decimals);
@@ -243,12 +385,17 @@ export function RemoveLiquidityV3() {
         title: "Fees collected!",
         description: (
           <div className="flex flex-col gap-1">
-            <span>Collected: {formatted0} {selectedPosition.token0Symbol} + {formatted1} {selectedPosition.token1Symbol}</span>
+            <span>
+              Collected: {formatted0} {selectedPosition.token0Symbol} +{" "}
+              {formatted1} {selectedPosition.token1Symbol}
+            </span>
             <Button
               size="sm"
               variant="ghost"
               className="h-6 px-2 w-fit"
-              onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, '_blank')}
+              onClick={() =>
+                window.open(`${contracts.explorer}${receipt.hash}`, "_blank")
+              }
             >
               <ExternalLink className="h-3 w-3 mr-1" /> View Transaction
             </Button>
@@ -273,6 +420,9 @@ export function RemoveLiquidityV3() {
     }
   }, [isConnected, address, chainId]);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Remove all liquidity (decreaseLiquidity → collect → burn) via multicall
+  // ─────────────────────────────────────────────────────────────────────────
   const handleRemove = async () => {
     if (!selectedPosition || !address || !contracts || !window.ethereum) return;
 
@@ -289,43 +439,44 @@ export function RemoveLiquidityV3() {
 
       toast({
         title: "Removing liquidity...",
-        description: "Decreasing liquidity, collecting tokens, and burning NFT in one transaction",
+        description:
+          "Decreasing liquidity, collecting tokens, and burning NFT in one transaction",
       });
 
-      // Prepare the calls for multicall
-      // Order matters: decreaseLiquidity first, then collect, then burn
-      // This ensures we get the correct token amounts before collecting
-      
-      // decreaseLiquidity call
-      const decreaseData = positionManager.interface.encodeFunctionData("decreaseLiquidity", [{
-        tokenId: selectedPosition.tokenId,
-        liquidity: selectedPosition.liquidity,
-        amount0Min: 0n,
-        amount1Min: 0n,
-        deadline: Math.floor(Date.now() / 1000) + 1200,
-      }]);
+      const decreaseData = positionManager.interface.encodeFunctionData(
+        "decreaseLiquidity",
+        [
+          {
+            tokenId: selectedPosition.tokenId,
+            liquidity: selectedPosition.liquidity,
+            amount0Min: 0n,
+            amount1Min: 0n,
+            deadline: Math.floor(Date.now() / 1000) + 1200,
+          },
+        ]
+      );
 
-      // collect call - collect both liquidity tokens and any pending fees
-      const collectData = positionManager.interface.encodeFunctionData("collect", [{
-        tokenId: selectedPosition.tokenId,
-        recipient: address,
-        amount0Max: 2n ** 128n - 1n,
-        amount1Max: 2n ** 128n - 1n,
-      }]);
+      const collectData = positionManager.interface.encodeFunctionData("collect", [
+        {
+          tokenId: selectedPosition.tokenId,
+          recipient: address,
+          amount0Max: MAX_UINT128,
+          amount1Max: MAX_UINT128,
+        },
+      ]);
 
-      // burn call - close and delete the position NFT
-      const burnData = positionManager.interface.encodeFunctionData("burn", [selectedPosition.tokenId]);
+      const burnData = positionManager.interface.encodeFunctionData("burn", [
+        selectedPosition.tokenId,
+      ]);
 
-      // Execute all calls in a single transaction using multicall
       const multicallTx = await positionManager.multicall([
         decreaseData,
         collectData,
-        burnData
+        burnData,
       ]);
 
       const receipt = await multicallTx.wait();
 
-      // Parse the receipts to get amounts
       let amount0Collected = 0n;
       let amount1Collected = 0n;
 
@@ -351,13 +502,18 @@ export function RemoveLiquidityV3() {
         title: "Liquidity removed successfully!",
         description: (
           <div className="flex flex-col gap-1">
-            <span>Removed: {formatted0} {selectedPosition.token0Symbol} + {formatted1} {selectedPosition.token1Symbol}</span>
+            <span>
+              Removed: {formatted0} {selectedPosition.token0Symbol} +{" "}
+              {formatted1} {selectedPosition.token1Symbol}
+            </span>
             <span className="text-xs text-slate-400">NFT position burned</span>
             <Button
               size="sm"
               variant="ghost"
               className="h-6 px-2 w-fit"
-              onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, '_blank')}
+              onClick={() =>
+                window.open(`${contracts.explorer}${receipt.hash}`, "_blank")
+              }
             >
               <ExternalLink className="h-3 w-3 mr-1" /> View Transaction
             </Button>
@@ -365,7 +521,6 @@ export function RemoveLiquidityV3() {
         ),
       });
 
-      // Reload positions to reflect the removed position
       await loadPositions();
       setSelectedPosition(null);
     } catch (error: any) {
@@ -380,40 +535,32 @@ export function RemoveLiquidityV3() {
     }
   };
 
-  // Format fee amounts for display
+  // ─────────────────────────────────────────────────────────────────────────
+  // Display helpers
+  // ─────────────────────────────────────────────────────────────────────────
   const formatFeeAmount = (amount: bigint, decimals: number): string => {
     if (amount === 0n) return "0";
     return formatAmount(amount, decimals);
   };
 
-  // Format liquidity for human-readable display
   const formatLiquidity = (liquidity: bigint): string => {
-    const liquidityNum = Number(liquidity);
-    
-    if (liquidityNum === 0) return "0";
-    
-    // For very large numbers, use scientific notation or abbreviations
-    if (liquidityNum >= 1e15) {
-      return `${(liquidityNum / 1e15).toFixed(2)}Q`;
-    } else if (liquidityNum >= 1e12) {
-      return `${(liquidityNum / 1e12).toFixed(2)}T`;
-    } else if (liquidityNum >= 1e9) {
-      return `${(liquidityNum / 1e9).toFixed(2)}B`;
-    } else if (liquidityNum >= 1e6) {
-      return `${(liquidityNum / 1e6).toFixed(2)}M`;
-    } else if (liquidityNum >= 1e3) {
-      return `${(liquidityNum / 1e3).toFixed(2)}K`;
-    }
-    
-    // For smaller numbers, show with up to 4 decimal places
-    return liquidityNum.toLocaleString(undefined, { maximumFractionDigits: 4 });
+    const n = Number(liquidity);
+    if (n === 0) return "0";
+    if (n >= 1e15) return `${(n / 1e15).toFixed(2)}Q`;
+    if (n >= 1e12) return `${(n / 1e12).toFixed(2)}T`;
+    if (n >= 1e9)  return `${(n / 1e9).toFixed(2)}B`;
+    if (n >= 1e6)  return `${(n / 1e6).toFixed(2)}M`;
+    if (n >= 1e3)  return `${(n / 1e3).toFixed(2)}K`;
+    return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
   };
 
-  // Check if position has collectable fees
-  const hasFees = (position: V3Position): boolean => {
-    return position.tokensOwed0 > 0n || position.tokensOwed1 > 0n;
-  };
+  // A position "has fees" when the accurate unclaimed total is > 0
+  const hasFees = (position: V3Position): boolean =>
+    position.unclaimedFees0 > 0n || position.unclaimedFees1 > 0n;
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // Render
+  // ─────────────────────────────────────────────────────────────────────────
   if (!isConnected) {
     return (
       <Card className="bg-slate-900 border-slate-700">
@@ -469,33 +616,44 @@ export function RemoveLiquidityV3() {
                     {position.token0Symbol} / {position.token1Symbol}
                   </div>
                   <div className="text-xs text-slate-400 mt-1">
-                    Fee: {FEE_TIER_LABELS[position.fee as keyof typeof FEE_TIER_LABELS]} | 
+                    Fee:{" "}
+                    {FEE_TIER_LABELS[position.fee as keyof typeof FEE_TIER_LABELS]} |
                     Token ID: #{position.tokenId.toString()}
                   </div>
-                  
-                  {/* Fee Display */}
+
+                  {/* Accurate Uncollected Fees */}
                   <div className="mt-2 p-2 bg-slate-800/50 rounded-md">
                     <div className="flex items-center gap-2 text-xs">
                       <DollarSign className="h-3 w-3 text-green-400" />
-                      <span className="text-slate-400">Pending Fees:</span>
+                      <span className="text-slate-400">Uncollected Fees:</span>
                     </div>
                     <div className="flex gap-4 mt-1">
                       <div className="text-sm">
                         <span className="text-green-400 font-medium">
-                          {formatFeeAmount(position.tokensOwed0, position.token0Decimals)}
+                          {formatFeeAmount(
+                            position.unclaimedFees0,
+                            position.token0Decimals
+                          )}
                         </span>
-                        <span className="text-slate-500 ml-1">{position.token0Symbol}</span>
+                        <span className="text-slate-500 ml-1">
+                          {position.token0Symbol}
+                        </span>
                       </div>
                       <div className="text-sm">
                         <span className="text-green-400 font-medium">
-                          {formatFeeAmount(position.tokensOwed1, position.token1Decimals)}
+                          {formatFeeAmount(
+                            position.unclaimedFees1,
+                            position.token1Decimals
+                          )}
                         </span>
-                        <span className="text-slate-500 ml-1">{position.token1Symbol}</span>
+                        <span className="text-slate-500 ml-1">
+                          {position.token1Symbol}
+                        </span>
                       </div>
                     </div>
                   </div>
-                  
-                  {/* Liquidity Display - Actual token amounts from V3 math */}
+
+                  {/* Liquidity Value (token amounts) */}
                   {(position.amount0 > 0n || position.amount1 > 0n) && (
                     <div className="mt-2 p-2 bg-slate-800/50 rounded-md">
                       <div className="flex items-center gap-2 text-xs">
@@ -505,21 +663,31 @@ export function RemoveLiquidityV3() {
                       <div className="flex gap-4 mt-1">
                         <div className="text-sm">
                           <span className="text-purple-400 font-medium">
-                            {formatFeeAmount(position.amount0, position.token0Decimals)}
+                            {formatFeeAmount(
+                              position.amount0,
+                              position.token0Decimals
+                            )}
                           </span>
-                          <span className="text-slate-500 ml-1">{position.token0Symbol}</span>
+                          <span className="text-slate-500 ml-1">
+                            {position.token0Symbol}
+                          </span>
                         </div>
                         <div className="text-sm">
                           <span className="text-purple-400 font-medium">
-                            {formatFeeAmount(position.amount1, position.token1Decimals)}
+                            {formatFeeAmount(
+                              position.amount1,
+                              position.token1Decimals
+                            )}
                           </span>
-                          <span className="text-slate-500 ml-1">{position.token1Symbol}</span>
+                          <span className="text-slate-500 ml-1">
+                            {position.token1Symbol}
+                          </span>
                         </div>
                       </div>
                     </div>
                   )}
                 </div>
-                
+
                 <div className="text-right">
                   <div className="text-sm font-medium text-purple-400">
                     V3 Position
@@ -545,7 +713,7 @@ export function RemoveLiquidityV3() {
           {/* Collect Fees Button */}
           <Button
             onClick={handleCollectFees}
-            disabled={isCollecting || (!hasFees(selectedPosition) && selectedPosition.liquidity > 0n)}
+            disabled={isCollecting || !hasFees(selectedPosition)}
             variant="outline"
             className="w-full h-12 text-base font-semibold bg-green-600/20 border-green-500/50 hover:bg-green-600/30 text-green-400"
           >
@@ -557,21 +725,33 @@ export function RemoveLiquidityV3() {
                 Collect Fees
                 {hasFees(selectedPosition) && (
                   <span className="ml-2 text-xs">
-                    ({formatFeeAmount(selectedPosition.tokensOwed0, selectedPosition.token0Decimals)} {selectedPosition.token0Symbol} + {formatFeeAmount(selectedPosition.tokensOwed1, selectedPosition.token1Decimals)} {selectedPosition.token1Symbol})
+                    (
+                    {formatFeeAmount(
+                      selectedPosition.unclaimedFees0,
+                      selectedPosition.token0Decimals
+                    )}{" "}
+                    {selectedPosition.token0Symbol} +{" "}
+                    {formatFeeAmount(
+                      selectedPosition.unclaimedFees1,
+                      selectedPosition.token1Decimals
+                    )}{" "}
+                    {selectedPosition.token1Symbol})
                   </span>
                 )}
               </>
             )}
           </Button>
 
-          {/* Refresh Button - Just reloads positions to get updated fees */}
+          {/* Refresh Button */}
           <Button
             onClick={loadPositions}
             disabled={isLoading}
             variant="ghost"
             className="w-full h-10 text-sm"
           >
-            <RefreshCw className={`h-4 w-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
+            <RefreshCw
+              className={`h-4 w-4 mr-2 ${isLoading ? "animate-spin" : ""}`}
+            />
             {isLoading ? "Refreshing..." : "Refresh Positions"}
           </Button>
 
@@ -583,11 +763,21 @@ export function RemoveLiquidityV3() {
             className="w-full h-12 text-base font-semibold"
           >
             {isRemoving ? "Removing..." : "Remove V3 Liquidity"}
-            {selectedPosition.amount0 > 0n || selectedPosition.amount1 > 0n ? (
+            {(selectedPosition.amount0 > 0n || selectedPosition.amount1 > 0n) && (
               <span className="ml-2 text-xs">
-                ({formatFeeAmount(selectedPosition.amount0, selectedPosition.token0Decimals)} {selectedPosition.token0Symbol} + {formatFeeAmount(selectedPosition.amount1, selectedPosition.token1Decimals)} {selectedPosition.token1Symbol})
+                (
+                {formatFeeAmount(
+                  selectedPosition.amount0,
+                  selectedPosition.token0Decimals
+                )}{" "}
+                {selectedPosition.token0Symbol} +{" "}
+                {formatFeeAmount(
+                  selectedPosition.amount1,
+                  selectedPosition.token1Decimals
+                )}{" "}
+                {selectedPosition.token1Symbol})
               </span>
-            ) : null}
+            )}
           </Button>
         </div>
       )}
