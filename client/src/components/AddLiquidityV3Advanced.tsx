@@ -1,8 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
@@ -21,7 +18,7 @@ import {
 import { calculateAmountsForLiquidity } from "@/lib/v3-liquidity-math";
 import {
   AlertTriangle, Zap, ExternalLink, TrendingUp, TrendingDown,
-  Info, Settings, BarChart3, Layers, Target, Activity,
+  Info, Settings, BarChart3, Layers, Target, Activity, Plus, RefreshCw,
 } from "lucide-react";
 import { PriceRangeChart } from "./PriceRangeChart";
 
@@ -41,10 +38,6 @@ function getERC20Address(token: Token, chainId: number): string {
 
 type DepositMode = "dual" | "token0-only" | "token1-only" | "unknown";
 
-/**
- * Format a counterpart amount for display.
- * Uses full formatUnits precision to avoid rounding very small values to "0.000000".
- */
 function formatCounterpartAmount(raw: bigint, decimals: number): string {
   const full = formatUnits(raw, decimals);
   const num = parseFloat(full);
@@ -53,21 +46,40 @@ function formatCounterpartAmount(raw: bigint, decimals: number): string {
   return parseFloat(num.toFixed(8)).toString();
 }
 
-/**
- * Format a pool reserve amount in a human-friendly compact form.
- * e.g. 1_234_567.89 → "1.23M"  |  0.000123 → "0.000123"
- */
 function formatPoolReserve(raw: bigint, decimals: number): string {
-  const full = formatUnits(raw, decimals);
-  const n = parseFloat(full);
+  const n = parseFloat(formatUnits(raw, decimals));
   if (n === 0) return "0";
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (n >= 1_000_000)     return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000)         return `${(n / 1_000).toFixed(2)}K`;
-  if (n >= 1)             return n.toFixed(2);
-  if (n >= 0.0001)        return n.toFixed(6);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
+  if (n >= 1) return n.toFixed(2);
+  if (n >= 0.0001) return n.toFixed(6);
   return n.toPrecision(3);
 }
+
+function formatBalance(raw: bigint, decimals: number): string {
+  const n = parseFloat(formatUnits(raw, decimals));
+  if (n === 0) return "0";
+  if (n < 0.0001) return "<0.0001";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
+  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+const FEE_OPTIONS = [
+  { value: V3_FEE_TIERS.LOWEST,     label: "0.01%", tag: "Very Stable" },
+  { value: V3_FEE_TIERS.LOW,        label: "0.05%", tag: "Stable"      },
+  { value: V3_FEE_TIERS.MEDIUM,     label: "0.3%",  tag: "Most Pairs"  },
+  { value: V3_FEE_TIERS.HIGH,       label: "1%",    tag: "Exotic"      },
+  { value: V3_FEE_TIERS.ULTRA_HIGH, label: "10%",   tag: "Very Exotic" },
+];
+
+const RANGE_PRESETS = [
+  { key: "full",    label: "Full",    Icon: Layers,     tip: "Min/max ticks" },
+  { key: "wide",    label: "Wide ±50%",  Icon: TrendingUp,  tip: "0.5x–2x price" },
+  { key: "narrow",  label: "Narrow ±10%", Icon: Target,     tip: "90%–110%" },
+  { key: "current", label: "At Tick",  Icon: Activity,   tip: "Current tick" },
+] as const;
 
 export function AddLiquidityV3Advanced() {
   const [tokenA, setTokenA] = useState<Token | null>(null);
@@ -89,7 +101,6 @@ export function AddLiquidityV3Advanced() {
   const [currentSqrtPriceX96, setCurrentSqrtPriceX96] = useState<bigint | null>(null);
   const [currentTick, setCurrentTick] = useState<number | null>(null);
   const [poolLiquidity, setPoolLiquidity] = useState<bigint>(0n);
-  // ── Pool token reserves (human-readable alternative to raw liquidity) ──
   const [poolToken0Reserve, setPoolToken0Reserve] = useState<bigint | null>(null);
   const [poolToken1Reserve, setPoolToken1Reserve] = useState<bigint | null>(null);
   const [poolAddress, setPoolAddress] = useState<string | null>(null);
@@ -98,36 +109,23 @@ export function AddLiquidityV3Advanced() {
   const [token0Decimals, setToken0Decimals] = useState(18);
   const [token1Decimals, setToken1Decimals] = useState(18);
   const [isAdding, setIsAdding] = useState(false);
+  const [isCheckingPool, setIsCheckingPool] = useState(false);
   const [balanceA, setBalanceA] = useState<bigint | null>(null);
   const [balanceB, setBalanceB] = useState<bigint | null>(null);
   const [amountBIsAuto, setAmountBIsAuto] = useState(false);
-
-  const [autoCalcAmounts, setAutoCalcAmounts] = useState<{
-    amount0: bigint;
-    amount1: bigint;
-    forAmountA: string;
-  } | null>(null);
+  const [autoCalcAmounts, setAutoCalcAmounts] = useState<{ amount0: bigint; amount1: bigint; forAmountA: string } | null>(null);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
   const contracts = chainId ? getContractsForChain(chainId) : null;
 
-  const feeOptions = [
-    { value: V3_FEE_TIERS.LOWEST,     label: "0.01%", description: "Very stable pairs" },
-    { value: V3_FEE_TIERS.LOW,        label: "0.05%", description: "Stable pairs" },
-    { value: V3_FEE_TIERS.MEDIUM,     label: "0.3%",  description: "Most pairs" },
-    { value: V3_FEE_TIERS.HIGH,       label: "1%",    description: "Exotic/volatile pairs" },
-    { value: V3_FEE_TIERS.ULTRA_HIGH, label: "10%",   description: "Very exotic pairs" },
-  ];
-
   const getSortedTokens = useCallback(() => {
     if (!tokenA || !tokenB || !chainId) return null;
     const erc20A = getERC20Address(tokenA, chainId);
     const erc20B = getERC20Address(tokenB, chainId);
     const [tok0, tok1] = sortTokens({ ...tokenA, address: erc20A }, { ...tokenB, address: erc20B });
-    const isToken0A = erc20A.toLowerCase() === tok0.address.toLowerCase();
-    return { tok0, tok1, isToken0A };
+    return { tok0, tok1, isToken0A: erc20A.toLowerCase() === tok0.address.toLowerCase() };
   }, [tokenA, tokenB, chainId]);
 
   const depositMode = useMemo((): DepositMode => {
@@ -150,188 +148,119 @@ export function AddLiquidityV3Advanced() {
     } catch { return null; }
   }, [currentPrice, minPrice, maxPrice, depositMode]);
 
+  // ── Load tokens ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!chainId) return;
     const chainTokens = getTokensByChainId(chainId);
     const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
-    setTokens([...chainTokens, ...imported.filter((t) => t.chainId === chainId)]);
+    setTokens([...chainTokens, ...imported.filter(t => t.chainId === chainId)]);
   }, [chainId]);
 
   useEffect(() => {
     if (tokens.length === 0) return;
-    if (!tokenA) { const t = tokens.find((t) => t.symbol === "USDC"); if (t) setTokenA(t); }
-    if (!tokenB) { const t = tokens.find((t) => t.symbol === "ACHS"); if (t) setTokenB(t); }
+    if (!tokenA) { const t = tokens.find(t => t.symbol === "USDC"); if (t) setTokenA(t); }
+    if (!tokenB) { const t = tokens.find(t => t.symbol === "ACHS"); if (t) setTokenB(t); }
   }, [tokens, tokenA, tokenB]);
 
   const handleImportToken = async (addr: string): Promise<Token | null> => {
     try {
       if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
-      const exists = tokens.find((t) => t.address.toLowerCase() === addr.toLowerCase());
+      const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is in your list` }); return exists; }
-      const provider = new BrowserProvider({
-        request: async ({ method, params }: any) => {
-          const res = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-          const data = await res.json(); if (data.error) throw new Error(data.error.message); return data.result;
-        },
-      });
+      const provider = new BrowserProvider({ request: async ({ method, params }: any) => { const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }); const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result; } });
       const META_ABI = ["function name() view returns (string)", "function symbol() view returns (string)", "function decimals() view returns (uint8)"];
       const contract = new Contract(addr, META_ABI, provider);
-      const timeout = new Promise<never>((_, r) => setTimeout(() => r(new Error("Request timed out")), 10000));
-      const [name, symbol, decimals] = (await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), timeout])) as [string, string, bigint];
+      const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), 10000))]) as [string, string, bigint];
       if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
       const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
-      if (!imported.find((t) => t.address.toLowerCase() === addr.toLowerCase())) { imported.push(newToken); localStorage.setItem("importedTokens", JSON.stringify(imported)); }
-      setTokens((prev) => [...prev, newToken]);
+      if (!imported.find(t => t.address.toLowerCase() === addr.toLowerCase())) { imported.push(newToken); localStorage.setItem("importedTokens", JSON.stringify(imported)); }
+      setTokens(prev => [...prev, newToken]);
       toast({ title: "Token imported", description: `${symbol} added` });
       return newToken;
     } catch (error: any) {
-      toast({ title: "Import failed", description: error.message.includes("timeout") ? "Request timed out." : "Unable to fetch token data.", variant: "destructive" });
+      toast({ title: "Import failed", description: error.message || "Unable to fetch token data", variant: "destructive" });
       return null;
     }
   };
 
+  // ── Balances ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!address || !window.ethereum || !tokenA || !tokenB || !chainId) return;
     (async () => {
       try {
         const provider = new BrowserProvider(window.ethereum);
-        if (isNativeToken(tokenA.address)) setBalanceA(await provider.getBalance(address));
-        else { const c = new Contract(getERC20Address(tokenA, chainId), ERC20_ABI, provider); setBalanceA(await c.balanceOf(address)); }
-        if (isNativeToken(tokenB.address)) setBalanceB(await provider.getBalance(address));
-        else { const c = new Contract(getERC20Address(tokenB, chainId), ERC20_ABI, provider); setBalanceB(await c.balanceOf(address)); }
-      } catch (err) { console.error("Balance error:", err); }
+        const fetchBal = async (token: Token) => isNativeToken(token.address) ? provider.getBalance(address) : new Contract(getERC20Address(token, chainId), ERC20_ABI, provider).balanceOf(address);
+        const [rawA, rawB] = await Promise.all([fetchBal(tokenA), fetchBal(tokenB)]);
+        setBalanceA(rawA); setBalanceB(rawB);
+      } catch { /* ignore */ }
     })();
   }, [address, tokenA, tokenB, chainId]);
 
-  // ── Fetch pool info + token reserves ─────────────────────────────────────
-  useEffect(() => {
+  // ── Pool state ─────────────────────────────────────────────────────────────
+  const fetchPoolState = async () => {
     if (!tokenA || !tokenB || !contracts || !window.ethereum || !chainId) return;
-    (async () => {
-      try {
-        const provider = new BrowserProvider(window.ethereum);
-        const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
-        const s = getSortedTokens(); if (!s) return;
-        const { tok0, tok1 } = s;
-        setToken0Symbol(tok0.symbol);
-        setToken1Symbol(tok1.symbol);
-        setToken0Decimals(tok0.decimals);
-        setToken1Decimals(tok1.decimals);
-
-        const poolAddr = await factory.getPool(tok0.address, tok1.address, selectedFee);
-        const ZERO = "0x0000000000000000000000000000000000000000";
-        if (!poolAddr || poolAddr === ZERO) {
-          setPoolExists(false);
-          setCurrentPrice(null);
-          setCurrentSqrtPriceX96(null);
-          setCurrentTick(null);
-          setPoolLiquidity(0n);
-          setPoolAddress(null);
-          setPoolToken0Reserve(null);
-          setPoolToken1Reserve(null);
-          return;
-        }
-
-        setPoolExists(true);
-        setPoolAddress(poolAddr);
-
-        const pool = new Contract(poolAddr, V3_POOL_ABI, provider);
-        const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()]);
-        const sqrtPX96: bigint = slot0[0];
-        const tick = Number(slot0[1]);
-        const price = sqrtPriceX96ToPrice(sqrtPX96, tok0.decimals, tok1.decimals);
-        setCurrentSqrtPriceX96(sqrtPX96);
-        setCurrentPrice(price);
-        setCurrentTick(tick);
-        setPoolLiquidity(liq);
-
-        // ── Fetch actual token reserves held by the pool ──────────────────
-        try {
-          const tok0Contract = new Contract(tok0.address, ERC20_ABI, provider);
-          const tok1Contract = new Contract(tok1.address, ERC20_ABI, provider);
-          const [res0, res1] = await Promise.all([
-            tok0Contract.balanceOf(poolAddr),
-            tok1Contract.balanceOf(poolAddr),
-          ]);
-          setPoolToken0Reserve(res0 as bigint);
-          setPoolToken1Reserve(res1 as bigint);
-        } catch (resErr) {
-          console.warn("Could not fetch pool reserves:", resErr);
-          setPoolToken0Reserve(null);
-          setPoolToken1Reserve(null);
-        }
-
-        if (!minPrice && !maxPrice) applyRangePresetValues("wide", price, tick, tok0 as any, tok1 as any);
-      } catch (err) {
-        console.error("Pool check error:", err);
-        setPoolExists(false);
-        setPoolToken0Reserve(null);
-        setPoolToken1Reserve(null);
+    setIsCheckingPool(true);
+    try {
+      const provider = new BrowserProvider(window.ethereum);
+      const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
+      const s = getSortedTokens(); if (!s) return;
+      const { tok0, tok1 } = s;
+      setToken0Symbol(tok0.symbol); setToken1Symbol(tok1.symbol);
+      setToken0Decimals(tok0.decimals); setToken1Decimals(tok1.decimals);
+      const poolAddr = await factory.getPool(tok0.address, tok1.address, selectedFee);
+      const ZERO = "0x0000000000000000000000000000000000000000";
+      if (!poolAddr || poolAddr === ZERO) {
+        setPoolExists(false); setCurrentPrice(null); setCurrentSqrtPriceX96(null);
+        setCurrentTick(null); setPoolLiquidity(0n); setPoolAddress(null);
+        setPoolToken0Reserve(null); setPoolToken1Reserve(null); return;
       }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tokenA, tokenB, selectedFee, contracts, chainId]);
+      setPoolExists(true); setPoolAddress(poolAddr);
+      const pool = new Contract(poolAddr, V3_POOL_ABI, provider);
+      const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()]);
+      const sqrtPX96: bigint = slot0[0]; const tick = Number(slot0[1]);
+      const price = sqrtPriceX96ToPrice(sqrtPX96, tok0.decimals, tok1.decimals);
+      setCurrentSqrtPriceX96(sqrtPX96); setCurrentPrice(price); setCurrentTick(tick); setPoolLiquidity(liq);
+      try {
+        const [res0, res1] = await Promise.all([new Contract(tok0.address, ERC20_ABI, provider).balanceOf(poolAddr), new Contract(tok1.address, ERC20_ABI, provider).balanceOf(poolAddr)]);
+        setPoolToken0Reserve(res0 as bigint); setPoolToken1Reserve(res1 as bigint);
+      } catch { setPoolToken0Reserve(null); setPoolToken1Reserve(null); }
+      if (!minPrice && !maxPrice) applyRangePresetValues("wide", price, tick, tok0 as any, tok1 as any);
+    } catch (err) { console.error("Pool check error:", err); setPoolExists(false); setPoolToken0Reserve(null); setPoolToken1Reserve(null); }
+    finally { setIsCheckingPool(false); }
+  };
 
-  // ── Auto-calculate amountB ────────────────────────────────────────────────
+  useEffect(() => { fetchPoolState(); }, [tokenA, tokenB, selectedFee, contracts, chainId]);
+
+  // ── Auto-calc amountB ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!amountA || !tokenA || !tokenB || !chainId) return;
     const aFloat = parseFloat(amountA);
-    if (isNaN(aFloat) || aFloat <= 0) {
-      setAmountB(""); setAmountBIsAuto(false); setAutoCalcAmounts(null); return;
-    }
+    if (isNaN(aFloat) || aFloat <= 0) { setAmountB(""); setAmountBIsAuto(false); setAutoCalcAmounts(null); return; }
     const s = getSortedTokens(); if (!s) return;
     const { tok0, tok1, isToken0A } = s;
     const tl = minTick ? parseInt(minTick) : null;
     const tu = maxTick ? parseInt(maxTick) : null;
     const validTicks = tl !== null && tu !== null && !isNaN(tl) && !isNaN(tu) && tl < tu;
-
     if (validTicks && currentTick !== null) {
-      if (currentTick < tl!) {
-        const amount0 = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
-        setAmountB("0"); setAmountBIsAuto(true);
-        setAutoCalcAmounts({ amount0: isToken0A ? amount0 : 0n, amount1: isToken0A ? 0n : amount0, forAmountA: amountA });
-        return;
-      }
-      if (currentTick >= tu!) {
-        const amount1 = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
-        setAmountB("0"); setAmountBIsAuto(true);
-        setAutoCalcAmounts({ amount0: isToken0A ? 0n : amount1, amount1: isToken0A ? amount1 : 0n, forAmountA: amountA });
-        return;
-      }
+      if (currentTick < tl!) { const a = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals); setAmountB("0"); setAmountBIsAuto(true); setAutoCalcAmounts({ amount0: isToken0A ? a : 0n, amount1: isToken0A ? 0n : a, forAmountA: amountA }); return; }
+      if (currentTick >= tu!) { const a = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals); setAmountB("0"); setAmountBIsAuto(true); setAutoCalcAmounts({ amount0: isToken0A ? 0n : a, amount1: isToken0A ? a : 0n, forAmountA: amountA }); return; }
     }
-
     if (validTicks && currentSqrtPriceX96) {
       try {
         const inputBig = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
-        const { amount0, amount1 } = calculateAmountsForLiquidity(
-          inputBig, isToken0A, currentSqrtPriceX96, tl!, tu!, tok0.decimals, tok1.decimals,
-        );
+        const { amount0, amount1 } = calculateAmountsForLiquidity(inputBig, isToken0A, currentSqrtPriceX96, tl!, tu!, tok0.decimals, tok1.decimals);
         const counterpart = isToken0A ? amount1 : amount0;
         const counterpartDec = isToken0A ? tok1.decimals : tok0.decimals;
         setAutoCalcAmounts({ amount0, amount1, forAmountA: amountA });
-        if (counterpart > 0n) {
-          setAmountB(formatCounterpartAmount(counterpart, counterpartDec));
-          setAmountBIsAuto(true);
-          return;
-        } else {
-          setAmountB("0"); setAmountBIsAuto(true); return;
-        }
-      } catch (err) {
-        console.warn("V3 math fallback:", err);
-        setAutoCalcAmounts(null);
-      }
+        if (counterpart > 0n) { setAmountB(formatCounterpartAmount(counterpart, counterpartDec)); setAmountBIsAuto(true); return; }
+        else { setAmountB("0"); setAmountBIsAuto(true); return; }
+      } catch { setAutoCalcAmounts(null); }
     }
-
     if (currentPrice) {
-      const calc = (() => {
-        const s2 = getSortedTokens();
-        if (!s2) return aFloat * currentPrice;
-        return s2.isToken0A ? aFloat * currentPrice : aFloat / currentPrice;
-      })();
-      setAmountB(calc.toFixed(8)); setAmountBIsAuto(true);
-      setAutoCalcAmounts(null);
+      const calc = s.isToken0A ? aFloat * currentPrice : aFloat / currentPrice;
+      setAmountB(calc.toFixed(8)); setAmountBIsAuto(true); setAutoCalcAmounts(null);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amountA, minTick, maxTick, currentSqrtPriceX96, currentPrice, currentTick, tokenA, tokenB, chainId]);
 
   const handleMinPriceChange = (v: string) => { setMinPrice(v); const p = parseFloat(v); if (isNaN(p) || p <= 0) return; const s = getSortedTokens(); if (!s) return; setMinTick(getNearestUsableTick(priceToTick(p, s.tok0.decimals, s.tok1.decimals), getTickSpacing(selectedFee)).toString()); };
@@ -359,7 +288,7 @@ export function AddLiquidityV3Advanced() {
       setMinTick(tl.toString()); setMaxTick(tu.toString());
       setMinPrice(tickToPrice(tl, tok0.decimals, tok1.decimals).toFixed(6));
       setMaxPrice(tickToPrice(tu, tok0.decimals, tok1.decimals).toFixed(6));
-    } else if (preset === "current") {
+    } else {
       const c = getNearestUsableTick(tick, ts);
       setMinTick(c.toString()); setMaxTick((c + ts).toString());
       setMinPrice(tickToPrice(c, tok0.decimals, tok1.decimals).toFixed(6));
@@ -377,398 +306,537 @@ export function AddLiquidityV3Advanced() {
   const ticksValid = !!(minTick && maxTick && !isNaN(parseInt(minTick)) && !isNaN(parseInt(maxTick)) && parseInt(minTick) < parseInt(maxTick));
   const priceLabel = token0Symbol && token1Symbol ? `${token1Symbol} per ${token0Symbol}` : tokenA && tokenB ? `${tokenB.symbol} / ${tokenA.symbol}` : "Price";
 
+  const poolReservesLabel = useMemo(() => {
+    if (poolToken0Reserve === null || poolToken1Reserve === null) return null;
+    return `${formatPoolReserve(poolToken0Reserve, token0Decimals)} ${token0Symbol} / ${formatPoolReserve(poolToken1Reserve, token1Decimals)} ${token1Symbol}`;
+  }, [poolToken0Reserve, poolToken1Reserve, token0Decimals, token1Decimals, token0Symbol, token1Symbol]);
+
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !address || !contracts || !window.ethereum || !chainId) return;
     const tickLowerRaw = parseInt(minTick), tickUpperRaw = parseInt(maxTick);
-    if (isNaN(tickLowerRaw) || isNaN(tickUpperRaw) || tickLowerRaw >= tickUpperRaw) {
-      toast({ title: "Invalid price range", description: "Min price must be less than max price", variant: "destructive" }); return;
-    }
-
+    if (isNaN(tickLowerRaw) || isNaN(tickUpperRaw) || tickLowerRaw >= tickUpperRaw) { toast({ title: "Invalid price range", description: "Min price must be less than max price", variant: "destructive" }); return; }
     const aVal = parseFloat(amountA), bVal = parseFloat(amountB);
     if ((depositMode === "dual" || depositMode === "unknown") && (!amountA || aVal <= 0)) { toast({ title: "Enter amount", description: "Enter Token A amount", variant: "destructive" }); return; }
-    if ((depositMode === "dual" || depositMode === "unknown") && (!amountB || bVal < 0)) { toast({ title: "Enter amount", description: "Enter Token B amount", variant: "destructive" }); return; }
     if (depositMode === "token0-only" && (!amountA || aVal <= 0)) { toast({ title: "Enter amount", description: `Enter ${token0Symbol} amount`, variant: "destructive" }); return; }
     if (depositMode === "token1-only" && (!amountB || bVal <= 0)) { toast({ title: "Enter amount", description: `Enter ${token1Symbol} amount`, variant: "destructive" }); return; }
-
     setIsAdding(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
-      const signer   = await provider.getSigner();
+      const signer = await provider.getSigner();
       const pm = new Contract(contracts.v3.nonfungiblePositionManager, NONFUNGIBLE_POSITION_MANAGER_ABI, signer);
-
       const tokenAIsNative = isNativeToken(tokenA.address), tokenBIsNative = isNativeToken(tokenB.address);
       const tokenAERC20 = getERC20Address(tokenA, chainId), tokenBERC20 = getERC20Address(tokenB, chainId);
       const [token0, token1] = sortTokens({ ...tokenA, address: tokenAERC20 }, { ...tokenB, address: tokenBERC20 });
       const isToken0A = tokenAERC20.toLowerCase() === token0.address.toLowerCase();
-
       const ts = getTickSpacing(selectedFee);
       const tickLower = getNearestUsableTick(tickLowerRaw, ts);
       const tickUpper = getNearestUsableTick(tickUpperRaw, ts);
-      if (tickLower >= tickUpper) {
-        toast({ title: "Invalid tick range", description: `Ticks must differ by at least ${ts}`, variant: "destructive" }); return;
-      }
-
+      if (tickLower >= tickUpper) { toast({ title: "Invalid tick range", description: `Ticks must differ by at least ${ts}`, variant: "destructive" }); return; }
       let amount0Desired: bigint, amount1Desired: bigint;
-
-      if (depositMode === "token0-only") {
-        amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
-        amount1Desired = 0n;
-      } else if (depositMode === "token1-only") {
-        amount0Desired = 0n;
-        amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
-      } else {
-        const useStoredAmounts =
-          amountBIsAuto &&
-          autoCalcAmounts !== null &&
-          autoCalcAmounts.forAmountA === amountA;
-
-        if (useStoredAmounts && autoCalcAmounts) {
-          amount0Desired = autoCalcAmounts.amount0;
-          amount1Desired = autoCalcAmounts.amount1;
-        } else if (currentSqrtPriceX96 && ticksValid) {
-          try {
-            const inputBig = parseAmount(amountA, isToken0A ? token0.decimals : token1.decimals);
-            const { amount0, amount1 } = calculateAmountsForLiquidity(
-              inputBig, isToken0A, currentSqrtPriceX96, tickLower, tickUpper,
-              token0.decimals, token1.decimals,
-            );
-            amount0Desired = amount0;
-            amount1Desired = amount1;
-          } catch (mathErr) {
-            console.warn("V3 math recompute failed, falling back to display strings:", mathErr);
-            amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
-            amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
-          }
-        } else {
-          amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
-          amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
-        }
+      if (depositMode === "token0-only") { amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals); amount1Desired = 0n; }
+      else if (depositMode === "token1-only") { amount0Desired = 0n; amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals); }
+      else {
+        if (amountBIsAuto && autoCalcAmounts?.forAmountA === amountA && autoCalcAmounts) { amount0Desired = autoCalcAmounts.amount0; amount1Desired = autoCalcAmounts.amount1; }
+        else if (currentSqrtPriceX96 && ticksValid) {
+          try { const i = parseAmount(amountA, isToken0A ? token0.decimals : token1.decimals); const { amount0, amount1 } = calculateAmountsForLiquidity(i, isToken0A, currentSqrtPriceX96, tickLower, tickUpper, token0.decimals, token1.decimals); amount0Desired = amount0; amount1Desired = amount1; }
+          catch { amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals); amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals); }
+        } else { amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals); amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals); }
       }
-
-      if (amount0Desired === 0n && amount1Desired === 0n) {
-        toast({ title: "Amount error", description: "Could not compute valid token amounts. Please enter amounts manually.", variant: "destructive" });
-        return;
-      }
-
+      if (amount0Desired === 0n && amount1Desired === 0n) { toast({ title: "Amount error", description: "Could not compute valid amounts. Please enter manually.", variant: "destructive" }); return; }
       let nativeAmount = 0n;
       if (tokenAIsNative) nativeAmount = isToken0A ? amount0Desired : amount1Desired;
       else if (tokenBIsNative) nativeAmount = isToken0A ? amount1Desired : amount0Desired;
-
       if (!poolExists) {
         const midPrice = (parseFloat(minPrice) + parseFloat(maxPrice)) / 2;
         const sqrtPX96 = priceToSqrtPriceX96(midPrice, token0.decimals, token1.decimals);
         toast({ title: "Creating pool…", description: "Initializing new V3 pool" });
-        if (nativeAmount > 0n) {
-          const cd = pm.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [token0.address, token1.address, selectedFee, sqrtPX96]);
-          const rd = pm.interface.encodeFunctionData("refundETH", []);
-          await (await pm.multicall([cd, rd], { value: nativeAmount })).wait();
-        } else {
-          await (await pm.createAndInitializePoolIfNecessary(token0.address, token1.address, selectedFee, sqrtPX96)).wait();
-        }
+        if (nativeAmount > 0n) { await (await pm.multicall([pm.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [token0.address, token1.address, selectedFee, sqrtPX96]), pm.interface.encodeFunctionData("refundETH", [])], { value: nativeAmount })).wait(); }
+        else { await (await pm.createAndInitializePoolIfNecessary(token0.address, token1.address, selectedFee, sqrtPX96)).wait(); }
       }
-
       toast({ title: "Approving tokens…" });
       const pmAddr = contracts.v3.nonfungiblePositionManager;
-      if (amount0Desired > 0n && !(tokenAIsNative && isToken0A) && !(tokenBIsNative && !isToken0A)) {
-        const c = new Contract(token0.address, ERC20_ABI, signer);
-        if (await c.allowance(address, pmAddr) < amount0Desired) await (await c.approve(pmAddr, amount0Desired)).wait();
-      }
-      if (amount1Desired > 0n && !(tokenAIsNative && !isToken0A) && !(tokenBIsNative && isToken0A)) {
-        const c = new Contract(token1.address, ERC20_ABI, signer);
-        if (await c.allowance(address, pmAddr) < amount1Desired) await (await c.approve(pmAddr, amount1Desired)).wait();
-      }
-
-      const amount0Min = 0n;
-      const amount1Min = 0n;
-      const deadline   = Math.floor(Date.now() / 1000) + 1200;
-
+      if (amount0Desired > 0n && !(tokenAIsNative && isToken0A) && !(tokenBIsNative && !isToken0A)) { const c = new Contract(token0.address, ERC20_ABI, signer); if (await c.allowance(address, pmAddr) < amount0Desired) await (await c.approve(pmAddr, amount0Desired)).wait(); }
+      if (amount1Desired > 0n && !(tokenAIsNative && !isToken0A) && !(tokenBIsNative && isToken0A)) { const c = new Contract(token1.address, ERC20_ABI, signer); if (await c.allowance(address, pmAddr) < amount1Desired) await (await c.approve(pmAddr, amount1Desired)).wait(); }
+      const params = { token0: token0.address, token1: token1.address, fee: selectedFee, tickLower, tickUpper, amount0Desired, amount1Desired, amount0Min: 0n, amount1Min: 0n, recipient: address, deadline: Math.floor(Date.now() / 1000) + 1200 };
       toast({ title: "Adding liquidity…", description: "Creating your V3 position" });
-
-      const params = {
-        token0: token0.address, token1: token1.address, fee: selectedFee,
-        tickLower, tickUpper, amount0Desired, amount1Desired, amount0Min, amount1Min,
-        recipient: address, deadline,
-      };
-
       let receipt;
-      if (nativeAmount > 0n) {
-        const md  = pm.interface.encodeFunctionData("mint", [params]);
-        const rd  = pm.interface.encodeFunctionData("refundETH", []);
-        const gas = await pm.multicall.estimateGas([md, rd], { value: nativeAmount });
-        receipt   = await (await pm.multicall([md, rd], { value: nativeAmount, gasLimit: (gas * 150n) / 100n })).wait();
-      } else {
-        const gas = await pm.mint.estimateGas(params);
-        receipt   = await (await pm.mint(params, { gasLimit: (gas * 150n) / 100n })).wait();
-      }
-
+      if (nativeAmount > 0n) { const md = pm.interface.encodeFunctionData("mint", [params]); const rd = pm.interface.encodeFunctionData("refundETH", []); const gas = await pm.multicall.estimateGas([md, rd], { value: nativeAmount }); receipt = await (await pm.multicall([md, rd], { value: nativeAmount, gasLimit: gas * 150n / 100n })).wait(); }
+      else { const gas = await pm.mint.estimateGas(params); receipt = await (await pm.mint(params, { gasLimit: gas * 150n / 100n })).wait(); }
       setAmountA(""); setAmountB(""); setAmountBIsAuto(false); setAutoCalcAmounts(null);
-      toast({
-        title: "Liquidity added!",
-        description: (
-          <div className="flex items-center gap-2">
-            <span>V3 position created</span>
-            <Button size="sm" variant="ghost" className="h-6 px-2"
-              onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}>
-              <ExternalLink className="h-3 w-3" />
-            </Button>
-          </div>
-        ),
-      });
+      await fetchPoolState();
+      toast({ title: "Liquidity added!", description: (<div className="flex items-center gap-2"><span>V3 position created</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}><ExternalLink className="h-3 w-3" /></Button></div>) });
     } catch (error: any) {
       console.error("Add liquidity error:", error);
       toast({ title: "Failed to add liquidity", description: error.reason || error.message || "Transaction failed", variant: "destructive" });
-    } finally {
-      setIsAdding(false);
-    }
+    } finally { setIsAdding(false); }
   };
 
-  const addButtonLabel = () => {
-    if (isAdding) return "Adding Liquidity…";
-    if (depositMode === "token0-only") return `Deposit ${token0Symbol || tokenA?.symbol} Only (Price Below Range)`;
-    if (depositMode === "token1-only") return `Deposit ${token1Symbol || tokenB?.symbol} Only (Price Above Range)`;
-    return "Add V3 Liquidity (Advanced)";
-  };
+  const canSubmit = isConnected && tokenA && tokenB && ticksValid && !isAdding &&
+    (depositMode !== "token1-only" ? !!amountA && parseFloat(amountA) > 0 : true) &&
+    ((depositMode === "dual" || depositMode === "unknown" || depositMode === "token1-only") ? parseFloat(amountB) >= 0 : true);
 
-  // ── Pool reserves display string ─────────────────────────────────────────
-  const poolReservesLabel = useMemo(() => {
-    if (poolToken0Reserve === null || poolToken1Reserve === null) return null;
-    const r0 = formatPoolReserve(poolToken0Reserve, token0Decimals);
-    const r1 = formatPoolReserve(poolToken1Reserve, token1Decimals);
-    return `${r0} ${token0Symbol} / ${r1} ${token1Symbol}`;
-  }, [poolToken0Reserve, poolToken1Reserve, token0Decimals, token1Decimals, token0Symbol, token1Symbol]);
+  const tickSpacing = getTickSpacing(selectedFee);
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-3 p-4 bg-orange-500/10 border border-orange-500/20 rounded-lg">
-        <AlertTriangle className="h-5 w-5 text-orange-400 shrink-0 mt-0.5" />
-        <div className="space-y-1">
-          <h3 className="font-semibold text-orange-400 text-sm">Advanced Mode – Full Control</h3>
-          <p className="text-xs text-slate-300">Out-of-range positions deposit only one token and earn no fees until the price re-enters the range.</p>
+    <>
+      <style>{`
+        .v3a-token-box {
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 16px;
+          transition: border-color 0.2s, background 0.2s;
+        }
+        .v3a-token-box:focus-within {
+          border-color: rgba(251,146,60,0.45);
+          background: rgba(251,146,60,0.03);
+        }
+        .v3a-token-box.disabled-box { opacity: 0.5; pointer-events: none; }
+        .v3a-token-btn {
+          display: flex; align-items: center; gap: 8px;
+          padding: 8px 14px; border-radius: 12px;
+          background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+          color: white; font-weight: 600; font-size: 14px;
+          cursor: pointer; transition: all 0.2s; white-space: nowrap;
+        }
+        .v3a-token-btn:hover { background: rgba(251,146,60,0.2); border-color: rgba(251,146,60,0.4); }
+        .v3a-token-btn.empty { background: linear-gradient(135deg,rgba(251,146,60,0.2),rgba(245,158,11,0.2)); border-color: rgba(251,146,60,0.4); color: #fdba74; }
+        .v3a-max-btn {
+          font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
+          padding: 3px 10px; border-radius: 8px;
+          background: rgba(251,146,60,0.12); border: 1px solid rgba(251,146,60,0.3);
+          color: #fdba74; cursor: pointer; transition: all 0.2s;
+        }
+        .v3a-max-btn:hover { background: rgba(251,146,60,0.25); border-color: rgba(251,146,60,0.55); }
+        .v3a-input {
+          background: transparent; border: none; outline: none;
+          color: white; font-size: clamp(18px,4.5vw,26px); font-weight: 700;
+          width: 100%; font-variant-numeric: tabular-nums;
+        }
+        .v3a-input::placeholder { color: rgba(255,255,255,0.2); }
+        .v3a-input:disabled { opacity: 0.4; cursor: not-allowed; }
+        .v3a-input[type=number]::-webkit-outer-spin-button,
+        .v3a-input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+        .v3a-divider-ring {
+          width: 40px; height: 40px; border-radius: 50%;
+          background: rgba(251,146,60,0.12); border: 1px solid rgba(251,146,60,0.3);
+          display: flex; align-items: center; justify-content: center; color: #fdba74; flex-shrink: 0;
+        }
+        .v3a-card {
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.07);
+          border-radius: 16px; overflow: hidden;
+        }
+        .v3a-card-header {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 11px 16px;
+          background: rgba(0,0,0,0.15);
+          border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .v3a-label {
+          font-size: 11px; font-weight: 700;
+          color: rgba(255,255,255,0.35); text-transform: uppercase; letter-spacing: 0.08em;
+        }
+        .v3a-fee-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 5px; }
+        @media (max-width: 420px) { .v3a-fee-grid { grid-template-columns: repeat(3,1fr); } }
+        .v3a-fee-btn {
+          display: flex; flex-direction: column; align-items: center;
+          padding: 9px 4px; border-radius: 11px; border: 1px solid transparent;
+          background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.4);
+          cursor: pointer; transition: all 0.2s; text-align: center;
+        }
+        .v3a-fee-btn:hover { background: rgba(251,146,60,0.1); color: rgba(255,255,255,0.7); }
+        .v3a-fee-btn.active { background: rgba(251,146,60,0.18); border-color: rgba(251,146,60,0.5); color: #fdba74; }
+        .v3a-stat-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 16px; }
+        .v3a-stat-row + .v3a-stat-row { border-top: 1px solid rgba(255,255,255,0.05); }
+        .v3a-range-input-box {
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 12px; padding: 12px 14px;
+          transition: border-color 0.2s;
+        }
+        .v3a-range-input-box:focus-within { border-color: rgba(251,146,60,0.4); }
+        .v3a-range-input {
+          background: transparent; border: none; outline: none;
+          color: white; font-size: 17px; font-weight: 700; width: 100%;
+          font-variant-numeric: tabular-nums;
+        }
+        .v3a-range-input::placeholder { color: rgba(255,255,255,0.2); }
+        .v3a-range-input[type=number]::-webkit-outer-spin-button,
+        .v3a-range-input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+        .v3a-preset-btn {
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          gap: 3px; padding: 9px 6px; border-radius: 11px;
+          background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.07);
+          color: rgba(255,255,255,0.4); cursor: pointer; transition: all 0.2s; text-align: center;
+          font-size: 11px; font-weight: 600;
+        }
+        .v3a-preset-btn:hover { background: rgba(251,146,60,0.12); border-color: rgba(251,146,60,0.3); color: #fdba74; }
+        .v3a-preset-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .v3a-mode-btn {
+          padding: 6px 14px; border-radius: 10px; font-size: 12px; font-weight: 700;
+          border: 1px solid rgba(255,255,255,0.1); background: transparent;
+          color: rgba(255,255,255,0.35); cursor: pointer; transition: all 0.2s;
+        }
+        .v3a-mode-btn:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.6); }
+        .v3a-mode-btn.active { background: rgba(251,146,60,0.18); border-color: rgba(251,146,60,0.5); color: #fdba74; }
+        .v3a-slip-btn {
+          padding: 6px 12px; border-radius: 10px; font-size: 12px; font-weight: 700;
+          border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.04);
+          color: rgba(255,255,255,0.4); cursor: pointer; transition: all 0.2s;
+        }
+        .v3a-slip-btn:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.7); }
+        .v3a-slip-btn.active { background: rgba(251,146,60,0.18); border-color: rgba(251,146,60,0.5); color: #fdba74; }
+        .v3a-slip-input {
+          background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+          border-radius: 10px; padding: 6px 10px; color: white; font-size: 13px; font-weight: 700;
+          outline: none; width: 68px; text-align: right; font-variant-numeric: tabular-nums;
+        }
+        .v3a-slip-input:focus { border-color: rgba(251,146,60,0.4); }
+        .v3a-slip-input[type=number]::-webkit-outer-spin-button,
+        .v3a-slip-input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+        .v3a-submit-btn {
+          width: 100%; height: 52px; border-radius: 16px;
+          font-weight: 700; font-size: 15px; letter-spacing: 0.02em;
+          border: none; cursor: pointer; transition: all 0.2s;
+          display: flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .v3a-submit-btn.active { background: linear-gradient(135deg,#f97316,#f59e0b); color: white; box-shadow: 0 4px 24px rgba(249,115,22,0.35); }
+        .v3a-submit-btn.active:hover { background: linear-gradient(135deg,#ea580c,#d97706); box-shadow: 0 6px 32px rgba(249,115,22,0.5); transform: translateY(-1px); }
+        .v3a-submit-btn.loading { background: rgba(249,115,22,0.25); color: rgba(255,255,255,0.5); cursor: not-allowed; }
+        .v3a-submit-btn.disabled { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.25); cursor: not-allowed; }
+        @keyframes v3a-spin { to { transform: rotate(360deg); } }
+        .v3a-spin { animation: v3a-spin 1s linear infinite; }
+        @keyframes v3a-pulse { 0%,100%{opacity:1}50%{opacity:0.4} }
+        .v3a-pulse { animation: v3a-pulse 1.5s ease-in-out infinite; }
+        .v3a-tick-snap-warn {
+          display: flex; align-items: flex-start; gap: 7px; padding: 10px 12px;
+          background: rgba(245,158,11,0.07); border: 1px solid rgba(245,158,11,0.2);
+          border-radius: 11px; font-size: 11px; color: rgba(253,186,116,0.8); line-height: 1.5;
+        }
+        .v3a-efficiency-badge {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 12px 14px; border-radius: 13px;
+          background: rgba(251,146,60,0.08); border: 1px solid rgba(251,146,60,0.2);
+        }
+        .v3a-range-badge {
+          display: flex; align-items: center; gap: 8px;
+          padding: 11px 14px; border-radius: 13px; font-size: 13px; font-weight: 600;
+        }
+        .v3a-range-badge.in-range { background: rgba(34,197,94,0.08); border: 1px solid rgba(34,197,94,0.2); color: #4ade80; }
+        .v3a-range-badge.out-range { background: rgba(245,158,11,0.08); border: 1px solid rgba(245,158,11,0.2); color: #fbbf24; }
+      `}</style>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+        {/* ── Advanced mode banner ── */}
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "12px 16px", borderRadius: 14, background: "rgba(251,146,60,0.08)", border: "1px solid rgba(251,146,60,0.2)" }}>
+          <div style={{ width: 32, height: 32, borderRadius: 10, background: "rgba(251,146,60,0.18)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
+            <Zap style={{ width: 16, height: 16, color: "#fdba74" }} />
+          </div>
+          <div>
+            <p style={{ fontSize: 12, fontWeight: 700, color: "#fdba74", margin: 0 }}>Advanced Mode — Full Control</p>
+            <p style={{ fontSize: 11, color: "rgba(253,186,116,0.55)", margin: 0, marginTop: 3, lineHeight: 1.5 }}>
+              Set a custom price range for concentrated liquidity. Out-of-range positions earn no fees and deposit only one token.
+            </p>
+          </div>
         </div>
-      </div>
 
-      {/* Token Inputs */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-4">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-sm text-slate-400">Token A{token0Symbol && tokenA ? ` (${tokenA.symbol === token0Symbol ? "token0" : "token1"})` : ""}</Label>
-              {balanceA !== null && tokenA && (
-                <button className="text-xs text-blue-400 hover:text-blue-300" onClick={() => setAmountA(formatAmount(balanceA, tokenA.decimals))}>Balance: {formatAmount(balanceA, tokenA.decimals)} MAX</button>
+        {/* ── Token A ── */}
+        <div className={`v3a-token-box ${depositMode === "token1-only" ? "disabled-box" : ""}`} style={{ padding: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <span className="v3a-label">Token A{token0Symbol && tokenA ? ` · ${tokenA.symbol === token0Symbol ? "token0" : "token1"}` : ""}</span>
+            {balanceA !== null && tokenA && (
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: "pointer" }} onClick={() => setAmountA(formatAmount(balanceA, tokenA.decimals))}>
+                Balance: <span style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600 }}>{formatBalance(balanceA, tokenA.decimals)}</span>
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <input type="number" placeholder="0.00" value={amountA} onChange={e => setAmountA(e.target.value)} disabled={depositMode === "token1-only"} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+              <button onClick={() => setShowTokenASelector(true)} className={`v3a-token-btn ${!tokenA ? "empty" : ""}`}>
+                {tokenA ? (<><img src={tokenA.logoURI} alt={tokenA.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenA.symbol}</span></>) : <span>Select token</span>}
+              </button>
+              {balanceA !== null && tokenA && depositMode !== "token1-only" && (
+                <button className="v3a-max-btn" onClick={() => setAmountA(formatAmount(balanceA, tokenA.decimals))}>MAX</button>
               )}
             </div>
-            <div className="flex gap-2">
-              <Input type="number" placeholder="0.00" value={amountA} onChange={(e) => setAmountA(e.target.value)} className="flex-1 bg-slate-800 border-slate-600" disabled={depositMode === "token1-only"} />
-              <Button variant="outline" onClick={() => setShowTokenASelector(true)} className="min-w-[120px]">
-                {tokenA ? <div className="flex items-center gap-2">{tokenA.logoURI && <img src={tokenA.logoURI} alt={tokenA.symbol} className="w-5 h-5 rounded-full" />}<span>{tokenA.symbol}</span></div> : "Select Token"}
-              </Button>
-            </div>
-            {depositMode === "token1-only" && <p className="text-xs text-amber-400">⚠ Price above range — only {token1Symbol || tokenB?.symbol} can be deposited</p>}
           </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-sm text-slate-400">Token B{token1Symbol && tokenB ? ` (${tokenB.symbol === token1Symbol ? "token1" : "token0"})` : ""}</Label>
-              {balanceB !== null && tokenB && (
-                <button className="text-xs text-blue-400 hover:text-blue-300" onClick={() => setAmountB(formatAmount(balanceB, tokenB.decimals))}>Balance: {formatAmount(balanceB, tokenB.decimals)} MAX</button>
+          {depositMode === "token1-only" && (
+            <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+              <AlertTriangle style={{ width: 12, height: 12, color: "#fbbf24", flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>Price above range — only {token1Symbol || tokenB?.symbol} can be deposited</span>
+            </div>
+          )}
+        </div>
+
+        {/* ── Plus divider ── */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div className="v3a-divider-ring"><Plus style={{ width: 18, height: 18 }} /></div>
+        </div>
+
+        {/* ── Token B ── */}
+        <div className={`v3a-token-box ${depositMode === "token0-only" ? "disabled-box" : ""}`} style={{ padding: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <span className="v3a-label">Token B{token1Symbol && tokenB ? ` · ${tokenB.symbol === token1Symbol ? "token1" : "token0"}` : ""}</span>
+            {balanceB !== null && tokenB && (
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: depositMode !== "token0-only" ? "pointer" : "default" }} onClick={() => depositMode !== "token0-only" && setAmountB(formatAmount(balanceB, tokenB.decimals))}>
+                Balance: <span style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600 }}>{formatBalance(balanceB, tokenB.decimals)}</span>
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <input type="number" placeholder="0.00" value={amountB} onChange={e => { setAmountB(e.target.value); setAmountBIsAuto(false); setAutoCalcAmounts(null); }} disabled={depositMode === "token0-only"} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+              <button onClick={() => setShowTokenBSelector(true)} className={`v3a-token-btn ${!tokenB ? "empty" : ""}`}>
+                {tokenB ? (<><img src={tokenB.logoURI} alt={tokenB.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenB.symbol}</span></>) : <span>Select token</span>}
+              </button>
+              {balanceB !== null && tokenB && depositMode !== "token0-only" && (
+                <button className="v3a-max-btn" onClick={() => setAmountB(formatAmount(balanceB, tokenB.decimals))}>MAX</button>
               )}
             </div>
-            <div className="flex gap-2">
-              <Input type="number" placeholder="0.00" value={amountB} onChange={(e) => { setAmountB(e.target.value); setAmountBIsAuto(false); setAutoCalcAmounts(null); }} className="flex-1 bg-slate-800 border-slate-600" disabled={depositMode === "token0-only"} />
-              <Button variant="outline" onClick={() => setShowTokenBSelector(true)} className="min-w-[120px]">
-                {tokenB ? <div className="flex items-center gap-2">{tokenB.logoURI && <img src={tokenB.logoURI} alt={tokenB.symbol} className="w-5 h-5 rounded-full" />}<span>{tokenB.symbol}</span></div> : "Select Token"}
-              </Button>
-            </div>
-            {depositMode === "token0-only" && <p className="text-xs text-amber-400">⚠ Price below range — only {token0Symbol || tokenA?.symbol} can be deposited</p>}
-            {amountBIsAuto && depositMode === "dual" && <p className="text-xs text-slate-500">Auto-calculated via V3 math — you can override</p>}
           </div>
-        </CardContent>
-      </Card>
-
-      {/* Fee Tier */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Label className="text-sm text-slate-400">Fee Tier</Label>
-              <Info className="h-4 w-4 text-slate-500" />
+          {depositMode === "token0-only" && (
+            <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+              <AlertTriangle style={{ width: 12, height: 12, color: "#fbbf24", flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>Price below range — only {token0Symbol || tokenA?.symbol} can be deposited</span>
             </div>
+          )}
+          {amountBIsAuto && depositMode === "dual" && (
+            <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+              <Info style={{ width: 12, height: 12, color: "rgba(253,186,116,0.5)", flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: "rgba(253,186,116,0.5)" }}>Auto-calculated via V3 math — you can override</span>
+            </div>
+          )}
+        </div>
 
-            {/* ── Pool reserves display ── */}
-            {poolExists && (
-              <div className="text-right">
-                {poolReservesLabel ? (
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <BarChart3 className="h-3 w-3 text-slate-500" />
-                    <span className="text-slate-400">Pool reserves:</span>
-                    <span className="font-mono text-slate-200 font-medium">{poolReservesLabel}</span>
+        {/* ── Fee tier ── */}
+        <div className="v3a-card">
+          <div className="v3a-card-header">
+            <span className="v3a-label">Fee Tier</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {poolExists && poolReservesLabel && (
+                <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
+                  <BarChart3 style={{ width: 11, height: 11 }} />
+                  <span style={{ fontFamily: "monospace", color: "rgba(255,255,255,0.6)" }}>{poolReservesLabel}</span>
+                </div>
+              )}
+              <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 10px", borderRadius: 20, background: isCheckingPool ? "rgba(255,255,255,0.05)" : poolExists ? "rgba(251,146,60,0.1)" : "rgba(99,102,241,0.1)", border: `1px solid ${isCheckingPool ? "transparent" : poolExists ? "rgba(251,146,60,0.3)" : "rgba(99,102,241,0.3)"}` }}>
+                <span className={isCheckingPool ? "v3a-pulse" : ""} style={{ width: 6, height: 6, borderRadius: "50%", background: isCheckingPool ? "#6b7280" : poolExists ? "#fb923c" : "#818cf8", display: "inline-block" }} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: isCheckingPool ? "#6b7280" : poolExists ? "#fdba74" : "#a5b4fc" }}>{isCheckingPool ? "Checking…" : poolExists ? "Pool Exists" : "New Pool"}</span>
+              </div>
+              <button onClick={fetchPoolState} disabled={isCheckingPool} style={{ display: "flex", alignItems: "center", padding: "4px 8px", borderRadius: 8, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.4)", cursor: "pointer" }}>
+                <RefreshCw style={{ width: 11, height: 11 }} className={isCheckingPool ? "v3a-spin" : ""} />
+              </button>
+            </div>
+          </div>
+          <div style={{ padding: "12px 14px" }}>
+            <div className="v3a-fee-grid">
+              {FEE_OPTIONS.map(opt => (
+                <button key={opt.value} onClick={() => setSelectedFee(opt.value)} className={`v3a-fee-btn ${selectedFee === opt.value ? "active" : ""}`}>
+                  <span style={{ fontSize: 12, fontWeight: 800 }}>{opt.label}</span>
+                  <span style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", opacity: 0.65 }}>{opt.tag}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Price range ── */}
+        <div className="v3a-card">
+          <div className="v3a-card-header">
+            <span className="v3a-label">Price Range</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <button onClick={() => setUseTickMode(false)} className={`v3a-mode-btn ${!useTickMode ? "active" : ""}`}>Price</button>
+              <button onClick={() => setUseTickMode(true)} className={`v3a-mode-btn ${useTickMode ? "active" : ""}`}>Ticks</button>
+            </div>
+          </div>
+
+          <div style={{ padding: "14px 14px", display: "flex", flexDirection: "column", gap: 14 }}>
+            {/* Pool price info */}
+            {poolExists && currentPrice !== null && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "rgba(255,255,255,0.03)", borderRadius: 11, border: "1px solid rgba(255,255,255,0.06)" }}>
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>Current price · tick {currentTick}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "white", fontFamily: "monospace" }}>{currentPrice.toFixed(6)}</span>
+              </div>
+            )}
+
+            {/* Quick preset buttons */}
+            {poolExists && currentPrice !== null && (
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6 }}>
+                {RANGE_PRESETS.map(({ key, label, Icon }) => (
+                  <button key={key} onClick={() => applyRangePreset(key as any)} disabled={!currentPrice} className="v3a-preset-btn">
+                    <Icon style={{ width: 13, height: 13 }} />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Min / Max inputs */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              {/* Min */}
+              <div className="v3a-range-input-box">
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{useTickMode ? "Tick Lower" : "Min Price"}</span>
+                  <TrendingDown style={{ width: 12, height: 12, color: "rgba(255,255,255,0.25)" }} />
+                </div>
+                <input
+                  type="number" placeholder={useTickMode ? "-887272" : "0.00"}
+                  value={useTickMode ? minTick : minPrice}
+                  onChange={e => useTickMode ? handleMinTickChange(e.target.value) : handleMinPriceChange(e.target.value)}
+                  className="v3a-range-input"
+                />
+                {useTickMode && minPrice ? (
+                  <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 4, fontFamily: "monospace" }}>≈ {parseFloat(minPrice).toFixed(6)}</p>
+                ) : !useTickMode && minTick ? (
+                  <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 4, fontFamily: "monospace" }}>tick: {minTick}</p>
+                ) : null}
+              </div>
+              {/* Max */}
+              <div className="v3a-range-input-box">
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.07em" }}>{useTickMode ? "Tick Upper" : "Max Price"}</span>
+                  <TrendingUp style={{ width: 12, height: 12, color: "rgba(255,255,255,0.25)" }} />
+                </div>
+                <input
+                  type="number" placeholder={useTickMode ? "887272" : "0.00"}
+                  value={useTickMode ? maxTick : maxPrice}
+                  onChange={e => useTickMode ? handleMaxTickChange(e.target.value) : handleMaxPriceChange(e.target.value)}
+                  className="v3a-range-input"
+                />
+                {useTickMode && maxPrice ? (
+                  <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 4, fontFamily: "monospace" }}>≈ {parseFloat(maxPrice).toFixed(6)}</p>
+                ) : !useTickMode && maxTick ? (
+                  <p style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", marginTop: 4, fontFamily: "monospace" }}>tick: {maxTick}</p>
+                ) : null}
+              </div>
+            </div>
+            {useTickMode && <p style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", marginTop: -6 }}>Tick spacing for this fee: {tickSpacing}</p>}
+
+            {/* Tick snap warning */}
+            {minTick && maxTick && (() => {
+              const tlOk = parseInt(minTick) % tickSpacing === 0;
+              const tuOk = parseInt(maxTick) % tickSpacing === 0;
+              return (!tlOk || !tuOk) ? (
+                <div className="v3a-tick-snap-warn">
+                  <AlertTriangle style={{ width: 12, height: 12, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
+                  <span>Ticks will snap to spacing {tickSpacing} on submit.{!tlOk && ` Lower: ${minTick}→${getNearestUsableTick(parseInt(minTick), tickSpacing)}.`}{!tuOk && ` Upper: ${maxTick}→${getNearestUsableTick(parseInt(maxTick), tickSpacing)}.`}</span>
+                </div>
+              ) : null;
+            })()}
+
+            {/* Price range chart */}
+            {tokenA && tokenB && minPrice && maxPrice && parseFloat(minPrice) > 0 && parseFloat(maxPrice) > 0 && (
+              <PriceRangeChart
+                minPrice={parseFloat(minPrice)} maxPrice={parseFloat(maxPrice)}
+                currentPrice={currentPrice || undefined}
+                token0Symbol={token0Symbol || tokenA.symbol} token1Symbol={token1Symbol || tokenB.symbol}
+              />
+            )}
+
+            {/* Capital efficiency badge */}
+            {capitalEfficiency !== null && (
+              <div className="v3a-efficiency-badge">
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <Zap style={{ width: 16, height: 16, color: "#fb923c" }} />
+                  <div>
+                    <p style={{ fontSize: 12, fontWeight: 700, color: "#fdba74", margin: 0 }}>Capital Efficiency</p>
+                    <p style={{ fontSize: 10, color: "rgba(253,186,116,0.5)", margin: 0 }}>vs full range</p>
                   </div>
+                </div>
+                <span style={{ fontSize: 24, fontWeight: 800, color: "#fb923c", fontVariantNumeric: "tabular-nums" }}>{capitalEfficiency}×</span>
+              </div>
+            )}
+
+            {/* In/out of range badge */}
+            {poolExists && isInRange !== null && ticksValid && (
+              <div className={`v3a-range-badge ${isInRange ? "in-range" : "out-range"}`}>
+                {isInRange ? (
+                  <><Activity style={{ width: 15, height: 15 }} /><span>In Range — earning fees</span></>
                 ) : (
-                  <div className="flex items-center gap-1.5 text-xs text-slate-500">
-                    <BarChart3 className="h-3 w-3" />
-                    <span>Pool exists</span>
-                  </div>
+                  <>
+                    <AlertTriangle style={{ width: 15, height: 15 }} />
+                    <div>
+                      <p style={{ margin: 0 }}>Out of Range — no fees until price re-enters</p>
+                      <p style={{ fontSize: 11, opacity: 0.7, margin: "2px 0 0" }}>
+                        {depositMode === "token0-only"
+                          ? `Only ${token0Symbol} deposited. Earns fees when price rises above ${parseFloat(minPrice).toFixed(4)}.`
+                          : `Only ${token1Symbol} deposited. Earns fees when price falls below ${parseFloat(maxPrice).toFixed(4)}.`
+                        }
+                      </p>
+                    </div>
+                  </>
                 )}
               </div>
             )}
-          </div>
 
-          <div className="flex gap-2 flex-wrap">
-            {feeOptions.map((opt) => (
-              <Button key={opt.value} variant={selectedFee === opt.value ? "default" : "outline"} onClick={() => setSelectedFee(opt.value)} title={opt.description} className="flex-1 min-w-[72px] flex-col h-auto py-2">
-                <span className="font-semibold text-sm">{opt.label}</span>
-                <span className="opacity-60 text-[10px]">{opt.description}</span>
-              </Button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Price Range */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex gap-2">
-              <Button variant={!useTickMode ? "default" : "outline"} size="sm" onClick={() => setUseTickMode(false)}>Price</Button>
-              <Button variant={useTickMode ? "default" : "outline"} size="sm" onClick={() => setUseTickMode(true)}>Ticks</Button>
-            </div>
-            {poolExists && currentPrice !== null && (
-              <div className="text-right">
-                <p className="text-xs text-slate-400">Current: <span className="text-white font-mono">{currentPrice.toFixed(6)}</span></p>
-                <p className="text-xs text-slate-500">{priceLabel} · tick {currentTick}</p>
+            {/* New pool hint */}
+            {!poolExists && tokenA && tokenB && (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 12px", background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 11 }}>
+                <Info style={{ width: 13, height: 13, color: "rgba(255,255,255,0.3)", flexShrink: 0, marginTop: 1 }} />
+                <p style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", margin: 0, lineHeight: 1.5 }}>
+                  Pool will be created at the mid-price of your range. Tick spacing: <span style={{ fontFamily: "monospace", color: "rgba(255,255,255,0.55)" }}>{tickSpacing}</span>
+                </p>
               </div>
             )}
           </div>
+        </div>
 
-          {poolExists && currentPrice !== null && (
-            <div className="space-y-2">
-              <Label className="text-xs text-slate-500">Quick Range Presets</Label>
-              <div className="grid grid-cols-4 gap-2">
-                {([
-                  { key: "full",    label: "Full Range",  Icon: Layers,     tip: "Min/max ticks" },
-                  { key: "wide",    label: "Wide ±50%",   Icon: TrendingUp,  tip: "0.5x–2x price" },
-                  { key: "narrow",  label: "Narrow ±10%", Icon: Target,     tip: "90%–110%" },
-                  { key: "current", label: "At Current",  Icon: Activity,   tip: `${getTickSpacing(selectedFee)}-tick range` },
-                ] as const).map(({ key, label, Icon, tip }) => (
-                  <Button key={key} variant="outline" size="sm" title={tip} onClick={() => applyRangePreset(key as any)} className="flex flex-col h-auto py-2 gap-1">
-                    <Icon className="h-3 w-3" /><span className="text-xs">{label}</span>
-                  </Button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {!useTickMode ? (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-xs text-slate-500">Min Price ({priceLabel})</Label>
-                <div className="relative">
-                  <Input type="number" placeholder="0.00" value={minPrice} onChange={(e) => handleMinPriceChange(e.target.value)} className="bg-slate-800 border-slate-600 pr-8" />
-                  <TrendingDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500 pointer-events-none" />
-                </div>
-                {minTick && <p className="text-xs text-slate-600 font-mono">tick: {minTick}</p>}
-              </div>
-              <div className="space-y-2">
-                <Label className="text-xs text-slate-500">Max Price ({priceLabel})</Label>
-                <div className="relative">
-                  <Input type="number" placeholder="0.00" value={maxPrice} onChange={(e) => handleMaxPriceChange(e.target.value)} className="bg-slate-800 border-slate-600 pr-8" />
-                  <TrendingUp className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500 pointer-events-none" />
-                </div>
-                {maxTick && <p className="text-xs text-slate-600 font-mono">tick: {maxTick}</p>}
-              </div>
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-xs text-slate-500">Tick Lower <span className="text-slate-600">(spacing: {getTickSpacing(selectedFee)})</span></Label>
-                <Input type="number" placeholder="-887272" value={minTick} onChange={(e) => handleMinTickChange(e.target.value)} className="bg-slate-800 border-slate-600" />
-                {minPrice && <p className="text-xs text-slate-600">≈ {parseFloat(minPrice).toFixed(6)}</p>}
-              </div>
-              <div className="space-y-2">
-                <Label className="text-xs text-slate-500">Tick Upper <span className="text-slate-600">(spacing: {getTickSpacing(selectedFee)})</span></Label>
-                <Input type="number" placeholder="887272" value={maxTick} onChange={(e) => handleMaxTickChange(e.target.value)} className="bg-slate-800 border-slate-600" />
-                {maxPrice && <p className="text-xs text-slate-600">≈ {parseFloat(maxPrice).toFixed(6)}</p>}
-              </div>
-            </div>
-          )}
-
-          {minTick && maxTick && (() => {
-            const ts = getTickSpacing(selectedFee);
-            const tlOk = parseInt(minTick) % ts === 0, tuOk = parseInt(maxTick) % ts === 0;
-            return (!tlOk || !tuOk) ? (
-              <div className="flex items-start gap-2 p-2 bg-amber-500/10 border border-amber-500/20 rounded text-xs text-amber-400">
-                <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
-                <span>Ticks will be snapped to spacing {ts} on submit.{!tlOk && ` Lower: ${minTick} → ${getNearestUsableTick(parseInt(minTick), ts)}.`}{!tuOk && ` Upper: ${maxTick} → ${getNearestUsableTick(parseInt(maxTick), ts)}.`}</span>
-              </div>
-            ) : null;
-          })()}
-
-          {tokenA && tokenB && minPrice && maxPrice && parseFloat(minPrice) > 0 && parseFloat(maxPrice) > 0 && (
-            <PriceRangeChart minPrice={parseFloat(minPrice)} maxPrice={parseFloat(maxPrice)} currentPrice={currentPrice || undefined} token0Symbol={token0Symbol || tokenA.symbol} token1Symbol={token1Symbol || tokenB.symbol} />
-          )}
-
-          {capitalEfficiency !== null && (
-            <div className="flex items-center justify-between p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-              <div className="flex items-center gap-2 text-sm text-blue-400"><Zap className="h-4 w-4" /><span>Capital Efficiency</span></div>
-              <div className="text-right"><span className="text-lg font-bold text-blue-300">{capitalEfficiency}x</span><p className="text-xs text-slate-500">vs full range</p></div>
-            </div>
-          )}
-
-          {poolExists && isInRange !== null && ticksValid && (
-            <div className={`p-3 rounded-lg border ${isInRange ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-amber-500/10 border-amber-500/20 text-amber-400"}`}>
-              <div className="flex items-center gap-2 text-sm font-medium">
-                {isInRange ? <><Zap className="h-4 w-4" /><span>In Range — earning fees</span></> : <><AlertTriangle className="h-4 w-4" /><span>Out of Range — no fees until price re-enters</span></>}
-              </div>
-              {!isInRange && (
-                <p className="text-xs mt-1 opacity-80">
-                  {depositMode === "token0-only" ? `Only ${token0Symbol} deposited. Earns fees when price rises above ${parseFloat(minPrice).toFixed(4)}.` : `Only ${token1Symbol} deposited. Earns fees when price falls below ${parseFloat(maxPrice).toFixed(4)}.`}
-                </p>
-              )}
-            </div>
-          )}
-
-          {!poolExists && tokenA && tokenB && (
-            <div className="flex items-start gap-2 p-3 bg-slate-800/50 border border-slate-700 rounded-lg">
-              <Info className="h-4 w-4 text-slate-400 shrink-0 mt-0.5" />
-              <p className="text-xs text-slate-400">Pool will be created at the mid-price of your range. Tick spacing for this fee: <span className="font-mono text-slate-300">{getTickSpacing(selectedFee)}</span>.</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Slippage */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-3">
-          <div className="flex items-center gap-2"><Settings className="h-4 w-4 text-slate-400" /><Label className="text-sm text-slate-400">Slippage Tolerance</Label></div>
-          <div className="flex gap-2 items-center flex-wrap">
-            {["0.5", "1", "2", "5"].map((s) => (<Button key={s} variant={slippage === s ? "default" : "outline"} size="sm" onClick={() => setSlippage(s)}>{s}%</Button>))}
-            <div className="flex items-center gap-1 ml-auto">
-              <Input type="number" value={slippage} onChange={(e) => setSlippage(e.target.value)} className="w-20 bg-slate-800 border-slate-600" min="0" max="50" step="0.1" />
-              <span className="text-sm text-slate-400">%</span>
+        {/* ── Slippage ── */}
+        <div className="v3a-card">
+          <div className="v3a-card-header">
+            <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+              <Settings style={{ width: 13, height: 13, color: "rgba(255,255,255,0.35)" }} />
+              <span className="v3a-label">Slippage Tolerance</span>
             </div>
           </div>
-          {parseFloat(slippage) > 10 && <p className="text-xs text-amber-400">⚠ High slippage</p>}
-          <p className="text-xs text-slate-600">
-            Note: slippage tolerance is for display only. V3 mint uses 0 minimums
-            (safe — the contract adjusts amounts to the exact pool ratio).
-          </p>
-        </CardContent>
-      </Card>
+          <div style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              {["0.5", "1", "2", "5"].map(s => (
+                <button key={s} onClick={() => setSlippage(s)} className={`v3a-slip-btn ${slippage === s ? "active" : ""}`}>{s}%</button>
+              ))}
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+                <input type="number" value={slippage} onChange={e => setSlippage(e.target.value)} min="0" max="50" step="0.1" className="v3a-slip-input" />
+                <span style={{ fontSize: 13, color: "rgba(255,255,255,0.35)", fontWeight: 700 }}>%</span>
+              </div>
+            </div>
+            {parseFloat(slippage) > 10 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <AlertTriangle style={{ width: 12, height: 12, color: "#fbbf24" }} />
+                <span style={{ fontSize: 11, color: "#fbbf24" }}>High slippage — use with caution</span>
+              </div>
+            )}
+            <p style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", lineHeight: 1.5, margin: 0 }}>
+              Note: slippage is for display only. V3 mint uses 0 minimums — the contract adjusts to the exact pool ratio.
+            </p>
+          </div>
+        </div>
 
-      {isConnected ? (
-        <Button onClick={handleAddLiquidity} className="w-full h-12 text-base font-semibold"
-          disabled={
-            !tokenA || !tokenB || !ticksValid || isAdding ||
-            (depositMode !== "token1-only" && (!amountA || parseFloat(amountA) <= 0)) ||
-            ((depositMode === "dual" || depositMode === "unknown" || depositMode === "token1-only") && (!amountB || parseFloat(amountB) < 0))
-          }>
-          {addButtonLabel()}
-        </Button>
-      ) : (
-        <Button disabled className="w-full h-12">Connect Wallet</Button>
-      )}
+        {/* ── Submit ── */}
+        {isConnected ? (
+          <button
+            onClick={handleAddLiquidity}
+            disabled={!canSubmit}
+            className={`v3a-submit-btn ${isAdding ? "loading" : canSubmit ? "active" : "disabled"}`}
+          >
+            {isAdding ? (
+              <><span style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.2)", borderTopColor: "white", borderRadius: "50%", display: "inline-block" }} className="v3a-spin" />{poolExists ? "Adding Liquidity…" : "Creating Pool & Adding…"}</>
+            ) : depositMode === "token0-only" ? (
+              <><Zap style={{ width: 17, height: 17 }} />Deposit {token0Symbol || tokenA?.symbol} Only</>
+            ) : depositMode === "token1-only" ? (
+              <><Zap style={{ width: 17, height: 17 }} />Deposit {token1Symbol || tokenB?.symbol} Only</>
+            ) : (
+              <><Zap style={{ width: 17, height: 17 }} />Add V3 Liquidity</>
+            )}
+          </button>
+        ) : (
+          <button disabled className="v3a-submit-btn disabled">Connect Wallet to Continue</button>
+        )}
+      </div>
 
-      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={(t) => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens} onImport={handleImportToken} />
-      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={(t) => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens} onImport={handleImportToken} />
-    </div>
+      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens} onImport={handleImportToken} />
+      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens} onImport={handleImportToken} />
+    </>
   );
 }
