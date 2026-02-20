@@ -72,6 +72,12 @@ interface V3Position {
   unclaimedFees1: bigint;
   amount0: bigint;
   amount1: bigint;
+  currentTick?: number;
+}
+
+function getPositionStatus(currentTick: number | undefined, tickLower: number, tickUpper: number): "in-range" | "out-of-range" {
+  if (currentTick === undefined) return "out-of-range";
+  return currentTick >= tickLower && currentTick < tickUpper ? "in-range" : "out-of-range";
 }
 
 export function RemoveLiquidityV3() {
@@ -241,6 +247,7 @@ export function RemoveLiquidityV3() {
             unclaimedFees1,
             amount0,
             amount1,
+            currentTick,
           });
         } catch (error) {
           console.error(`Error loading position ${i}:`, error);
@@ -552,6 +559,15 @@ export function RemoveLiquidityV3() {
                       <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/20">
                         {feeTierLabel}
                       </span>
+                      {position.liquidity > 0n && (
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
+                          getPositionStatus(position.currentTick, position.tickLower, position.tickUpper) === "in-range"
+                            ? "bg-orange-500/15 text-orange-400 border border-orange-500/20"
+                            : "bg-amber-500/15 text-amber-400 border border-amber-500/20"
+                        }`}>
+                          {getPositionStatus(position.currentTick, position.tickLower, position.tickUpper) === "in-range" ? "In Range" : "Out of Range"}
+                        </span>
+                      )}
                     </div>
                     <p className="text-[11px] text-muted-foreground mt-0.5">
                       #{position.tokenId.toString()} · V3 Position
