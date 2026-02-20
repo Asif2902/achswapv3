@@ -1,8 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
@@ -21,7 +19,7 @@ import {
 import { calculateAmountsForLiquidity } from "@/lib/v3-liquidity-math";
 import {
   AlertTriangle, Zap, ExternalLink, TrendingUp, TrendingDown,
-  Info, Settings, BarChart3, Layers, Target, Activity,
+  Info, Settings, BarChart3, Layers, Target, Activity, ChevronDown,
 } from "lucide-react";
 import { PriceRangeChart } from "./PriceRangeChart";
 
@@ -41,10 +39,6 @@ function getERC20Address(token: Token, chainId: number): string {
 
 type DepositMode = "dual" | "token0-only" | "token1-only" | "unknown";
 
-/**
- * Format a counterpart amount for display.
- * Uses full formatUnits precision to avoid rounding very small values to "0.000000".
- */
 function formatCounterpartAmount(raw: bigint, decimals: number): string {
   const full = formatUnits(raw, decimals);
   const num = parseFloat(full);
@@ -53,10 +47,6 @@ function formatCounterpartAmount(raw: bigint, decimals: number): string {
   return parseFloat(num.toFixed(8)).toString();
 }
 
-/**
- * Format a pool reserve amount in a human-friendly compact form.
- * e.g. 1_234_567.89 → "1.23M"  |  0.000123 → "0.000123"
- */
 function formatPoolReserve(raw: bigint, decimals: number): string {
   const full = formatUnits(raw, decimals);
   const n = parseFloat(full);
@@ -89,7 +79,6 @@ export function AddLiquidityV3Advanced() {
   const [currentSqrtPriceX96, setCurrentSqrtPriceX96] = useState<bigint | null>(null);
   const [currentTick, setCurrentTick] = useState<number | null>(null);
   const [poolLiquidity, setPoolLiquidity] = useState<bigint>(0n);
-  // ── Pool token reserves (human-readable alternative to raw liquidity) ──
   const [poolToken0Reserve, setPoolToken0Reserve] = useState<bigint | null>(null);
   const [poolToken1Reserve, setPoolToken1Reserve] = useState<bigint | null>(null);
   const [poolAddress, setPoolAddress] = useState<string | null>(null);
@@ -101,11 +90,8 @@ export function AddLiquidityV3Advanced() {
   const [balanceA, setBalanceA] = useState<bigint | null>(null);
   const [balanceB, setBalanceB] = useState<bigint | null>(null);
   const [amountBIsAuto, setAmountBIsAuto] = useState(false);
-
   const [autoCalcAmounts, setAutoCalcAmounts] = useState<{
-    amount0: bigint;
-    amount1: bigint;
-    forAmountA: string;
+    amount0: bigint; amount1: bigint; forAmountA: string;
   } | null>(null);
 
   const { address, isConnected } = useAccount();
@@ -114,11 +100,11 @@ export function AddLiquidityV3Advanced() {
   const contracts = chainId ? getContractsForChain(chainId) : null;
 
   const feeOptions = [
-    { value: V3_FEE_TIERS.LOWEST,     label: "0.01%", description: "Very stable pairs" },
-    { value: V3_FEE_TIERS.LOW,        label: "0.05%", description: "Stable pairs" },
+    { value: V3_FEE_TIERS.LOWEST,     label: "0.01%", description: "Very stable" },
+    { value: V3_FEE_TIERS.LOW,        label: "0.05%", description: "Stable" },
     { value: V3_FEE_TIERS.MEDIUM,     label: "0.3%",  description: "Most pairs" },
-    { value: V3_FEE_TIERS.HIGH,       label: "1%",    description: "Exotic/volatile pairs" },
-    { value: V3_FEE_TIERS.ULTRA_HIGH, label: "10%",   description: "Very exotic pairs" },
+    { value: V3_FEE_TIERS.HIGH,       label: "1%",    description: "Exotic" },
+    { value: V3_FEE_TIERS.ULTRA_HIGH, label: "10%",   description: "Very exotic" },
   ];
 
   const getSortedTokens = useCallback(() => {
@@ -204,7 +190,6 @@ export function AddLiquidityV3Advanced() {
     })();
   }, [address, tokenA, tokenB, chainId]);
 
-  // ── Fetch pool info + token reserves ─────────────────────────────────────
   useEffect(() => {
     if (!tokenA || !tokenB || !contracts || !window.ethereum || !chainId) return;
     (async () => {
@@ -217,119 +202,71 @@ export function AddLiquidityV3Advanced() {
         setToken1Symbol(tok1.symbol);
         setToken0Decimals(tok0.decimals);
         setToken1Decimals(tok1.decimals);
-
         const poolAddr = await factory.getPool(tok0.address, tok1.address, selectedFee);
         const ZERO = "0x0000000000000000000000000000000000000000";
         if (!poolAddr || poolAddr === ZERO) {
-          setPoolExists(false);
-          setCurrentPrice(null);
-          setCurrentSqrtPriceX96(null);
-          setCurrentTick(null);
-          setPoolLiquidity(0n);
-          setPoolAddress(null);
-          setPoolToken0Reserve(null);
-          setPoolToken1Reserve(null);
-          return;
+          setPoolExists(false); setCurrentPrice(null); setCurrentSqrtPriceX96(null);
+          setCurrentTick(null); setPoolLiquidity(0n); setPoolAddress(null);
+          setPoolToken0Reserve(null); setPoolToken1Reserve(null); return;
         }
-
-        setPoolExists(true);
-        setPoolAddress(poolAddr);
-
+        setPoolExists(true); setPoolAddress(poolAddr);
         const pool = new Contract(poolAddr, V3_POOL_ABI, provider);
         const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()]);
         const sqrtPX96: bigint = slot0[0];
         const tick = Number(slot0[1]);
         const price = sqrtPriceX96ToPrice(sqrtPX96, tok0.decimals, tok1.decimals);
-        setCurrentSqrtPriceX96(sqrtPX96);
-        setCurrentPrice(price);
-        setCurrentTick(tick);
-        setPoolLiquidity(liq);
-
-        // ── Fetch actual token reserves held by the pool ──────────────────
+        setCurrentSqrtPriceX96(sqrtPX96); setCurrentPrice(price);
+        setCurrentTick(tick); setPoolLiquidity(liq);
         try {
           const tok0Contract = new Contract(tok0.address, ERC20_ABI, provider);
           const tok1Contract = new Contract(tok1.address, ERC20_ABI, provider);
-          const [res0, res1] = await Promise.all([
-            tok0Contract.balanceOf(poolAddr),
-            tok1Contract.balanceOf(poolAddr),
-          ]);
-          setPoolToken0Reserve(res0 as bigint);
-          setPoolToken1Reserve(res1 as bigint);
-        } catch (resErr) {
-          console.warn("Could not fetch pool reserves:", resErr);
-          setPoolToken0Reserve(null);
-          setPoolToken1Reserve(null);
-        }
-
+          const [res0, res1] = await Promise.all([tok0Contract.balanceOf(poolAddr), tok1Contract.balanceOf(poolAddr)]);
+          setPoolToken0Reserve(res0 as bigint); setPoolToken1Reserve(res1 as bigint);
+        } catch { setPoolToken0Reserve(null); setPoolToken1Reserve(null); }
         if (!minPrice && !maxPrice) applyRangePresetValues("wide", price, tick, tok0 as any, tok1 as any);
       } catch (err) {
         console.error("Pool check error:", err);
-        setPoolExists(false);
-        setPoolToken0Reserve(null);
-        setPoolToken1Reserve(null);
+        setPoolExists(false); setPoolToken0Reserve(null); setPoolToken1Reserve(null);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tokenA, tokenB, selectedFee, contracts, chainId]);
 
-  // ── Auto-calculate amountB ────────────────────────────────────────────────
   useEffect(() => {
     if (!amountA || !tokenA || !tokenB || !chainId) return;
     const aFloat = parseFloat(amountA);
-    if (isNaN(aFloat) || aFloat <= 0) {
-      setAmountB(""); setAmountBIsAuto(false); setAutoCalcAmounts(null); return;
-    }
+    if (isNaN(aFloat) || aFloat <= 0) { setAmountB(""); setAmountBIsAuto(false); setAutoCalcAmounts(null); return; }
     const s = getSortedTokens(); if (!s) return;
     const { tok0, tok1, isToken0A } = s;
     const tl = minTick ? parseInt(minTick) : null;
     const tu = maxTick ? parseInt(maxTick) : null;
     const validTicks = tl !== null && tu !== null && !isNaN(tl) && !isNaN(tu) && tl < tu;
-
     if (validTicks && currentTick !== null) {
       if (currentTick < tl!) {
         const amount0 = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
         setAmountB("0"); setAmountBIsAuto(true);
-        setAutoCalcAmounts({ amount0: isToken0A ? amount0 : 0n, amount1: isToken0A ? 0n : amount0, forAmountA: amountA });
-        return;
+        setAutoCalcAmounts({ amount0: isToken0A ? amount0 : 0n, amount1: isToken0A ? 0n : amount0, forAmountA: amountA }); return;
       }
       if (currentTick >= tu!) {
         const amount1 = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
         setAmountB("0"); setAmountBIsAuto(true);
-        setAutoCalcAmounts({ amount0: isToken0A ? 0n : amount1, amount1: isToken0A ? amount1 : 0n, forAmountA: amountA });
-        return;
+        setAutoCalcAmounts({ amount0: isToken0A ? 0n : amount1, amount1: isToken0A ? amount1 : 0n, forAmountA: amountA }); return;
       }
     }
-
     if (validTicks && currentSqrtPriceX96) {
       try {
         const inputBig = parseAmount(amountA, isToken0A ? tok0.decimals : tok1.decimals);
-        const { amount0, amount1 } = calculateAmountsForLiquidity(
-          inputBig, isToken0A, currentSqrtPriceX96, tl!, tu!, tok0.decimals, tok1.decimals,
-        );
+        const { amount0, amount1 } = calculateAmountsForLiquidity(inputBig, isToken0A, currentSqrtPriceX96, tl!, tu!, tok0.decimals, tok1.decimals);
         const counterpart = isToken0A ? amount1 : amount0;
         const counterpartDec = isToken0A ? tok1.decimals : tok0.decimals;
         setAutoCalcAmounts({ amount0, amount1, forAmountA: amountA });
-        if (counterpart > 0n) {
-          setAmountB(formatCounterpartAmount(counterpart, counterpartDec));
-          setAmountBIsAuto(true);
-          return;
-        } else {
-          setAmountB("0"); setAmountBIsAuto(true); return;
-        }
-      } catch (err) {
-        console.warn("V3 math fallback:", err);
-        setAutoCalcAmounts(null);
-      }
+        if (counterpart > 0n) { setAmountB(formatCounterpartAmount(counterpart, counterpartDec)); setAmountBIsAuto(true); return; }
+        else { setAmountB("0"); setAmountBIsAuto(true); return; }
+      } catch (err) { console.warn("V3 math fallback:", err); setAutoCalcAmounts(null); }
     }
-
     if (currentPrice) {
-      const calc = (() => {
-        const s2 = getSortedTokens();
-        if (!s2) return aFloat * currentPrice;
-        return s2.isToken0A ? aFloat * currentPrice : aFloat / currentPrice;
-      })();
-      setAmountB(calc.toFixed(8)); setAmountBIsAuto(true);
-      setAutoCalcAmounts(null);
+      const calc = (() => { const s2 = getSortedTokens(); if (!s2) return aFloat * currentPrice; return s2.isToken0A ? aFloat * currentPrice : aFloat / currentPrice; })();
+      setAmountB(calc.toFixed(8)); setAmountBIsAuto(true); setAutoCalcAmounts(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [amountA, minTick, maxTick, currentSqrtPriceX96, currentPrice, currentTick, tokenA, tokenB, chainId]);
@@ -383,59 +320,39 @@ export function AddLiquidityV3Advanced() {
     if (isNaN(tickLowerRaw) || isNaN(tickUpperRaw) || tickLowerRaw >= tickUpperRaw) {
       toast({ title: "Invalid price range", description: "Min price must be less than max price", variant: "destructive" }); return;
     }
-
     const aVal = parseFloat(amountA), bVal = parseFloat(amountB);
     if ((depositMode === "dual" || depositMode === "unknown") && (!amountA || aVal <= 0)) { toast({ title: "Enter amount", description: "Enter Token A amount", variant: "destructive" }); return; }
     if ((depositMode === "dual" || depositMode === "unknown") && (!amountB || bVal < 0)) { toast({ title: "Enter amount", description: "Enter Token B amount", variant: "destructive" }); return; }
     if (depositMode === "token0-only" && (!amountA || aVal <= 0)) { toast({ title: "Enter amount", description: `Enter ${token0Symbol} amount`, variant: "destructive" }); return; }
     if (depositMode === "token1-only" && (!amountB || bVal <= 0)) { toast({ title: "Enter amount", description: `Enter ${token1Symbol} amount`, variant: "destructive" }); return; }
-
     setIsAdding(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer   = await provider.getSigner();
       const pm = new Contract(contracts.v3.nonfungiblePositionManager, NONFUNGIBLE_POSITION_MANAGER_ABI, signer);
-
       const tokenAIsNative = isNativeToken(tokenA.address), tokenBIsNative = isNativeToken(tokenB.address);
       const tokenAERC20 = getERC20Address(tokenA, chainId), tokenBERC20 = getERC20Address(tokenB, chainId);
       const [token0, token1] = sortTokens({ ...tokenA, address: tokenAERC20 }, { ...tokenB, address: tokenBERC20 });
       const isToken0A = tokenAERC20.toLowerCase() === token0.address.toLowerCase();
-
       const ts = getTickSpacing(selectedFee);
       const tickLower = getNearestUsableTick(tickLowerRaw, ts);
       const tickUpper = getNearestUsableTick(tickUpperRaw, ts);
-      if (tickLower >= tickUpper) {
-        toast({ title: "Invalid tick range", description: `Ticks must differ by at least ${ts}`, variant: "destructive" }); return;
-      }
-
+      if (tickLower >= tickUpper) { toast({ title: "Invalid tick range", description: `Ticks must differ by at least ${ts}`, variant: "destructive" }); return; }
       let amount0Desired: bigint, amount1Desired: bigint;
-
       if (depositMode === "token0-only") {
-        amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
-        amount1Desired = 0n;
+        amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals); amount1Desired = 0n;
       } else if (depositMode === "token1-only") {
-        amount0Desired = 0n;
-        amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
+        amount0Desired = 0n; amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
       } else {
-        const useStoredAmounts =
-          amountBIsAuto &&
-          autoCalcAmounts !== null &&
-          autoCalcAmounts.forAmountA === amountA;
-
+        const useStoredAmounts = amountBIsAuto && autoCalcAmounts !== null && autoCalcAmounts.forAmountA === amountA;
         if (useStoredAmounts && autoCalcAmounts) {
-          amount0Desired = autoCalcAmounts.amount0;
-          amount1Desired = autoCalcAmounts.amount1;
+          amount0Desired = autoCalcAmounts.amount0; amount1Desired = autoCalcAmounts.amount1;
         } else if (currentSqrtPriceX96 && ticksValid) {
           try {
             const inputBig = parseAmount(amountA, isToken0A ? token0.decimals : token1.decimals);
-            const { amount0, amount1 } = calculateAmountsForLiquidity(
-              inputBig, isToken0A, currentSqrtPriceX96, tickLower, tickUpper,
-              token0.decimals, token1.decimals,
-            );
-            amount0Desired = amount0;
-            amount1Desired = amount1;
+            const { amount0, amount1 } = calculateAmountsForLiquidity(inputBig, isToken0A, currentSqrtPriceX96, tickLower, tickUpper, token0.decimals, token1.decimals);
+            amount0Desired = amount0; amount1Desired = amount1;
           } catch (mathErr) {
-            console.warn("V3 math recompute failed, falling back to display strings:", mathErr);
             amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
             amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
           }
@@ -444,16 +361,12 @@ export function AddLiquidityV3Advanced() {
           amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
         }
       }
-
       if (amount0Desired === 0n && amount1Desired === 0n) {
-        toast({ title: "Amount error", description: "Could not compute valid token amounts. Please enter amounts manually.", variant: "destructive" });
-        return;
+        toast({ title: "Amount error", description: "Could not compute valid token amounts.", variant: "destructive" }); return;
       }
-
       let nativeAmount = 0n;
       if (tokenAIsNative) nativeAmount = isToken0A ? amount0Desired : amount1Desired;
       else if (tokenBIsNative) nativeAmount = isToken0A ? amount1Desired : amount0Desired;
-
       if (!poolExists) {
         const midPrice = (parseFloat(minPrice) + parseFloat(maxPrice)) / 2;
         const sqrtPX96 = priceToSqrtPriceX96(midPrice, token0.decimals, token1.decimals);
@@ -466,7 +379,6 @@ export function AddLiquidityV3Advanced() {
           await (await pm.createAndInitializePoolIfNecessary(token0.address, token1.address, selectedFee, sqrtPX96)).wait();
         }
       }
-
       toast({ title: "Approving tokens…" });
       const pmAddr = contracts.v3.nonfungiblePositionManager;
       if (amount0Desired > 0n && !(tokenAIsNative && isToken0A) && !(tokenBIsNative && !isToken0A)) {
@@ -477,19 +389,10 @@ export function AddLiquidityV3Advanced() {
         const c = new Contract(token1.address, ERC20_ABI, signer);
         if (await c.allowance(address, pmAddr) < amount1Desired) await (await c.approve(pmAddr, amount1Desired)).wait();
       }
-
-      const amount0Min = 0n;
-      const amount1Min = 0n;
-      const deadline   = Math.floor(Date.now() / 1000) + 1200;
-
+      const amount0Min = 0n, amount1Min = 0n;
+      const deadline = Math.floor(Date.now() / 1000) + 1200;
       toast({ title: "Adding liquidity…", description: "Creating your V3 position" });
-
-      const params = {
-        token0: token0.address, token1: token1.address, fee: selectedFee,
-        tickLower, tickUpper, amount0Desired, amount1Desired, amount0Min, amount1Min,
-        recipient: address, deadline,
-      };
-
+      const params = { token0: token0.address, token1: token1.address, fee: selectedFee, tickLower, tickUpper, amount0Desired, amount1Desired, amount0Min, amount1Min, recipient: address, deadline };
       let receipt;
       if (nativeAmount > 0n) {
         const md  = pm.interface.encodeFunctionData("mint", [params]);
@@ -500,15 +403,13 @@ export function AddLiquidityV3Advanced() {
         const gas = await pm.mint.estimateGas(params);
         receipt   = await (await pm.mint(params, { gasLimit: (gas * 150n) / 100n })).wait();
       }
-
       setAmountA(""); setAmountB(""); setAmountBIsAuto(false); setAutoCalcAmounts(null);
       toast({
         title: "Liquidity added!",
         description: (
           <div className="flex items-center gap-2">
             <span>V3 position created</span>
-            <Button size="sm" variant="ghost" className="h-6 px-2"
-              onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}>
+            <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}>
               <ExternalLink className="h-3 w-3" />
             </Button>
           </div>
@@ -524,12 +425,20 @@ export function AddLiquidityV3Advanced() {
 
   const addButtonLabel = () => {
     if (isAdding) return "Adding Liquidity…";
-    if (depositMode === "token0-only") return `Deposit ${token0Symbol || tokenA?.symbol} Only (Price Below Range)`;
-    if (depositMode === "token1-only") return `Deposit ${token1Symbol || tokenB?.symbol} Only (Price Above Range)`;
-    return "Add V3 Liquidity (Advanced)";
+    if (!tokenA || !tokenB) return "Select Tokens";
+    if (!ticksValid) return "Set Price Range";
+    if (depositMode === "token0-only") return `Deposit ${token0Symbol || tokenA?.symbol} Only`;
+    if (depositMode === "token1-only") return `Deposit ${token1Symbol || tokenB?.symbol} Only`;
+    if (!amountA || parseFloat(amountA) <= 0) return "Enter Amount";
+    return "Add V3 Liquidity";
   };
 
-  // ── Pool reserves display string ─────────────────────────────────────────
+  const canSubmit = !!(
+    tokenA && tokenB && ticksValid && !isAdding &&
+    (depositMode !== "token1-only" ? (amountA && parseFloat(amountA) > 0) : true) &&
+    ((depositMode === "dual" || depositMode === "unknown" || depositMode === "token1-only") ? (amountB !== undefined && parseFloat(amountB) >= 0) : true)
+  );
+
   const poolReservesLabel = useMemo(() => {
     if (poolToken0Reserve === null || poolToken1Reserve === null) return null;
     const r0 = formatPoolReserve(poolToken0Reserve, token0Decimals);
@@ -537,234 +446,410 @@ export function AddLiquidityV3Advanced() {
     return `${r0} ${token0Symbol} / ${r1} ${token1Symbol}`;
   }, [poolToken0Reserve, poolToken1Reserve, token0Decimals, token1Decimals, token0Symbol, token1Symbol]);
 
+  // ── Token input block ─────────────────────────────────────────────────────
+  const TokenInput = ({
+    label, role, amount, setAmount, token, onSelect, balance, disabled, warning,
+    testIdInput, testIdSelect,
+  }: {
+    label: string; role?: string; amount: string; setAmount: (v: string) => void;
+    token: Token | null; onSelect: () => void; balance: bigint | null;
+    disabled?: boolean; warning?: string;
+    testIdInput?: string; testIdSelect?: string;
+  }) => (
+    <div className={`rounded-2xl bg-slate-800/60 border p-4 space-y-3 transition-all ${
+      disabled ? "border-slate-700/30 opacity-60" : "border-slate-700/50 hover:border-slate-600/60"
+    }`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">{label}</span>
+          {role && <span className="text-[10px] text-slate-600 font-mono bg-slate-700/50 px-1.5 py-0.5 rounded">({role})</span>}
+        </div>
+        {balance !== null && token && (
+          <button
+            className="text-xs text-slate-400 hover:text-blue-400 transition-colors"
+            onClick={() => setAmount(formatAmount(balance, token.decimals))}
+          >
+            Balance: <span className="font-medium">{formatAmount(balance, token.decimals)}</span>
+            <span className="text-blue-400 ml-1 font-bold">MAX</span>
+          </button>
+        )}
+      </div>
+
+      <div className="flex items-center gap-3">
+        <Input
+          data-testid={testIdInput}
+          type="number"
+          placeholder={disabled ? "—" : "0.00"}
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          disabled={disabled}
+          className="border-0 bg-transparent text-2xl sm:text-3xl font-bold h-auto p-0 focus-visible:ring-0 focus-visible:ring-offset-0 text-white placeholder:text-slate-600 flex-1 min-w-0 disabled:opacity-40"
+        />
+        <Button
+          data-testid={testIdSelect}
+          onClick={onSelect}
+          variant="secondary"
+          className="h-10 px-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-xl gap-2 min-w-[110px] justify-between flex-shrink-0"
+        >
+          {token ? (
+            <>
+              <div className="flex items-center gap-1.5">
+                <img src={token.logoURI || "/img/logos/unknown-token.png"} alt={token.symbol} className="w-5 h-5 rounded-full flex-shrink-0" onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }} />
+                <span className="font-semibold text-sm text-white">{token.symbol}</span>
+              </div>
+              <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+            </>
+          ) : (
+            <>
+              <span className="text-slate-300 text-sm">Select</span>
+              <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+            </>
+          )}
+        </Button>
+      </div>
+
+      {warning && (
+        <div className="flex items-center gap-1.5 text-xs text-amber-400">
+          <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+          <span>{warning}</span>
+        </div>
+      )}
+    </div>
+  );
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-3 p-4 bg-orange-500/10 border border-orange-500/20 rounded-lg">
-        <AlertTriangle className="h-5 w-5 text-orange-400 shrink-0 mt-0.5" />
-        <div className="space-y-1">
-          <h3 className="font-semibold text-orange-400 text-sm">Advanced Mode – Full Control</h3>
-          <p className="text-xs text-slate-300">Out-of-range positions deposit only one token and earn no fees until the price re-enters the range.</p>
+    <div className="w-full space-y-3">
+      {/* Advanced mode warning */}
+      <div className="flex items-start gap-3 p-3.5 bg-orange-500/8 border border-orange-500/20 rounded-2xl">
+        <AlertTriangle className="h-4 w-4 text-orange-400 flex-shrink-0 mt-0.5" />
+        <div>
+          <p className="text-sm font-semibold text-orange-400 leading-none mb-1">Advanced Mode</p>
+          <p className="text-xs text-slate-400 leading-relaxed">Out-of-range positions deposit only one token and earn no fees until the price re-enters your range.</p>
         </div>
       </div>
 
-      {/* Token Inputs */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-4">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-sm text-slate-400">Token A{token0Symbol && tokenA ? ` (${tokenA.symbol === token0Symbol ? "token0" : "token1"})` : ""}</Label>
-              {balanceA !== null && tokenA && (
-                <button className="text-xs text-blue-400 hover:text-blue-300" onClick={() => setAmountA(formatAmount(balanceA, tokenA.decimals))}>Balance: {formatAmount(balanceA, tokenA.decimals)} MAX</button>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <Input type="number" placeholder="0.00" value={amountA} onChange={(e) => setAmountA(e.target.value)} className="flex-1 bg-slate-800 border-slate-600" disabled={depositMode === "token1-only"} />
-              <Button variant="outline" onClick={() => setShowTokenASelector(true)} className="min-w-[120px]">
-                {tokenA ? <div className="flex items-center gap-2">{tokenA.logoURI && <img src={tokenA.logoURI} alt={tokenA.symbol} className="w-5 h-5 rounded-full" />}<span>{tokenA.symbol}</span></div> : "Select Token"}
-              </Button>
-            </div>
-            {depositMode === "token1-only" && <p className="text-xs text-amber-400">⚠ Price above range — only {token1Symbol || tokenB?.symbol} can be deposited</p>}
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label className="text-sm text-slate-400">Token B{token1Symbol && tokenB ? ` (${tokenB.symbol === token1Symbol ? "token1" : "token0"})` : ""}</Label>
-              {balanceB !== null && tokenB && (
-                <button className="text-xs text-blue-400 hover:text-blue-300" onClick={() => setAmountB(formatAmount(balanceB, tokenB.decimals))}>Balance: {formatAmount(balanceB, tokenB.decimals)} MAX</button>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <Input type="number" placeholder="0.00" value={amountB} onChange={(e) => { setAmountB(e.target.value); setAmountBIsAuto(false); setAutoCalcAmounts(null); }} className="flex-1 bg-slate-800 border-slate-600" disabled={depositMode === "token0-only"} />
-              <Button variant="outline" onClick={() => setShowTokenBSelector(true)} className="min-w-[120px]">
-                {tokenB ? <div className="flex items-center gap-2">{tokenB.logoURI && <img src={tokenB.logoURI} alt={tokenB.symbol} className="w-5 h-5 rounded-full" />}<span>{tokenB.symbol}</span></div> : "Select Token"}
-              </Button>
-            </div>
-            {depositMode === "token0-only" && <p className="text-xs text-amber-400">⚠ Price below range — only {token0Symbol || tokenA?.symbol} can be deposited</p>}
-            {amountBIsAuto && depositMode === "dual" && <p className="text-xs text-slate-500">Auto-calculated via V3 math — you can override</p>}
-          </div>
-        </CardContent>
-      </Card>
+      {/* ── Token Inputs ── */}
+      <TokenInput
+        label="Token A"
+        role={token0Symbol && tokenA ? (tokenA.symbol === token0Symbol ? "token0" : "token1") : undefined}
+        amount={amountA}
+        setAmount={setAmountA}
+        token={tokenA}
+        onSelect={() => setShowTokenASelector(true)}
+        balance={balanceA}
+        disabled={depositMode === "token1-only"}
+        warning={depositMode === "token1-only" ? `Price above range — only ${token1Symbol || tokenB?.symbol} can be deposited` : undefined}
+        testIdInput="input-token-a"
+        testIdSelect="button-select-token-a"
+      />
 
-      {/* Fee Tier */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Label className="text-sm text-slate-400">Fee Tier</Label>
-              <Info className="h-4 w-4 text-slate-500" />
-            </div>
+      <TokenInput
+        label="Token B"
+        role={token1Symbol && tokenB ? (tokenB.symbol === token1Symbol ? "token1" : "token0") : undefined}
+        amount={amountB}
+        setAmount={(v) => { setAmountB(v); setAmountBIsAuto(false); setAutoCalcAmounts(null); }}
+        token={tokenB}
+        onSelect={() => setShowTokenBSelector(true)}
+        balance={balanceB}
+        disabled={depositMode === "token0-only"}
+        warning={depositMode === "token0-only" ? `Price below range — only ${token0Symbol || tokenA?.symbol} can be deposited` : undefined}
+        testIdInput="input-token-b"
+        testIdSelect="button-select-token-b"
+      />
 
-            {/* ── Pool reserves display ── */}
-            {poolExists && (
-              <div className="text-right">
-                {poolReservesLabel ? (
-                  <div className="flex items-center gap-1.5 text-xs">
-                    <BarChart3 className="h-3 w-3 text-slate-500" />
-                    <span className="text-slate-400">Pool reserves:</span>
-                    <span className="font-mono text-slate-200 font-medium">{poolReservesLabel}</span>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-1.5 text-xs text-slate-500">
-                    <BarChart3 className="h-3 w-3" />
-                    <span>Pool exists</span>
-                  </div>
-                )}
-              </div>
-            )}
+      {amountBIsAuto && depositMode === "dual" && (
+        <p className="text-xs text-slate-500 px-1">Token B auto-calculated via V3 math — tap to override</p>
+      )}
+
+      {/* ── Fee Tier ── */}
+      <div className="rounded-2xl bg-slate-800/60 border border-slate-700/50 p-4 space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Fee Tier</span>
+            <Info className="h-3.5 w-3.5 text-slate-600" />
           </div>
-
-          <div className="flex gap-2 flex-wrap">
-            {feeOptions.map((opt) => (
-              <Button key={opt.value} variant={selectedFee === opt.value ? "default" : "outline"} onClick={() => setSelectedFee(opt.value)} title={opt.description} className="flex-1 min-w-[72px] flex-col h-auto py-2">
-                <span className="font-semibold text-sm">{opt.label}</span>
-                <span className="opacity-60 text-[10px]">{opt.description}</span>
-              </Button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Price Range */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex gap-2">
-              <Button variant={!useTickMode ? "default" : "outline"} size="sm" onClick={() => setUseTickMode(false)}>Price</Button>
-              <Button variant={useTickMode ? "default" : "outline"} size="sm" onClick={() => setUseTickMode(true)}>Ticks</Button>
+          {poolExists && poolReservesLabel && (
+            <div className="flex items-center gap-1.5 text-xs">
+              <BarChart3 className="h-3.5 w-3.5 text-slate-500" />
+              <span className="text-slate-500">Reserves:</span>
+              <span className="font-mono text-slate-300 font-medium">{poolReservesLabel}</span>
             </div>
-            {poolExists && currentPrice !== null && (
-              <div className="text-right">
-                <p className="text-xs text-slate-400">Current: <span className="text-white font-mono">{currentPrice.toFixed(6)}</span></p>
-                <p className="text-xs text-slate-500">{priceLabel} · tick {currentTick}</p>
-              </div>
-            )}
+          )}
+        </div>
+
+        <div className="grid grid-cols-5 gap-1.5">
+          {feeOptions.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setSelectedFee(opt.value)}
+              className={`flex flex-col items-center py-2.5 px-1 rounded-xl border text-center transition-all ${
+                selectedFee === opt.value
+                  ? "bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-500/20"
+                  : "bg-slate-700/50 border-slate-600/50 text-slate-400 hover:border-slate-500 hover:text-slate-300"
+              }`}
+            >
+              <span className="text-xs font-bold leading-none mb-1">{opt.label}</span>
+              <span className="text-[9px] leading-none opacity-70 hidden sm:block">{opt.description}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Price Range ── */}
+      <div className="rounded-2xl bg-slate-800/60 border border-slate-700/50 p-4 space-y-4">
+        {/* Header row */}
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="flex items-center gap-1 p-1 bg-slate-700/50 rounded-lg">
+            <button
+              onClick={() => setUseTickMode(false)}
+              className={`px-3 py-1 rounded-md text-xs font-semibold transition-all ${
+                !useTickMode ? "bg-slate-600 text-white shadow" : "text-slate-400 hover:text-slate-300"
+              }`}
+            >
+              Price
+            </button>
+            <button
+              onClick={() => setUseTickMode(true)}
+              className={`px-3 py-1 rounded-md text-xs font-semibold transition-all ${
+                useTickMode ? "bg-slate-600 text-white shadow" : "text-slate-400 hover:text-slate-300"
+              }`}
+            >
+              Ticks
+            </button>
           </div>
 
           {poolExists && currentPrice !== null && (
-            <div className="space-y-2">
-              <Label className="text-xs text-slate-500">Quick Range Presets</Label>
-              <div className="grid grid-cols-4 gap-2">
-                {([
-                  { key: "full",    label: "Full Range",  Icon: Layers,     tip: "Min/max ticks" },
-                  { key: "wide",    label: "Wide ±50%",   Icon: TrendingUp,  tip: "0.5x–2x price" },
-                  { key: "narrow",  label: "Narrow ±10%", Icon: Target,     tip: "90%–110%" },
-                  { key: "current", label: "At Current",  Icon: Activity,   tip: `${getTickSpacing(selectedFee)}-tick range` },
-                ] as const).map(({ key, label, Icon, tip }) => (
-                  <Button key={key} variant="outline" size="sm" title={tip} onClick={() => applyRangePreset(key as any)} className="flex flex-col h-auto py-2 gap-1">
-                    <Icon className="h-3 w-3" /><span className="text-xs">{label}</span>
-                  </Button>
-                ))}
-              </div>
+            <div className="text-right">
+              <p className="text-xs text-white font-semibold font-mono">{currentPrice.toFixed(6)}</p>
+              <p className="text-[10px] text-slate-500">{priceLabel} · tick {currentTick}</p>
             </div>
           )}
+        </div>
 
-          {!useTickMode ? (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-xs text-slate-500">Min Price ({priceLabel})</Label>
+        {/* Range presets */}
+        {poolExists && currentPrice !== null && (
+          <div className="space-y-2">
+            <p className="text-xs text-slate-500 font-medium">Quick Presets</p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {([
+                { key: "full",    label: "Full Range",  Icon: Layers,    tip: "Min/max ticks" },
+                { key: "wide",    label: "Wide ±50%",   Icon: TrendingUp, tip: "0.5x–2x price" },
+                { key: "narrow",  label: "Narrow ±10%", Icon: Target,    tip: "90%–110%" },
+                { key: "current", label: "At Tick",     Icon: Activity,  tip: `${getTickSpacing(selectedFee)}-tick span` },
+              ] as const).map(({ key, label, Icon, tip }) => (
+                <button
+                  key={key}
+                  title={tip}
+                  onClick={() => applyRangePreset(key as any)}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl bg-slate-700/50 border border-slate-600/50 hover:border-slate-500 hover:bg-slate-700 transition-all text-left"
+                >
+                  <Icon className="h-3.5 w-3.5 text-slate-400 flex-shrink-0" />
+                  <span className="text-xs font-medium text-slate-300">{label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Min / Max inputs */}
+        {!useTickMode ? (
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { lbl: "Min Price", val: minPrice, onChange: handleMinPriceChange, tickVal: minTick, Icon: TrendingDown },
+              { lbl: "Max Price", val: maxPrice, onChange: handleMaxPriceChange, tickVal: maxTick, Icon: TrendingUp },
+            ].map(({ lbl, val, onChange, tickVal, Icon }) => (
+              <div key={lbl} className="space-y-1.5">
+                <p className="text-xs text-slate-500">{lbl}</p>
                 <div className="relative">
-                  <Input type="number" placeholder="0.00" value={minPrice} onChange={(e) => handleMinPriceChange(e.target.value)} className="bg-slate-800 border-slate-600 pr-8" />
-                  <TrendingDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500 pointer-events-none" />
+                  <Input
+                    type="number"
+                    placeholder="0.00"
+                    value={val}
+                    onChange={(e) => onChange(e.target.value)}
+                    className="bg-slate-700/50 border-slate-600/50 rounded-xl pr-8 text-white placeholder:text-slate-600"
+                  />
+                  <Icon className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-slate-500 pointer-events-none" />
                 </div>
-                {minTick && <p className="text-xs text-slate-600 font-mono">tick: {minTick}</p>}
+                {tickVal && <p className="text-[10px] text-slate-600 font-mono">tick {tickVal}</p>}
               </div>
-              <div className="space-y-2">
-                <Label className="text-xs text-slate-500">Max Price ({priceLabel})</Label>
-                <div className="relative">
-                  <Input type="number" placeholder="0.00" value={maxPrice} onChange={(e) => handleMaxPriceChange(e.target.value)} className="bg-slate-800 border-slate-600 pr-8" />
-                  <TrendingUp className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500 pointer-events-none" />
-                </div>
-                {maxTick && <p className="text-xs text-slate-600 font-mono">tick: {maxTick}</p>}
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { lbl: "Tick Lower", placeholder: "-887272", val: minTick, onChange: handleMinTickChange, priceVal: minPrice },
+              { lbl: "Tick Upper", placeholder: "887272",  val: maxTick, onChange: handleMaxTickChange, priceVal: maxPrice },
+            ].map(({ lbl, placeholder, val, onChange, priceVal }) => (
+              <div key={lbl} className="space-y-1.5">
+                <p className="text-xs text-slate-500">{lbl} <span className="text-slate-600 font-mono">(Δ{getTickSpacing(selectedFee)})</span></p>
+                <Input
+                  type="number"
+                  placeholder={placeholder}
+                  value={val}
+                  onChange={(e) => onChange(e.target.value)}
+                  className="bg-slate-700/50 border-slate-600/50 rounded-xl text-white placeholder:text-slate-600"
+                />
+                {priceVal && <p className="text-[10px] text-slate-600">≈ {parseFloat(priceVal).toFixed(6)}</p>}
               </div>
+            ))}
+            <div className="col-span-2">
+              <p className="text-[10px] text-slate-600">Tick spacing for this fee tier: <span className="font-mono">{getTickSpacing(selectedFee)}</span></p>
             </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label className="text-xs text-slate-500">Tick Lower <span className="text-slate-600">(spacing: {getTickSpacing(selectedFee)})</span></Label>
-                <Input type="number" placeholder="-887272" value={minTick} onChange={(e) => handleMinTickChange(e.target.value)} className="bg-slate-800 border-slate-600" />
-                {minPrice && <p className="text-xs text-slate-600">≈ {parseFloat(minPrice).toFixed(6)}</p>}
-              </div>
-              <div className="space-y-2">
-                <Label className="text-xs text-slate-500">Tick Upper <span className="text-slate-600">(spacing: {getTickSpacing(selectedFee)})</span></Label>
-                <Input type="number" placeholder="887272" value={maxTick} onChange={(e) => handleMaxTickChange(e.target.value)} className="bg-slate-800 border-slate-600" />
-                {maxPrice && <p className="text-xs text-slate-600">≈ {parseFloat(maxPrice).toFixed(6)}</p>}
-              </div>
+          </div>
+        )}
+
+        {/* Tick snap warning */}
+        {minTick && maxTick && (() => {
+          const ts = getTickSpacing(selectedFee);
+          const tlOk = parseInt(minTick) % ts === 0, tuOk = parseInt(maxTick) % ts === 0;
+          return (!tlOk || !tuOk) ? (
+            <div className="flex items-start gap-2 p-3 bg-amber-500/8 border border-amber-500/20 rounded-xl text-xs text-amber-400">
+              <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
+              <span>
+                Ticks will be snapped to spacing {ts} on submit.
+                {!tlOk && ` Lower: ${minTick} → ${getNearestUsableTick(parseInt(minTick), ts)}.`}
+                {!tuOk && ` Upper: ${maxTick} → ${getNearestUsableTick(parseInt(maxTick), ts)}.`}
+              </span>
             </div>
-          )}
+          ) : null;
+        })()}
 
-          {minTick && maxTick && (() => {
-            const ts = getTickSpacing(selectedFee);
-            const tlOk = parseInt(minTick) % ts === 0, tuOk = parseInt(maxTick) % ts === 0;
-            return (!tlOk || !tuOk) ? (
-              <div className="flex items-start gap-2 p-2 bg-amber-500/10 border border-amber-500/20 rounded text-xs text-amber-400">
-                <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
-                <span>Ticks will be snapped to spacing {ts} on submit.{!tlOk && ` Lower: ${minTick} → ${getNearestUsableTick(parseInt(minTick), ts)}.`}{!tuOk && ` Upper: ${maxTick} → ${getNearestUsableTick(parseInt(maxTick), ts)}.`}</span>
-              </div>
-            ) : null;
-          })()}
+        {/* Price range chart */}
+        {tokenA && tokenB && minPrice && maxPrice && parseFloat(minPrice) > 0 && parseFloat(maxPrice) > 0 && (
+          <PriceRangeChart
+            minPrice={parseFloat(minPrice)}
+            maxPrice={parseFloat(maxPrice)}
+            currentPrice={currentPrice || undefined}
+            token0Symbol={token0Symbol || tokenA.symbol}
+            token1Symbol={token1Symbol || tokenB.symbol}
+          />
+        )}
 
-          {tokenA && tokenB && minPrice && maxPrice && parseFloat(minPrice) > 0 && parseFloat(maxPrice) > 0 && (
-            <PriceRangeChart minPrice={parseFloat(minPrice)} maxPrice={parseFloat(maxPrice)} currentPrice={currentPrice || undefined} token0Symbol={token0Symbol || tokenA.symbol} token1Symbol={token1Symbol || tokenB.symbol} />
-          )}
-
-          {capitalEfficiency !== null && (
-            <div className="flex items-center justify-between p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-              <div className="flex items-center gap-2 text-sm text-blue-400"><Zap className="h-4 w-4" /><span>Capital Efficiency</span></div>
-              <div className="text-right"><span className="text-lg font-bold text-blue-300">{capitalEfficiency}x</span><p className="text-xs text-slate-500">vs full range</p></div>
+        {/* Capital efficiency */}
+        {capitalEfficiency !== null && (
+          <div className="flex items-center justify-between p-3 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+            <div className="flex items-center gap-2">
+              <Zap className="h-4 w-4 text-blue-400" />
+              <span className="text-sm text-blue-400 font-medium">Capital Efficiency</span>
             </div>
-          )}
+            <div className="text-right">
+              <span className="text-xl font-bold text-blue-300">{capitalEfficiency}×</span>
+              <p className="text-[10px] text-slate-500">vs full range</p>
+            </div>
+          </div>
+        )}
 
-          {poolExists && isInRange !== null && ticksValid && (
-            <div className={`p-3 rounded-lg border ${isInRange ? "bg-green-500/10 border-green-500/20 text-green-400" : "bg-amber-500/10 border-amber-500/20 text-amber-400"}`}>
-              <div className="flex items-center gap-2 text-sm font-medium">
-                {isInRange ? <><Zap className="h-4 w-4" /><span>In Range — earning fees</span></> : <><AlertTriangle className="h-4 w-4" /><span>Out of Range — no fees until price re-enters</span></>}
-              </div>
+        {/* In/out of range status */}
+        {poolExists && isInRange !== null && ticksValid && (
+          <div className={`flex items-start gap-3 p-3 rounded-xl border ${
+            isInRange
+              ? "bg-emerald-500/8 border-emerald-500/20"
+              : "bg-amber-500/8 border-amber-500/20"
+          }`}>
+            {isInRange
+              ? <Zap className="h-4 w-4 text-emerald-400 flex-shrink-0 mt-0.5" />
+              : <AlertTriangle className="h-4 w-4 text-amber-400 flex-shrink-0 mt-0.5" />
+            }
+            <div>
+              <p className={`text-sm font-semibold ${isInRange ? "text-emerald-400" : "text-amber-400"}`}>
+                {isInRange ? "In Range — earning fees" : "Out of Range — no fees"}
+              </p>
               {!isInRange && (
-                <p className="text-xs mt-1 opacity-80">
-                  {depositMode === "token0-only" ? `Only ${token0Symbol} deposited. Earns fees when price rises above ${parseFloat(minPrice).toFixed(4)}.` : `Only ${token1Symbol} deposited. Earns fees when price falls below ${parseFloat(maxPrice).toFixed(4)}.`}
+                <p className="text-xs text-slate-400 mt-0.5 leading-relaxed">
+                  {depositMode === "token0-only"
+                    ? `Only ${token0Symbol} deposited. Earns fees when price rises above ${parseFloat(minPrice).toFixed(4)}.`
+                    : `Only ${token1Symbol} deposited. Earns fees when price falls below ${parseFloat(maxPrice).toFixed(4)}.`
+                  }
                 </p>
               )}
             </div>
-          )}
-
-          {!poolExists && tokenA && tokenB && (
-            <div className="flex items-start gap-2 p-3 bg-slate-800/50 border border-slate-700 rounded-lg">
-              <Info className="h-4 w-4 text-slate-400 shrink-0 mt-0.5" />
-              <p className="text-xs text-slate-400">Pool will be created at the mid-price of your range. Tick spacing for this fee: <span className="font-mono text-slate-300">{getTickSpacing(selectedFee)}</span>.</p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Slippage */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-3">
-          <div className="flex items-center gap-2"><Settings className="h-4 w-4 text-slate-400" /><Label className="text-sm text-slate-400">Slippage Tolerance</Label></div>
-          <div className="flex gap-2 items-center flex-wrap">
-            {["0.5", "1", "2", "5"].map((s) => (<Button key={s} variant={slippage === s ? "default" : "outline"} size="sm" onClick={() => setSlippage(s)}>{s}%</Button>))}
-            <div className="flex items-center gap-1 ml-auto">
-              <Input type="number" value={slippage} onChange={(e) => setSlippage(e.target.value)} className="w-20 bg-slate-800 border-slate-600" min="0" max="50" step="0.1" />
-              <span className="text-sm text-slate-400">%</span>
-            </div>
           </div>
-          {parseFloat(slippage) > 10 && <p className="text-xs text-amber-400">⚠ High slippage</p>}
-          <p className="text-xs text-slate-600">
-            Note: slippage tolerance is for display only. V3 mint uses 0 minimums
-            (safe — the contract adjusts amounts to the exact pool ratio).
-          </p>
-        </CardContent>
-      </Card>
+        )}
 
+        {/* New pool info */}
+        {!poolExists && tokenA && tokenB && (
+          <div className="flex items-start gap-2.5 p-3 bg-slate-700/30 border border-slate-700/50 rounded-xl">
+            <Info className="h-4 w-4 text-slate-400 flex-shrink-0 mt-0.5" />
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Pool will be created at the mid-price of your range. Tick spacing for this fee:
+              <span className="font-mono text-slate-300 ml-1">{getTickSpacing(selectedFee)}</span>
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* ── Slippage ── */}
+      <div className="rounded-2xl bg-slate-800/60 border border-slate-700/50 p-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <Settings className="h-3.5 w-3.5 text-slate-500" />
+          <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Slippage Tolerance</span>
+        </div>
+
+        <div className="flex items-center gap-2 flex-wrap">
+          {["0.5", "1", "2", "5"].map((s) => (
+            <button
+              key={s}
+              onClick={() => setSlippage(s)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                slippage === s
+                  ? "bg-blue-600 border-blue-500 text-white"
+                  : "bg-slate-700/50 border-slate-600/50 text-slate-400 hover:border-slate-500 hover:text-slate-300"
+              }`}
+            >
+              {s}%
+            </button>
+          ))}
+          <div className="flex items-center gap-1.5 ml-auto">
+            <Input
+              type="number"
+              value={slippage}
+              onChange={(e) => setSlippage(e.target.value)}
+              className="w-18 h-8 text-sm bg-slate-700/50 border-slate-600/50 rounded-lg text-center text-white"
+              style={{ width: "4.5rem" }}
+              min="0" max="50" step="0.1"
+            />
+            <span className="text-xs text-slate-400">%</span>
+          </div>
+        </div>
+
+        {parseFloat(slippage) > 10 && (
+          <div className="flex items-center gap-1.5 text-xs text-amber-400">
+            <AlertTriangle className="h-3 w-3" />
+            <span>High slippage tolerance</span>
+          </div>
+        )}
+
+        <p className="text-[10px] text-slate-600 leading-relaxed">
+          Display only — V3 mint uses 0 minimums. The contract adjusts amounts to the exact pool ratio.
+        </p>
+      </div>
+
+      {/* ── CTA ── */}
       {isConnected ? (
-        <Button onClick={handleAddLiquidity} className="w-full h-12 text-base font-semibold"
-          disabled={
-            !tokenA || !tokenB || !ticksValid || isAdding ||
-            (depositMode !== "token1-only" && (!amountA || parseFloat(amountA) <= 0)) ||
-            ((depositMode === "dual" || depositMode === "unknown" || depositMode === "token1-only") && (!amountB || parseFloat(amountB) < 0))
-          }>
-          {addButtonLabel()}
+        <Button
+          onClick={handleAddLiquidity}
+          disabled={!canSubmit}
+          className="w-full h-13 text-base font-bold rounded-2xl bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed shadow-lg shadow-violet-500/20 transition-all duration-200 hover:shadow-violet-500/30 hover:scale-[1.01] active:scale-[0.99]"
+          style={{ height: "52px" }}
+        >
+          {isAdding ? (
+            <span className="flex items-center gap-2">
+              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Adding Liquidity…
+            </span>
+          ) : addButtonLabel()}
         </Button>
       ) : (
-        <Button disabled className="w-full h-12">Connect Wallet</Button>
+        <Button
+          disabled
+          className="w-full text-base font-bold rounded-2xl bg-slate-700 text-slate-500 cursor-not-allowed"
+          style={{ height: "52px" }}
+        >
+          Connect Wallet to Continue
+        </Button>
       )}
 
       <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={(t) => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens} onImport={handleImportToken} />
