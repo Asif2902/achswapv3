@@ -1,11 +1,6 @@
-import { useState } from "react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Button } from "@/components/ui/button";
+import { useState, useEffect, useRef } from "react";
+import { X, AlertTriangle, RotateCcw, Zap, GitFork, Clock, RefreshCw, Wallet, ChevronDown } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { X, AlertTriangle } from "lucide-react";
 
 interface SwapSettingsProps {
   open: boolean;
@@ -18,15 +13,17 @@ interface SwapSettingsProps {
   onRecipientAddressChange: (value: string) => void;
   quoteRefreshInterval?: number;
   onQuoteRefreshIntervalChange?: (value: number) => void;
-  // V2/V3 protocol settings
   v2Enabled: boolean;
   v3Enabled: boolean;
   onV2EnabledChange: (enabled: boolean) => void;
   onV3EnabledChange: (enabled: boolean) => void;
-  // Add these props for max balance functionality
   maxBalance?: number;
   onMaxBalanceClick?: () => void;
 }
+
+const PRESET_SLIPPAGES = [0.1, 0.5, 1.0];
+const DEFAULT_DEADLINE = 20;
+const DEFAULT_REFRESH = 30;
 
 export function SwapSettings({
   open,
@@ -37,231 +34,504 @@ export function SwapSettings({
   onDeadlineChange,
   recipientAddress,
   onRecipientAddressChange,
-  quoteRefreshInterval = 30,
+  quoteRefreshInterval = DEFAULT_REFRESH,
   onQuoteRefreshIntervalChange,
   v2Enabled,
   v3Enabled,
   onV2EnabledChange,
   onV3EnabledChange,
-  maxBalance, // Destructure maxBalance
-  onMaxBalanceClick, // Destructure onMaxBalanceClick
+  maxBalance,
+  onMaxBalanceClick,
 }: SwapSettingsProps) {
   const [customSlippage, setCustomSlippage] = useState(slippage.toString());
   const [customDeadline, setCustomDeadline] = useState(deadline.toString());
-  const [customRefreshInterval, setCustomRefreshInterval] = useState(quoteRefreshInterval.toString());
+  const [customRefresh, setCustomRefresh] = useState(quoteRefreshInterval.toString());
+  const [visible, setVisible] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  const [showRecipient, setShowRecipient] = useState(!!recipientAddress);
 
-  const presetSlippages = [0.1, 0.5, 1.0];
-  // Removed dangerous "Auto" mode that set slippage to 100% (minAmountOut = 0)
-  // This was a sandwich attack vulnerability
+  useEffect(() => {
+    if (open) {
+      setMounted(true);
+      requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
+    } else {
+      setVisible(false);
+      const t = setTimeout(() => setMounted(false), 300);
+      return () => clearTimeout(t);
+    }
+  }, [open]);
 
-  const bothDisabled = !v2Enabled && !v3Enabled;
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, onClose]);
 
   const handleSlippageChange = (value: string) => {
     setCustomSlippage(value);
-    const numValue = parseFloat(value);
-    if (!isNaN(numValue) && numValue >= 0 && numValue <= 50) {
-      onSlippageChange(numValue);
-    }
+    const n = parseFloat(value);
+    if (!isNaN(n) && n >= 0 && n <= 50) onSlippageChange(n);
   };
 
   const handleDeadlineChange = (value: string) => {
     setCustomDeadline(value);
-    const numValue = parseInt(value);
-    if (!isNaN(numValue) && numValue > 0) {
-      onDeadlineChange(numValue);
-    }
+    const n = parseInt(value);
+    if (!isNaN(n) && n > 0) onDeadlineChange(n);
   };
 
-  const handleRefreshIntervalChange = (value: string) => {
-    setCustomRefreshInterval(value);
-    const numValue = parseInt(value);
-    if (!isNaN(numValue) && numValue >= 5 && onQuoteRefreshIntervalChange) {
-      onQuoteRefreshIntervalChange(numValue);
-    }
+  const handleRefreshChange = (value: string) => {
+    setCustomRefresh(value);
+    const n = parseInt(value);
+    if (!isNaN(n) && n >= 5 && onQuoteRefreshIntervalChange) onQuoteRefreshIntervalChange(n);
   };
+
+  const handleReset = () => {
+    onSlippageChange(0.5);
+    setCustomSlippage("0.5");
+    onDeadlineChange(DEFAULT_DEADLINE);
+    setCustomDeadline(DEFAULT_DEADLINE.toString());
+    if (onQuoteRefreshIntervalChange) onQuoteRefreshIntervalChange(DEFAULT_REFRESH);
+    setCustomRefresh(DEFAULT_REFRESH.toString());
+  };
+
+  const bothDisabled = !v2Enabled && !v3Enabled;
+  const slippageHigh = slippage > 5;
+  const slippageZero = slippage === 0;
+
+  if (!mounted) return null;
 
   return (
-    <Dialog open={open} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-md bg-slate-900 border-slate-700">
-        {/* Updated DialogHeader for better close button visibility */}
-        <DialogHeader>
-          <DialogTitle className="text-white">Swap Settings</DialogTitle>
-          <DialogDescription className="text-slate-300">Customize your swap preferences</DialogDescription>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="absolute right-4 top-4 h-8 w-8 hover:bg-slate-700 text-slate-100 hover:text-white"
-            onClick={onClose}
-          >
-            <X className="h-4 w-4" />
-          </Button>
-        </DialogHeader>
+    <>
+      {/* Backdrop */}
+      <div
+        onClick={onClose}
+        onTouchMove={(e) => e.preventDefault()}
+        className="fixed inset-0 z-50 transition-all duration-300"
+        style={{
+          background: "rgba(0,0,0,0.72)",
+          backdropFilter: visible ? "blur(8px)" : "blur(0px)",
+          opacity: visible ? 1 : 0,
+        }}
+      />
 
-        <div className="space-y-6 mt-4">
-          {/* Protocol Settings - V2/V3 */}
-          <div className="space-y-3 p-4 bg-slate-800/50 rounded-lg border border-slate-700">
-            <h3 className="text-sm font-semibold text-white mb-3">Protocol Routing</h3>
-            
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label className="text-sm font-medium text-white">Achswap V2</Label>
-                <p className="text-xs text-slate-400">Classic constant product AMM</p>
-              </div>
-              <Switch
-                checked={v2Enabled}
-                onCheckedChange={onV2EnabledChange}
-                disabled={v2Enabled && !v3Enabled}
-              />
-            </div>
-            
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label className="text-sm font-medium text-white">Achswap V3</Label>
-                <p className="text-xs text-slate-400">Concentrated liquidity pools</p>
-              </div>
-              <Switch
-                checked={v3Enabled}
-                onCheckedChange={onV3EnabledChange}
-                disabled={v3Enabled && !v2Enabled}
-              />
-            </div>
-
-            {bothDisabled && (
-              <div className="flex items-center gap-2 p-2 bg-red-500/10 border border-red-500/20 rounded text-xs text-red-400">
-                <AlertTriangle className="h-4 w-4 shrink-0" />
-                <span>At least one protocol must be enabled</span>
-              </div>
-            )}
-
-            {v2Enabled && v3Enabled && (
-              <div className="p-2 bg-blue-500/10 border border-blue-500/20 rounded text-xs text-blue-400">
-                Smart routing enabled: Best price will be automatically selected
-              </div>
-            )}
+      {/* Panel */}
+      <div
+        className="fixed z-50 left-0 right-0 bottom-0 sm:inset-0 sm:flex sm:items-center sm:justify-center sm:p-4"
+        style={{ pointerEvents: "none" }}
+      >
+        <div
+          data-settings-panel
+          className="relative w-full sm:max-w-md overflow-hidden"
+          style={{
+            pointerEvents: "auto",
+            background: "linear-gradient(160deg, #0f1117 0%, #0c0e13 100%)",
+            border: "1px solid rgba(255,255,255,0.07)",
+            boxShadow: "0 -4px 48px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04)",
+            borderRadius: "20px 20px 0 0",
+            transform: visible ? "translateY(0)" : "translateY(100%)",
+            opacity: visible ? 1 : 0,
+            transition: "transform 0.32s cubic-bezier(0.32,0.72,0,1), opacity 0.2s ease",
+            maxHeight: "92dvh",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {/* Drag handle */}
+          <div className="flex justify-center pt-3 pb-1 sm:hidden">
+            <div className="w-9 h-1 rounded-full bg-white/10" />
           </div>
 
-          {/* Slippage Tolerance */}
-          <div className="space-y-3">
-            <Label className="text-sm font-medium text-white">Slippage Tolerance (%)</Label>
-            <div className="flex gap-2">
-              {presetSlippages.map((preset) => (
-                <Button
-                  key={preset}
-                  size="sm"
-                  variant={slippage === preset ? "default" : "secondary"}
-                  onClick={() => {
-                    onSlippageChange(preset);
-                    setCustomSlippage(preset.toString());
-                  }}
-                  className="flex-1"
-                >
-                  {preset}%
-                </Button>
-              ))}
+          {/* Header */}
+          <div className="flex items-center justify-between px-5 pt-4 pb-3 sm:pt-5 flex-shrink-0">
+            <div>
+              <h2 className="text-base font-semibold text-white tracking-tight">Swap Settings</h2>
+              <p className="text-[11px] text-white/30 mt-0.5">Customize your swap preferences</p>
             </div>
-            <div className="relative">
-              <Input
-                type="number"
-                placeholder="Custom"
+            <div className="flex items-center gap-2">
+              {/* Reset button */}
+              <button
+                onClick={handleReset}
+                title="Reset to defaults"
+                className="w-8 h-8 rounded-xl flex items-center justify-center text-white/30 hover:text-white/70 hover:bg-white/6 transition-all"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={onClose}
+                className="w-8 h-8 rounded-xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/8 transition-all"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Divider */}
+          <div className="mx-5 h-px flex-shrink-0" style={{ background: "rgba(255,255,255,0.05)" }} />
+
+          {/* Scrollable content */}
+          <div
+            className="flex-1 overflow-y-auto overscroll-contain px-5 py-4 space-y-5"
+            style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
+          >
+
+            {/* ── Protocol Routing ────────────────────────── */}
+            <Section icon={<GitFork className="w-3.5 h-3.5" />} label="Protocol Routing">
+              <div className="space-y-2">
+                <ProtocolRow
+                  label="Achswap V2"
+                  description="Classic constant product AMM"
+                  checked={v2Enabled}
+                  onChange={onV2EnabledChange}
+                  disabled={v2Enabled && !v3Enabled}
+                />
+                <div className="h-px mx-1" style={{ background: "rgba(255,255,255,0.05)" }} />
+                <ProtocolRow
+                  label="Achswap V3"
+                  description="Concentrated liquidity pools"
+                  checked={v3Enabled}
+                  onChange={onV3EnabledChange}
+                  disabled={v3Enabled && !v2Enabled}
+                />
+              </div>
+
+              {bothDisabled && (
+                <Banner variant="error" icon={<AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />}>
+                  At least one protocol must be enabled
+                </Banner>
+              )}
+              {v2Enabled && v3Enabled && (
+                <Banner variant="info" icon={<Zap className="w-3.5 h-3.5 flex-shrink-0" />}>
+                  Smart routing enabled — best price selected automatically
+                </Banner>
+              )}
+            </Section>
+
+            {/* ── Slippage Tolerance ───────────────────────── */}
+            <Section icon={<Zap className="w-3.5 h-3.5" />} label="Slippage Tolerance">
+              {/* Preset pills */}
+              <div className="flex gap-2">
+                {PRESET_SLIPPAGES.map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => { onSlippageChange(p); setCustomSlippage(p.toString()); }}
+                    className="flex-1 py-2 rounded-xl text-xs font-semibold transition-all"
+                    style={{
+                      background: slippage === p
+                        ? "rgba(99,102,241,0.2)"
+                        : "rgba(255,255,255,0.05)",
+                      border: slippage === p
+                        ? "1px solid rgba(99,102,241,0.5)"
+                        : "1px solid rgba(255,255,255,0.07)",
+                      color: slippage === p ? "#a5b4fc" : "rgba(255,255,255,0.5)",
+                    }}
+                  >
+                    {p}%
+                  </button>
+                ))}
+                {/* Custom pill — active when not matching any preset */}
+                <button
+                  onClick={() => {}}
+                  className="flex-1 py-2 rounded-xl text-xs font-semibold transition-all"
+                  style={{
+                    background: !PRESET_SLIPPAGES.includes(slippage)
+                      ? "rgba(99,102,241,0.2)"
+                      : "rgba(255,255,255,0.05)",
+                    border: !PRESET_SLIPPAGES.includes(slippage)
+                      ? "1px solid rgba(99,102,241,0.5)"
+                      : "1px solid rgba(255,255,255,0.07)",
+                    color: !PRESET_SLIPPAGES.includes(slippage)
+                      ? "#a5b4fc"
+                      : "rgba(255,255,255,0.5)",
+                  }}
+                >
+                  Custom
+                </button>
+              </div>
+
+              {/* Custom input */}
+              <NumberInput
                 value={customSlippage}
-                onChange={(e) => handleSlippageChange(e.target.value)}
-                className="pr-8 bg-slate-800 border-slate-600 text-white placeholder:text-slate-400"
+                onChange={handleSlippageChange}
+                suffix="%"
                 min="0"
                 max="50"
                 step="0.1"
+                placeholder="0.5"
               />
-              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-                %
-              </span>
-            </div>
-            {slippage > 5 && (
-              <p className="text-xs text-orange-400 bg-orange-500/10 p-2 rounded border border-orange-500/20">
-                High slippage tolerance. Your transaction may be frontrun.
-              </p>
-            )}
-            {slippage === 0 && (
-              <p className="text-xs text-red-400 bg-red-500/10 p-2 rounded border border-red-500/20">
-                Warning: 0% slippage may cause transaction failures due to price movements.
-              </p>
-            )}
-          </div>
 
-          {/* Transaction Deadline */}
-          <div className="space-y-3">
-            <Label className="text-sm font-medium text-white">Transaction Deadline (minutes)</Label>
-            <div className="relative">
-              <Input
-                type="number"
-                placeholder="20"
+              {slippageHigh && (
+                <Banner variant="warning" icon={<AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />}>
+                  High slippage — your transaction may be frontrun
+                </Banner>
+              )}
+              {slippageZero && (
+                <Banner variant="error" icon={<AlertTriangle className="w-3.5 h-3.5 flex-shrink-0" />}>
+                  0% slippage may cause transaction failures
+                </Banner>
+              )}
+            </Section>
+
+            {/* ── Transaction Deadline ─────────────────────── */}
+            <Section icon={<Clock className="w-3.5 h-3.5" />} label="Transaction Deadline">
+              <NumberInput
                 value={customDeadline}
-                onChange={(e) => handleDeadlineChange(e.target.value)}
-                className="pr-16 bg-slate-800 border-slate-600 text-white placeholder:text-slate-400"
+                onChange={handleDeadlineChange}
+                suffix="min"
                 min="1"
+                placeholder="20"
               />
-              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-                minutes
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">
-              Your transaction will revert if pending for more than this time.
-            </p>
-          </div>
+              <p className="text-[11px] text-white/30 leading-relaxed">
+                Transaction reverts if pending longer than this time.
+              </p>
+            </Section>
 
-          {/* Quote Refresh Interval */}
-          <div className="space-y-3">
-            <Label className="text-sm font-medium text-white">Quote Refresh Interval (seconds)</Label>
-            <div className="relative">
-              <Input
-                type="number"
-                placeholder="30"
-                value={customRefreshInterval}
-                onChange={(e) => handleRefreshIntervalChange(e.target.value)}
-                className="pr-16 bg-slate-800 border-slate-600 text-white placeholder:text-slate-400"
+            {/* ── Quote Refresh ─────────────────────────────── */}
+            <Section icon={<RefreshCw className="w-3.5 h-3.5" />} label="Quote Refresh Interval">
+              <NumberInput
+                value={customRefresh}
+                onChange={handleRefreshChange}
+                suffix="sec"
                 min="5"
+                placeholder="30"
               />
-              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-                seconds
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">
-              How often to refresh swap quotes automatically.
-            </p>
-          </div>
+              <p className="text-[11px] text-white/30 leading-relaxed">
+                How often swap quotes are refreshed automatically.
+              </p>
+            </Section>
 
-          {/* Send to Different Wallet */}
-          <div className="space-y-3">
-            <Label className="text-sm font-medium text-white">Recipient Address (Optional)</Label>
-            <Input
-              type="text"
-              placeholder="0x... (leave empty to send to your wallet)"
-              value={recipientAddress}
-              onChange={(e) => onRecipientAddressChange(e.target.value)}
-              className="bg-slate-800 border-slate-600 text-white placeholder:text-slate-400"
-            />
-            <p className="text-xs text-slate-400">
-              Send tokens to a different address after swap.
-            </p>
-          </div>
-
-          {/* Max Balance Button - Added */}
-          {maxBalance !== undefined && onMaxBalanceClick && (
-            <div className="space-y-3">
-              <Label className="text-sm font-medium text-white">Maximum Available Balance</Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="text"
-                  value={maxBalance.toString()} // Display max balance
-                  readOnly
-                  className="bg-slate-800 border-slate-600 text-white placeholder:text-slate-400 flex-grow"
+            {/* ── Recipient Address ─────────────────────────── */}
+            <Section icon={<Wallet className="w-3.5 h-3.5" />} label="Recipient Address">
+              {/* Collapsible toggle */}
+              <button
+                onClick={() => setShowRecipient((p) => !p)}
+                className="w-full flex items-center justify-between py-1 text-xs text-white/40 hover:text-white/60 transition-colors"
+              >
+                <span>{showRecipient ? "Send to different wallet" : "Send to a different wallet after swap"}</span>
+                <ChevronDown
+                  className="w-3.5 h-3.5 transition-transform duration-200"
+                  style={{ transform: showRecipient ? "rotate(180deg)" : "rotate(0deg)" }}
                 />
-                <Button onClick={onMaxBalanceClick} className="bg-blue-600 hover:bg-blue-700 text-white">
-                  MAX
-                </Button>
-              </div>
-            </div>
-          )}
+              </button>
+
+              {showRecipient && (
+                <div
+                  className="rounded-xl overflow-hidden transition-all"
+                  style={{
+                    background: "rgba(255,255,255,0.03)",
+                    border: "1px solid rgba(255,255,255,0.07)",
+                  }}
+                >
+                  <input
+                    type="text"
+                    placeholder="0x… (leave empty to use your wallet)"
+                    value={recipientAddress}
+                    onChange={(e) => onRecipientAddressChange(e.target.value)}
+                    autoComplete="off"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    className="w-full bg-transparent px-4 py-3 text-sm text-white placeholder:text-white/20 outline-none"
+                  />
+                </div>
+              )}
+            </Section>
+
+            {/* ── Max Balance (optional) ────────────────────── */}
+            {maxBalance !== undefined && onMaxBalanceClick && (
+              <Section icon={<Wallet className="w-3.5 h-3.5" />} label="Max Available Balance">
+                <div className="flex items-center gap-2">
+                  <div
+                    className="flex-1 px-4 py-3 rounded-xl text-sm text-white/70 font-mono tabular-nums"
+                    style={{
+                      background: "rgba(255,255,255,0.03)",
+                      border: "1px solid rgba(255,255,255,0.07)",
+                    }}
+                  >
+                    {maxBalance}
+                  </div>
+                  <button
+                    onClick={onMaxBalanceClick}
+                    className="px-4 py-3 rounded-xl text-xs font-bold tracking-widest transition-all"
+                    style={{
+                      background: "rgba(99,102,241,0.15)",
+                      border: "1px solid rgba(99,102,241,0.35)",
+                      color: "#a5b4fc",
+                    }}
+                  >
+                    MAX
+                  </button>
+                </div>
+              </Section>
+            )}
+
+            {/* Bottom safe area */}
+            <div className="h-safe-area-bottom h-4 sm:h-1" />
+          </div>
         </div>
-      </DialogContent>
-    </Dialog>
+      </div>
+
+      <style>{`
+        @media (min-width: 640px) {
+          [data-settings-panel] {
+            border-radius: 20px !important;
+            transform: ${visible ? "translateY(0) scale(1)" : "translateY(12px) scale(0.97)"} !important;
+          }
+        }
+        [data-settings-panel] ::-webkit-scrollbar { display: none; }
+      `}</style>
+    </>
+  );
+}
+
+// ─── Sub-components ────────────────────────────────────────────────────────────
+
+function Section({
+  icon,
+  label,
+  children,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="text-white/30">{icon}</span>
+        <span className="text-[11px] font-semibold uppercase tracking-widest text-white/30">
+          {label}
+        </span>
+      </div>
+      <div
+        className="rounded-2xl p-4 space-y-3"
+        style={{
+          background: "rgba(255,255,255,0.025)",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function ProtocolRow({
+  label,
+  description,
+  checked,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 py-0.5">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-white">{label}</p>
+        <p className="text-[11px] text-white/35 mt-0.5">{description}</p>
+      </div>
+      <Switch
+        checked={checked}
+        onCheckedChange={onChange}
+        disabled={disabled}
+        className="flex-shrink-0"
+      />
+    </div>
+  );
+}
+
+function NumberInput({
+  value,
+  onChange,
+  suffix,
+  min,
+  max,
+  step,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  suffix: string;
+  min?: string;
+  max?: string;
+  step?: string;
+  placeholder?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+
+  return (
+    <div
+      className="relative flex items-center rounded-xl overflow-hidden transition-all duration-200"
+      style={{
+        background: "rgba(255,255,255,0.04)",
+        border: focused
+          ? "1px solid rgba(99,102,241,0.5)"
+          : "1px solid rgba(255,255,255,0.07)",
+        boxShadow: focused ? "0 0 0 3px rgba(99,102,241,0.1)" : "none",
+      }}
+    >
+      <input
+        type="number"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        placeholder={placeholder}
+        min={min}
+        max={max}
+        step={step}
+        inputMode="decimal"
+        className="flex-1 bg-transparent px-4 py-3 text-sm text-white placeholder:text-white/20 outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+      />
+      <span
+        className="pr-4 text-xs font-medium flex-shrink-0"
+        style={{ color: "rgba(255,255,255,0.25)" }}
+      >
+        {suffix}
+      </span>
+    </div>
+  );
+}
+
+function Banner({
+  variant,
+  icon,
+  children,
+}: {
+  variant: "warning" | "error" | "info";
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const styles = {
+    warning: {
+      background: "rgba(234,179,8,0.07)",
+      border: "1px solid rgba(234,179,8,0.2)",
+      color: "#fbbf24",
+    },
+    error: {
+      background: "rgba(239,68,68,0.07)",
+      border: "1px solid rgba(239,68,68,0.2)",
+      color: "#f87171",
+    },
+    info: {
+      background: "rgba(99,102,241,0.07)",
+      border: "1px solid rgba(99,102,241,0.2)",
+      color: "#a5b4fc",
+    },
+  }[variant];
+
+  return (
+    <div
+      className="flex items-start gap-2.5 px-3.5 py-2.5 rounded-xl text-xs leading-relaxed"
+      style={styles}
+    >
+      {icon}
+      <span>{children}</span>
+    </div>
   );
 }
