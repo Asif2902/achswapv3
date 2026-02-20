@@ -143,6 +143,7 @@ export function RemoveLiquidityV3() {
           let amount1 = 0n;
           let unclaimedFees0 = tokensOwed0;
           let unclaimedFees1 = tokensOwed1;
+          let currentTick: number | undefined = undefined;
 
           try {
             const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
@@ -171,7 +172,7 @@ export function RemoveLiquidityV3() {
               ]);
 
               let currentSqrtPriceX96: bigint = slot0[0];
-              const currentTick: number = Number(slot0[1]);
+              currentTick = Number(slot0[1]);
               if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
 
               const feeGrowthOutsideLower0: bigint = tickLowerData[2];
