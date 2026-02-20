@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { ArrowDownUp, Settings, AlertTriangle, ExternalLink, HelpCircle, ChevronDown, Bell, ArrowRight, Zap } from "lucide-react";
+import {
+  ArrowDownUp, AlertTriangle, ExternalLink, ChevronDown, Bell, Zap, Settings,
+} from "lucide-react";
 import { TokenSelector } from "@/components/TokenSelector";
 import { SwapSettings } from "@/components/SwapSettings";
 import { TransactionHistory } from "@/components/TransactionHistory";
@@ -10,9 +10,8 @@ import { PathVisualizer, type RouteHop } from "@/components/PathVisualizer";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
-import { defaultTokens, getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
+import { Contract, BrowserProvider, getAddress } from "ethers";
+import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getSmartRouteQuote, type SmartRoutingResult } from "@/lib/smart-routing";
@@ -20,7 +19,6 @@ import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
 import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
 import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
 
-// ERC20 ABI for token operations
 const ERC20_ABI = [
   "function name() view returns (string)",
   "function symbol() view returns (string)",
@@ -30,13 +28,21 @@ const ERC20_ABI = [
   "function allowance(address owner, address spender) view returns (uint256)",
 ];
 
-// Wrapped token contract ABI for deposit/withdraw (wUSDC/wUSDT)
 const WRAPPED_TOKEN_ABI = [
   "function deposit() payable",
   "function withdraw(uint256 amount) returns (bool)",
   "function approve(address spender, uint256 amount) returns (bool)",
   "function allowance(address owner, address spender) view returns (uint256)",
 ];
+
+function fmtBal(raw: string): string {
+  const n = parseFloat(raw);
+  if (!n || isNaN(n)) return "0";
+  if (n < 0.0001) return "<0.0001";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
+  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
 
 export default function Swap() {
   const [fromToken, setFromToken] = useState<Token | null>(null);
@@ -49,1312 +55,649 @@ export default function Swap() {
   const [tokens, setTokens] = useState<Token[]>([]);
   const [isSwapping, setIsSwapping] = useState(false);
   const [isLoadingQuote, setIsLoadingQuote] = useState(false);
-  const [slippage, setSlippage] = useState(0.5); // Default to 0.5% slippage (safe default)
+  const [slippage, setSlippage] = useState(0.5);
   const [deadline, setDeadline] = useState(20);
   const [recipientAddress, setRecipientAddress] = useState("");
   const [priceImpact, setPriceImpact] = useState<number | null>(null);
   const [quoteRefreshInterval, setQuoteRefreshInterval] = useState(30);
-  const [routingPath, setRoutingPath] = useState<string[]>([]);
   const [showTransactionHistory, setShowTransactionHistory] = useState(false);
-  const [isPriceImpactCollapsed, setIsPriceImpactCollapsed] = useState(false);
-  
-  // Smart routing state
+  const [tradeDetailsOpen, setTradeDetailsOpen] = useState(false);
+
   const [smartRoutingResult, setSmartRoutingResult] = useState<SmartRoutingResult | null>(null);
   const [routeHops, setRouteHops] = useState<RouteHop[]>([]);
   const [v2Enabled, setV2Enabled] = useState(true);
   const [v3Enabled, setV3Enabled] = useState(true);
-  
-  // Abort controller for quote fetching race conditions
+
   const abortControllerRef = useRef<AbortController | null>(null);
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
-  
-  // Load DEX settings on mount
-  useEffect(() => {
-    const settings = loadDexSettings();
-    setV2Enabled(settings.v2Enabled);
-    setV3Enabled(settings.v3Enabled);
-  }, []);
-  
-  // Save DEX settings when they change
-  useEffect(() => {
-    saveDexSettings({ v2Enabled, v3Enabled });
-  }, [v2Enabled, v3Enabled]);
-
-  // Get chain-specific contracts
   const contracts = chainId ? getContractsForChain(chainId) : null;
 
-  // Function to open transaction in explorer
-  const openExplorer = (txHash: string) => {
-    if (contracts) {
-      window.open(`${contracts.explorer}${txHash}`, '_blank');
-    }
-  };
+  useEffect(() => { const s = loadDexSettings(); setV2Enabled(s.v2Enabled); setV3Enabled(s.v3Enabled); }, []);
+  useEffect(() => { saveDexSettings({ v2Enabled, v3Enabled }); }, [v2Enabled, v3Enabled]);
 
-  // Load tokens from JSON and localStorage - filter by chain
+  const openExplorer = (txHash: string) => { if (contracts) window.open(`${contracts.explorer}${txHash}`, "_blank"); };
+
+  useEffect(() => { loadTokens(); }, [chainId]);
+
   useEffect(() => {
-    loadTokens();
-  }, [chainId]);
-
-  // Set default tokens based on chain
-  useEffect(() => {
-    if (tokens.length === 0 || !chainId) return;
-
-    // Set defaults only if not already set or if chain changed
-    if (!fromToken || fromToken.chainId !== chainId) {
-      // Default to USDC for ARC Testnet
-      const defaultFrom = tokens.find(t => t.symbol === 'USDC');
-      if (defaultFrom) setFromToken(defaultFrom);
-    }
-
-    if (!toToken || toToken.chainId !== chainId) {
-      // Default to ACHS
-      const achs = tokens.find(t => t.symbol === 'ACHS');
-      if (achs) setToToken(achs);
-    }
+    if (!tokens.length || !chainId) return;
+    if (!fromToken || fromToken.chainId !== chainId) { const t = tokens.find(t => t.symbol === "USDC"); if (t) setFromToken(t); }
+    if (!toToken || toToken.chainId !== chainId) { const t = tokens.find(t => t.symbol === "ACHS"); if (t) setToToken(t); }
   }, [tokens, fromToken, toToken, chainId]);
 
-  // Fetch quote when fromAmount, fromToken, or toToken changes - with debounce and abort
-  useEffect(() => {
-    // Debounce the quote fetch to avoid race conditions
-    if (debounceTimeoutRef.current) {
-      clearTimeout(debounceTimeoutRef.current);
-    }
-    
-    // Abort any previous fetch
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-    }
-    
-    debounceTimeoutRef.current = setTimeout(() => {
-      const fetchQuote = async (signal: AbortSignal) => {
-        if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) {
-          setToAmount("");
-          setPriceImpact(null);
-          return;
-        }
-
-        // Handle wrap/unwrap - 1:1 ratio for ARC Testnet
-        const isWrap = fromToken.symbol === 'USDC' && toToken.symbol === 'wUSDC';
-        const isUnwrap = fromToken.symbol === 'wUSDC' && toToken.symbol === 'USDC';
-
-        if (isWrap || isUnwrap) {
-          setToAmount(fromAmount);
-          setPriceImpact(0);
-          setRouteHops([{
-            tokenIn: fromToken,
-            tokenOut: toToken,
-            protocol: "V2",
-          }]);
-          return;
-        }
-
-        if (!window.ethereum || !contracts) return;
-
-        setIsLoadingQuote(true);
-        try {
-          const provider = new BrowserProvider(window.ethereum);
-          
-          // Get wrapped token address for routing
-          const wrappedTokenData = tokens.find(t => t.symbol === 'wUSDC');
-          const wrappedAddress = wrappedTokenData?.address;
-
-          if (!wrappedAddress) {
-            throw new Error('wUSDC token not found');
-          }
-
-          const amountIn = parseAmount(fromAmount, fromToken.decimals);
-          
-          // Check if both protocols are disabled
-          if (!v2Enabled && !v3Enabled) {
-            toast({
-              title: "No protocols enabled",
-              description: "Please enable at least one protocol in settings",
-              variant: "destructive",
-            });
-            setToAmount("");
-            setPriceImpact(null);
-            setRouteHops([]);
-            return;
-          }
-
-          // Check if aborted
-          if (signal.aborted) return;
-
-          // Check cache first
-          const cachedQuote = getCachedQuote(
-            fromToken.address,
-            toToken.address,
-            fromAmount,
-            v2Enabled,
-            v3Enabled
-          );
-
-          let result: SmartRoutingResult | null;
-
-          if (cachedQuote) {
-            result = cachedQuote;
-          } else {
-            // Get smart route quote
-            result = await getSmartRouteQuote(
-              provider,
-              contracts.v2.router,
-              contracts.v3.quoter02,
-              fromToken,
-              toToken,
-              amountIn,
-              wrappedAddress,
-              v2Enabled,
-              v3Enabled
-            );
-
-            // Check if aborted after async call
-            if (signal.aborted) return;
-
-            // Cache the result
-            if (result) {
-              setCachedQuote(
-                fromToken.address,
-                toToken.address,
-                fromAmount,
-                v2Enabled,
-                v3Enabled,
-                result
-              );
-            }
-          }
-
-          if (!result || !result.bestQuote) {
-            setToAmount("");
-            setPriceImpact(null);
-            setRouteHops([]);
-            return;
-          }
-
-          // Update state with best route
-          setSmartRoutingResult(result);
-          const outputAmount = formatAmount(result.bestQuote.outputAmount, toToken.decimals);
-          setToAmount(outputAmount);
-          setPriceImpact(result.bestQuote.priceImpact);
-          setRouteHops(result.bestQuote.route);
-        } catch (error) {
-          // Don't update state if aborted
-          if (signal.aborted) return;
-          
-          console.error('Failed to fetch quote:', error);
-          setToAmount("");
-          setPriceImpact(null);
-          setRouteHops([]);
-          setSmartRoutingResult(null);
-        } finally {
-          if (!signal.aborted) {
-            setIsLoadingQuote(false);
-          }
-        }
-      };
-
-      // Create new abort controller for this fetch
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-      fetchQuote(controller.signal);
-    }, 300); // 300ms debounce
-
-    return () => {
-      if (debounceTimeoutRef.current) {
-        clearTimeout(debounceTimeoutRef.current);
-      }
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-      }
-    };
-  }, [fromAmount, fromToken, toToken, tokens, quoteRefreshInterval, contracts, chainId, v2Enabled, v3Enabled, toast]);
-
   const loadTokens = async () => {
-    try {
-      if (!chainId) return;
-
-      // Filter tokens by current chain ID
-      const chainTokens = getTokensByChainId(chainId);
-
-      // Load imported tokens from localStorage (filter by chain)
-      const imported = localStorage.getItem('importedTokens');
-      const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
-      const chainImportedTokens = importedTokens.filter(t => t.chainId === chainId);
-
-      // Add a default logoURI for missing logos, fallback to '?' if not available
-      const processedTokens = chainTokens.map(token => ({
-        ...token,
-        logoURI: token.logoURI || `/img/logos/unknown-token.png` // Fallback logo
-      }));
-
-      const processedImportedTokens = chainImportedTokens.map(token => ({
-        ...token,
-        logoURI: token.logoURI || `/img/logos/unknown-token.png` // Fallback logo
-      }));
-
-      setTokens([...processedTokens, ...processedImportedTokens]);
-    } catch (error) {
-      console.error('Failed to load tokens:', error);
-    }
+    if (!chainId) return;
+    const chainTokens = getTokensByChainId(chainId);
+    const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
+    const process = (arr: Token[]) =>
+      arr.filter(t => !chainId || t.chainId === chainId).map(t => ({ ...t, logoURI: t.logoURI || "/img/logos/unknown-token.png" }));
+    setTokens([...process(chainTokens), ...process(imported)]);
   };
 
-  const handleImportToken = async (address: string): Promise<Token | null> => {
+  const handleImportToken = async (addr: string): Promise<Token | null> => {
     try {
-      // Validate address format
-      if (!address || address.length !== 42 || !address.startsWith('0x')) {
-        throw new Error("Invalid token address format");
-      }
-
-      // Check if token already exists in default or imported tokens
-      const exists = tokens.find(t => t.address.toLowerCase() === address.toLowerCase());
-      if (exists) {
-        toast({
-          title: "Token already added",
-          description: `${exists.symbol} is already in your token list`,
-        });
-        return exists;
-      }
-
-      // Use public RPC for token data (no wallet needed) - ARC Testnet
-      const rpcUrl = 'https://rpc.testnet.arc.network';
+      if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
+      const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
+      if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your list` }); return exists; }
       const provider = new BrowserProvider({
         request: async ({ method, params }: any) => {
-          const response = await fetch(rpcUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              jsonrpc: '2.0',
-              id: 1,
-              method,
-              params,
-            }),
-          });
-          const data = await response.json();
-          if (data.error) throw new Error(data.error.message);
-          return data.result;
+          const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+          const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result;
         },
       });
-      const contract = new Contract(address, ERC20_ABI, provider);
-
-      // Fetch token metadata with timeout
-      const timeout = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error("Request timed out")), 10000)
-      );
-
+      const contract = new Contract(addr, ERC20_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([
-        Promise.all([
-          contract.name(),
-          contract.symbol(),
-          contract.decimals(),
-        ]),
-        timeout
+        Promise.all([contract.name(), contract.symbol(), contract.decimals()]),
+        new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), 10000)),
       ]) as [string, string, bigint];
-
       if (!chainId) throw new Error("Chain ID not available");
-
-      const newToken: Token = {
-        address,
-        name,
-        symbol,
-        decimals: Number(decimals),
-        logoURI: `/img/logos/unknown-token.png`, // Fallback logo
-        verified: false,
-        chainId,
-      };
-
-      // Save to localStorage
-      const imported = localStorage.getItem('importedTokens');
-      const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
-
-      // Check if already imported
-      const alreadyImported = importedTokens.find((t: Token) => t.address.toLowerCase() === address.toLowerCase());
-      if (!alreadyImported) {
-        importedTokens.push( newToken);
-        localStorage.setItem('importedTokens', JSON.stringify(importedTokens));
-      }
-
-      // Update state
+      const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
+      const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
+      if (!imported.find(t => t.address.toLowerCase() === addr.toLowerCase())) { imported.push(newToken); localStorage.setItem("importedTokens", JSON.stringify(imported)); }
       setTokens(prev => [...prev, newToken]);
-
-      toast({
-        title: "Token imported",
-        description: `${symbol} has been added to your token list`,
-      });
-
+      toast({ title: "Token imported", description: `${symbol} added to your list` });
       return newToken;
     } catch (error: any) {
-      console.error('Token import error:', error);
-      let errorMessage = "Failed to import token";
-
-      if (error.message.includes("timeout")) {
-        errorMessage = "Request timed out. Please check the address and try again.";
-      } else if (error.message.includes("Invalid")) {
-        errorMessage = error.message;
-      } else if (error.message.includes("wallet")) {
-        errorMessage = error.message;
-      } else if (error.message.includes("already")) {
-        errorMessage = error.message;
-      } else {
-        errorMessage = "Unable to fetch token data. Please verify the address is correct.";
-      }
-
-      toast({
-        title: "Import failed",
-        description: errorMessage,
-        variant: "destructive",
-      });
+      toast({ title: "Import failed", description: error.message.includes("timeout") ? "Request timed out." : "Unable to fetch token data", variant: "destructive" });
       return null;
     }
   };
 
-  const handleSwapTokens = () => {
-    const temp = fromToken;
-    setFromToken(toToken);
-    setToToken(temp);
-    // Clear amounts instead of swapping - let user input fresh amount
-    // This avoids the jarring UX of showing a quoted output as input
-    setFromAmount("");
-    setToAmount("");
-    setSmartRoutingResult(null);
+  // ── Quote fetching ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
+    if (abortControllerRef.current) abortControllerRef.current.abort();
+    debounceTimeoutRef.current = setTimeout(() => {
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      fetchQuote(controller.signal);
+    }, 300);
+    return () => {
+      if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
+      if (abortControllerRef.current) abortControllerRef.current.abort();
+    };
+  }, [fromAmount, fromToken, toToken, tokens, contracts, chainId, v2Enabled, v3Enabled]);
+
+  const fetchQuote = async (signal: AbortSignal) => {
+    if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) {
+      setToAmount(""); setPriceImpact(null); return;
+    }
+    const isWrap = fromToken.symbol === "USDC" && toToken.symbol === "wUSDC";
+    const isUnwrap = fromToken.symbol === "wUSDC" && toToken.symbol === "USDC";
+    if (isWrap || isUnwrap) {
+      setToAmount(fromAmount); setPriceImpact(0);
+      setRouteHops([{ tokenIn: fromToken, tokenOut: toToken, protocol: "V2" }]); return;
+    }
+    if (!window.ethereum || !contracts) return;
+    setIsLoadingQuote(true);
+    try {
+      const provider = new BrowserProvider(window.ethereum);
+      const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
+      if (!wrappedTokenData) throw new Error("wUSDC not found");
+      const amountIn = parseAmount(fromAmount, fromToken.decimals);
+      if (!v2Enabled && !v3Enabled) {
+        toast({ title: "No protocols enabled", description: "Enable at least one in settings", variant: "destructive" });
+        setToAmount(""); setPriceImpact(null); setRouteHops([]); return;
+      }
+      if (signal.aborted) return;
+      const cached = getCachedQuote(fromToken.address, toToken.address, fromAmount, v2Enabled, v3Enabled);
+      let result: SmartRoutingResult | null;
+      if (cached) { result = cached; }
+      else {
+        result = await getSmartRouteQuote(provider, contracts.v2.router, contracts.v3.quoter02, fromToken, toToken, amountIn, wrappedTokenData.address, v2Enabled, v3Enabled);
+        if (signal.aborted) return;
+        if (result) setCachedQuote(fromToken.address, toToken.address, fromAmount, v2Enabled, v3Enabled, result);
+      }
+      if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); return; }
+      setSmartRoutingResult(result);
+      setToAmount(formatAmount(result.bestQuote.outputAmount, toToken.decimals));
+      setPriceImpact(result.bestQuote.priceImpact);
+      setRouteHops(result.bestQuote.route);
+    } catch { if (signal.aborted) return; setToAmount(""); setPriceImpact(null); setRouteHops([]); setSmartRoutingResult(null); }
+    finally { if (!signal.aborted) setIsLoadingQuote(false); }
   };
+
+  const handleSwapTokens = () => {
+    setFromToken(toToken); setToToken(fromToken);
+    setFromAmount(""); setToAmount(""); setSmartRoutingResult(null);
+  };
+
+  // ── Wrap / Unwrap ──────────────────────────────────────────────────────────
+  const nativeToken = tokens.find(t => t.symbol === "USDC");
+  const wrappedToken = tokens.find(t => t.symbol === "wUSDC");
 
   const handleWrap = async (amount: string) => {
     if (!address || !window.ethereum || !wrappedToken || !nativeToken) return;
-
     setIsSwapping(true);
     try {
-      const provider = new BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-
+      const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
       const amountBigInt = parseAmount(amount, wrappedToken.decimals);
-
-      // For native token, we send it to wrapped contract's deposit function
-      const wrappedContract = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
-
-      toast({
-        title: "Wrapping...",
-        description: `Wrapping ${amount} ${nativeSymbol} to ${wrappedSymbol}`,
-      });
-
-      // Call deposit with the amount as value (native token transfer)
-      // Estimate gas and add 50% buffer
-      const gasEstimate = await wrappedContract.deposit.estimateGas({ value: amountBigInt });
-      const gasLimit = (gasEstimate * 150n) / 100n;
-      const tx = await wrappedContract.deposit({ value: amountBigInt, gasLimit });
-      const receipt = await tx.wait();
-
-      // Refetch balances
+      const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
+      toast({ title: "Wrapping…" });
+      const g = await wc.deposit.estimateGas({ value: amountBigInt });
+      const receipt = await (await wc.deposit({ value: amountBigInt, gasLimit: g * 150n / 100n })).wait();
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
-
-      setFromAmount("");
-      setToAmount("");
-
-      toast({
-        title: "Wrap successful!",
-        description: (
-          <div className="flex items-center gap-2">
-            <span>Successfully wrapped {amount} {nativeSymbol} to {wrappedSymbol}</span>
-            <Button 
-              size="sm" 
-              variant="ghost" 
-              className="h-6 px-2"
-              onClick={() => openExplorer(receipt.hash)}
-            >
-              <ExternalLink className="h-3 w-3" />
-            </Button>
-          </div>
-        ),
-      });
-    } catch (error: any) {
-      console.error('Wrap error:', error);
-      toast({
-        title: "Wrap failed",
-        description: error.reason || error.message || "Failed to wrap tokens",
-        variant: "destructive",
-      });
-    } finally {
-      setIsSwapping(false);
-    }
+      setFromAmount(""); setToAmount("");
+      toast({ title: "Wrap successful!", description: (<div className="flex items-center gap-2"><span>Wrapped {amount} USDC → wUSDC</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
+    } catch (error: any) { toast({ title: "Wrap failed", description: error.reason || error.message, variant: "destructive" }); }
+    finally { setIsSwapping(false); }
   };
 
   const handleUnwrap = async (amount: string) => {
     if (!address || !window.ethereum || !wrappedToken || !nativeToken) return;
-
     setIsSwapping(true);
     try {
-      const provider = new BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-
+      const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
       const amountBigInt = parseAmount(amount, wrappedToken.decimals);
-      const wrappedContract = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
-
-      toast({
-        title: "Unwrapping...",
-        description: `Unwrapping ${amount} ${wrappedSymbol} to ${nativeSymbol}`,
-      });
-
-      // Note: withdraw() burns from caller's balance directly, no approval needed
-      // The previous approval logic was incorrect - it approved wrappedToken to spend from itself
-      
-      // Call withdraw with gas buffer
-      const gasEstimate = await wrappedContract.withdraw.estimateGas(amountBigInt);
-      const gasLimit = (gasEstimate * 150n) / 100n;
-      const tx = await wrappedContract.withdraw(amountBigInt, { gasLimit });
-      const receipt = await tx.wait();
-
-      // Refetch balances
+      const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
+      toast({ title: "Unwrapping…" });
+      const g = await wc.withdraw.estimateGas(amountBigInt);
+      const receipt = await (await wc.withdraw(amountBigInt, { gasLimit: g * 150n / 100n })).wait();
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
-
-      setFromAmount("");
-      setToAmount("");
-
-      toast({
-        title: "Unwrap successful!",
-        description: (
-          <div className="flex items-center gap-2">
-            <span>Successfully unwrapped {amount} {wrappedSymbol} to {nativeSymbol}</span>
-            <Button 
-              size="sm" 
-              variant="ghost" 
-              className="h-6 px-2"
-              onClick={() => openExplorer(receipt.hash)}
-            >
-              <ExternalLink className="h-3 w-3" />
-            </Button>
-          </div>
-        ),
-      });
-    } catch (error: any) {
-      console.error('Unwrap error:', error);
-      toast({
-        title: "Unwrap failed",
-        description: error.reason || error.message || "Failed to unwrap tokens",
-        variant: "destructive",
-      });
-    } finally {
-      setIsSwapping(false);
-    }
+      setFromAmount(""); setToAmount("");
+      toast({ title: "Unwrap successful!", description: (<div className="flex items-center gap-2"><span>Unwrapped {amount} wUSDC → USDC</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
+    } catch (error: any) { toast({ title: "Unwrap failed", description: error.reason || error.message, variant: "destructive" }); }
+    finally { setIsSwapping(false); }
   };
 
   const saveTransaction = (from: Token, to: Token, fromAmt: string, toAmt: string, txHash: string) => {
-    const transaction = {
-      id: txHash,
-      fromToken: from,
-      toToken: to,
-      fromAmount: fromAmt,
-      toAmount: toAmt,
-      timestamp: Date.now(),
-      chainId: chainId,
-    };
-
-    const storageKey = `transactions_${chainId}`;
-    const existing = localStorage.getItem(storageKey);
-    const transactions = existing ? JSON.parse(existing) : [];
-    transactions.unshift(transaction); // Add to beginning
-    
-    // Keep only last 50 transactions
-    if (transactions.length > 50) {
-      transactions.pop();
-    }
-    
-    localStorage.setItem(storageKey, JSON.stringify(transactions));
+    const key = `transactions_${chainId}`;
+    const txs = JSON.parse(localStorage.getItem(key) || "[]");
+    txs.unshift({ id: txHash, fromToken: from, toToken: to, fromAmount: fromAmt, toAmount: toAmt, timestamp: Date.now(), chainId });
+    if (txs.length > 50) txs.pop();
+    localStorage.setItem(key, JSON.stringify(txs));
   };
 
+  // ── Main swap ──────────────────────────────────────────────────────────────
   const handleSwap = async () => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) return;
-
-    // Check if this is a wrap/unwrap operation for ARC Testnet
-    const isWrap = fromToken.symbol === 'USDC' && toToken.symbol === 'wUSDC';
-    const isUnwrap = fromToken.symbol === 'wUSDC' && toToken.symbol === 'USDC';
-
-    if (isWrap) {
-      await handleWrap(fromAmount);
-      return;
-    }
-
-    if (isUnwrap) {
-      await handleUnwrap(fromAmount);
-      return;
-    }
-
+    if (fromToken.symbol === "USDC" && toToken.symbol === "wUSDC") { await handleWrap(fromAmount); return; }
+    if (fromToken.symbol === "wUSDC" && toToken.symbol === "USDC") { await handleUnwrap(fromAmount); return; }
     setIsSwapping(true);
     try {
-
-      if (!address || !window.ethereum) {
-        throw new Error("Please connect your wallet");
+      if (!address || !window.ethereum) throw new Error("Please connect your wallet");
+      if (!contracts) throw new Error("Chain contracts not configured");
+      if (!smartRoutingResult?.bestQuote) throw new Error("No valid quote available");
+      if (Date.now() - (smartRoutingResult.timestamp || 0) > 30000) {
+        toast({ title: "Stale quote", description: "Price may have changed. Please wait for a fresh quote.", variant: "destructive" });
+        setIsSwapping(false); return;
       }
-
-      if (!contracts) {
-        throw new Error("Chain contracts not configured");
-      }
-      
-      if (!smartRoutingResult || !smartRoutingResult.bestQuote) {
-        throw new Error("No valid quote available");
-      }
-
-      // Freshness check - warn if quote is older than 30 seconds
-      const quoteAge = Date.now() - (smartRoutingResult.timestamp || 0);
-      const QUOTE_STALE_THRESHOLD = 30 * 1000; // 30 seconds
-      
-      if (quoteAge > QUOTE_STALE_THRESHOLD) {
-        toast({
-          title: "Stale quote detected",
-          description: "The price may have changed. Please refresh the quote.",
-          variant: "destructive",
-        });
-        setIsSwapping(false);
-        return;
-      }
-
-      const provider = new BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-      
+      const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
       const bestQuote = smartRoutingResult.bestQuote;
       const amountIn = parseAmount(fromAmount, fromToken.decimals);
-      // Calculate minimum output with slippage protection
-      // slippage is a percentage (e.g., 0.5 means 0.5%)
-      const slippageBps = BigInt(Math.floor(slippage * 100)); // Convert to basis points
+      const slippageBps = BigInt(Math.floor(slippage * 100));
       const minAmountOut = (bestQuote.outputAmount * (10000n - slippageBps)) / 10000n;
-      const deadlineTimestamp = Math.floor(Date.now() / 1000) + (deadline * 60);
-      
-      // Validate and checksum recipient address
-      let recipient: string;
-      if (recipientAddress) {
-        try {
-          // getAddress validates and applies checksum
-          recipient = getAddress(recipientAddress);
-        } catch (e) {
-          throw new Error("Invalid recipient address format. Please check the address and try again.");
+      const deadlineTimestamp = Math.floor(Date.now() / 1000) + deadline * 60;
+      let recipient = address!;
+      if (recipientAddress) { try { recipient = getAddress(recipientAddress); } catch { throw new Error("Invalid recipient address format."); } }
+      const executeWithRetry = async <T,>(fn: () => Promise<T>, maxRetries = 2): Promise<T> => {
+        let last: any;
+        for (let i = 0; i <= maxRetries; i++) {
+          try { return await fn(); } catch (e: any) { last = e; if (i < maxRetries) await new Promise(r => setTimeout(r, 500 * (i + 1))); }
         }
-      } else {
-        recipient = address!;
-      }
-
-      // Helper function for retry with exponential backoff
-      const executeWithRetry = async <T,>(
-        fn: () => Promise<T>,
-        maxRetries: number = 2,
-        operationName: string = "operation"
-      ): Promise<T> => {
-        let lastError: Error | null = null;
-        
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          try {
-            return await fn();
-          } catch (error: any) {
-            lastError = error;
-            console.error(`${operationName} attempt ${attempt + 1} failed:`, error.reason || error.message);
-            
-            if (attempt === maxRetries) {
-              throw error;
-            }
-            
-            // Exponential backoff: 500ms, 1000ms
-            await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-          }
-        }
-        
-        throw lastError;
+        throw last;
       };
+      toast({ title: "Swapping…", description: `Using ${bestQuote.protocol} protocol` });
+      let tx: any;
 
-      // Check if we have an alternative route available for fallback
-      const hasAlternativeRoute = smartRoutingResult?.alternativeQuotes && smartRoutingResult.alternativeQuotes.length > 0;
-
-      toast({
-        title: "Swapping...",
-        description: `Using ${bestQuote.protocol} protocol`,
-      });
-
-      let tx;
-      
       if (bestQuote.protocol === "V3") {
-        // V3 Swap - V3 only works with ERC20 tokens
         const swapRouter = new Contract(contracts.v3.swapRouter, SWAP_ROUTER_V3_ABI, signer);
-        
-        // Handle native token - V3 requires ERC20, so wrap first
-        const fromTokenIsNative = isNativeToken(fromToken.address);
-        const toTokenIsNative = isNativeToken(toToken.address);
-        const wrappedAddress = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
-        
-        if (!wrappedAddress) {
-          throw new Error("No wrapped token configured for native token");
-        }
-        
-        // Get ERC20 addresses for V3 swap
-        const fromTokenERC20 = fromTokenIsNative ? wrappedAddress : fromToken.address;
-        const toTokenERC20 = toTokenIsNative ? wrappedAddress : toToken.address;
-        
-        // Only need separate approval for non-native tokens
-        if (!fromTokenIsNative) {
-          const tokenContract = new Contract(fromTokenERC20, ERC20_ABI, signer);
-          const allowance = await tokenContract.allowance(address, contracts.v3.swapRouter);
-          
-          if (allowance < amountIn) {
-            toast({
-              title: "Approval needed",
-              description: "Approving token for V3 swap...",
-            });
-            const approveGasEstimate = await tokenContract.approve.estimateGas(contracts.v3.swapRouter, amountIn);
-            const approveGasLimit = (approveGasEstimate * 150n) / 100n;
-            const approveTx = await tokenContract.approve(contracts.v3.swapRouter, amountIn, { gasLimit: approveGasLimit });
-            await approveTx.wait();
+        const fromNative = isNativeToken(fromToken.address); const toNative = isNativeToken(toToken.address);
+        const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+        if (!wrappedAddr) throw new Error("No wrapped token configured");
+        const fromERC20 = fromNative ? wrappedAddr : fromToken.address;
+        const toERC20 = toNative ? wrappedAddr : toToken.address;
+        if (!fromNative) {
+          const tc = new Contract(fromERC20, ERC20_ABI, signer);
+          if (await tc.allowance(address, contracts.v3.swapRouter) < amountIn) {
+            toast({ title: "Approval needed" });
+            const ag = await tc.approve.estimateGas(contracts.v3.swapRouter, amountIn);
+            await (await tc.approve(contracts.v3.swapRouter, amountIn, { gasLimit: ag * 150n / 100n })).wait();
           }
         }
-        
-        // Build calls for multicall (swap + optional unwrap in one transaction)
-        const calls: string[] = [];
-        let totalValue = fromTokenIsNative ? amountIn : 0n;
-        
-        // Check if single-hop or multi-hop
+        const calls: string[] = []; const totalValue = fromNative ? amountIn : 0n;
         if (bestQuote.route.length === 1) {
-          // Single-hop V3 swap
-          const fee = bestQuote.route[0].fee || 3000;
-          
-          const params = {
-            tokenIn: fromTokenERC20,
-            tokenOut: toTokenERC20,
-            fee: fee,
-            recipient: recipient,
-            deadline: deadlineTimestamp,
-            amountIn: amountIn,
-            amountOutMinimum: minAmountOut,
-            sqrtPriceLimitX96: 0n,
-          };
-          
-          // Use exactInputSingle function
-          const exactInputSingleData = swapRouter.interface.encodeFunctionData("exactInputSingle", [params]);
-          calls.push(exactInputSingleData);
-          
-          // If output should be native, add unwrap call
-          if (toTokenIsNative) {
-            const unwrapCall = swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]);
-            calls.push(unwrapCall);
-          }
-          
-          // Execute multicall with retry
+          calls.push(swapRouter.interface.encodeFunctionData("exactInputSingle", [{
+            tokenIn: fromERC20, tokenOut: toERC20, fee: bestQuote.route[0].fee || 3000,
+            recipient, deadline: deadlineTimestamp, amountIn, amountOutMinimum: minAmountOut, sqrtPriceLimitX96: 0n,
+          }]));
+          if (toNative) calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
           try {
-            tx = await executeWithRetry(
-              async () => {
-                const gasEstimate = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-                const gasLimit = (gasEstimate * 150n) / 100n;
-                return await swapRouter.multicall(calls, { gasLimit, value: totalValue });
-              },
-              2,
-              "V3 swap"
-            );
-          } catch (v3Error: any) {
-            // V3 failed - try fallback to V2 if available
-            console.error('V3 swap failed, attempting fallback:', v3Error.reason || v3Error.message);
-            
-            if (hasAlternativeRoute) {
-              const alternativeQuote = smartRoutingResult.alternativeQuotes!.find(q => q.protocol === "V2");
-              
-              if (alternativeQuote) {
-                toast({
-                  title: "Falling back to V2",
-                  description: "V3 swap failed, trying V2 route instead...",
-                });
-                
-                // Execute V2 swap as fallback
-                tx = await executeV2Swap(
-                  signer,
-                  contracts,
-                  fromToken,
-                  toToken,
-                  alternativeQuote,
-                  amountIn,
-                  (alternativeQuote.outputAmount * (10000n - BigInt(Math.floor(slippage * 100)))) / 10000n,
-                  deadlineTimestamp,
-                  recipient,
-                  address,
-                  executeWithRetry
-                );
-                
-                // Update bestQuote for transaction receipt
-                Object.assign(bestQuote, alternativeQuote);
-              } else {
-                throw v3Error;
+            tx = await executeWithRetry(async () => {
+              const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
+              return swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
+            });
+          } catch (v3Err: any) {
+            const altQ = smartRoutingResult.alternativeQuotes?.find(q => q.protocol === "V2");
+            if (altQ) {
+              toast({ title: "Falling back to V2", description: "V3 failed, trying V2…" });
+              const V2_ABI = [
+                "function swapExactTokensForTokens(uint,uint,address[],address,uint) external returns (uint[])",
+                "function swapExactETHForTokens(uint,address[],address,uint) external payable returns (uint[])",
+                "function swapExactTokensForETH(uint,uint,address[],address,uint) external returns (uint[])",
+              ];
+              const router = new Contract(contracts.v2.router, V2_ABI, signer);
+              const path: string[] = [];
+              for (let i = 0; i < altQ.route.length; i++) {
+                const hop = altQ.route[i];
+                if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
+                const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
+                if (o !== path[path.length - 1]) path.push(o);
               }
-            } else {
-              throw v3Error;
-            }
+              const altMin = (altQ.outputAmount * (10000n - slippageBps)) / 10000n;
+              const g = await router.swapExactTokensForTokens.estimateGas(amountIn, altMin, path, recipient, deadlineTimestamp);
+              tx = await router.swapExactTokensForTokens(amountIn, altMin, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
+            } else throw v3Err;
           }
         } else {
-          // Multi-hop V3 swap
           const { encodePath } = await import("@/lib/v3-utils");
-          const tokens: string[] = [fromTokenERC20];
-          const fees: number[] = [];
-          
+          const tks: string[] = [fromERC20]; const fees: number[] = [];
           for (const hop of bestQuote.route) {
-            // Use wrapped address for native tokens in path
-            const hopTokenOut = isNativeToken(hop.tokenOut.address) ? wrappedAddress : hop.tokenOut.address;
-            if (hopTokenOut !== tokens[tokens.length - 1]) {
-              tokens.push(hopTokenOut);
-              fees.push(hop.fee || 3000);
-            }
+            const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
+            if (o !== tks[tks.length - 1]) { tks.push(o); fees.push(hop.fee || 3000); }
           }
-          
-          const path = encodePath(tokens, fees);
-          
-          const params = {
-            path: path,
-            recipient: recipient,
-            deadline: deadlineTimestamp,
-            amountIn: amountIn,
-            amountOutMinimum: minAmountOut,
-          };
-          
-          // Use exactInput function
-          const exactInputData = swapRouter.interface.encodeFunctionData("exactInput", [params]);
-          calls.push(exactInputData);
-          
-          // If output should be native, add unwrap call
-          if (toTokenIsNative) {
-            const unwrapCall = swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]);
-            calls.push(unwrapCall);
-          }
-          
-          // Execute multicall (deadline is in the params struct)
-          const gasEstimate = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-          const gasLimit = (gasEstimate * 150n) / 100n;
-          tx = await swapRouter.multicall(calls, { gasLimit, value: totalValue });
+          calls.push(swapRouter.interface.encodeFunctionData("exactInput", [{
+            path: encodePath(tks, fees), recipient, deadline: deadlineTimestamp, amountIn, amountOutMinimum: minAmountOut,
+          }]));
+          if (toNative) calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
+          const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
+          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
         }
       } else {
-        // V2 Swap
-        const V2_ROUTER_ABI = [
-          "function swapExactTokensForTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)",
-          "function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) external payable returns (uint[] memory amounts)",
-          "function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external returns (uint[] memory amounts)",
+        const V2_ABI = [
+          "function swapExactTokensForTokens(uint,uint,address[],address,uint) external returns (uint[])",
+          "function swapExactETHForTokens(uint,address[],address,uint) external payable returns (uint[])",
+          "function swapExactTokensForETH(uint,uint,address[],address,uint) external returns (uint[])",
         ];
-        
-        const router = new Contract(contracts.v2.router, V2_ROUTER_ABI, signer);
-        
-        // Handle native token for V2
-        const fromTokenIsNative = isNativeToken(fromToken.address);
-        const toTokenIsNative = isNativeToken(toToken.address);
-        const wrappedAddress = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
-        
-        // Build path from route (use wrapped address for native tokens)
+        const router = new Contract(contracts.v2.router, V2_ABI, signer);
+        const fromNative = isNativeToken(fromToken.address); const toNative = isNativeToken(toToken.address);
+        const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
         const path: string[] = [];
         for (let i = 0; i < bestQuote.route.length; i++) {
           const hop = bestQuote.route[i];
-          if (i === 0) {
-            const tokenIn = isNativeToken(hop.tokenIn.address) ? wrappedAddress : hop.tokenIn.address;
-            path.push(tokenIn);
-          }
-          const tokenOut = isNativeToken(hop.tokenOut.address) ? wrappedAddress : hop.tokenOut.address;
-          if (tokenOut !== path[path.length - 1]) {
-            path.push(tokenOut);
-          }
+          if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
+          const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
+          if (o !== path[path.length - 1]) path.push(o);
         }
-        
-        // Execute swap based on native token involvement
-        if (fromTokenIsNative) {
-          // Swap native for tokens - use swapExactETHForTokens
-          const gasEstimate = await router.swapExactETHForTokens.estimateGas(
-            minAmountOut,
-            path,
-            recipient,
-            deadlineTimestamp,
-            { value: amountIn }
-          );
-          const gasLimit = (gasEstimate * 150n) / 100n;
-          tx = await router.swapExactETHForTokens(
-            minAmountOut,
-            path,
-            recipient,
-            deadlineTimestamp,
-            { value: amountIn, gasLimit }
-          );
-        } else if (toTokenIsNative) {
-          // Swap tokens for native - use swapExactTokensForETH
-          const tokenContract = new Contract(fromToken.address, ERC20_ABI, signer);
-          const allowance = await tokenContract.allowance(address, contracts.v2.router);
-          
-          if (allowance < amountIn) {
-            toast({
-              title: "Approval needed",
-              description: "Approving token for V2 swap...",
-            });
-            const approveGasEstimate = await tokenContract.approve.estimateGas(contracts.v2.router, amountIn);
-            const approveGasLimit = (approveGasEstimate * 150n) / 100n;
-            const approveTx = await tokenContract.approve(contracts.v2.router, amountIn, { gasLimit: approveGasLimit });
-            await approveTx.wait();
-          }
-          
-          const gasEstimate = await router.swapExactTokensForETH.estimateGas(
-            amountIn,
-            minAmountOut,
-            path,
-            recipient,
-            deadlineTimestamp
-          );
-          const gasLimit = (gasEstimate * 150n) / 100n;
-          tx = await router.swapExactTokensForETH(
-            amountIn,
-            minAmountOut,
-            path,
-            recipient,
-            deadlineTimestamp,
-            { gasLimit }
-          );
+        if (fromNative) {
+          const g = await router.swapExactETHForTokens.estimateGas(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn });
+          tx = await router.swapExactETHForTokens(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn, gasLimit: g * 150n / 100n });
+        } else if (toNative) {
+          const tc = new Contract(fromToken.address, ERC20_ABI, signer);
+          if (await tc.allowance(address, contracts.v2.router) < amountIn) { const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn); await (await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n })).wait(); }
+          const g = await router.swapExactTokensForETH.estimateGas(amountIn, minAmountOut, path, recipient, deadlineTimestamp);
+          tx = await router.swapExactTokensForETH(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
         } else {
-          // Regular token-to-token swap
-          const tokenContract = new Contract(fromToken.address, ERC20_ABI, signer);
-          const allowance = await tokenContract.allowance(address, contracts.v2.router);
-          
-          if (allowance < amountIn) {
-            toast({
-              title: "Approval needed",
-              description: "Approving token for V2 swap...",
-            });
-            const approveGasEstimate = await tokenContract.approve.estimateGas(contracts.v2.router, amountIn);
-            const approveGasLimit = (approveGasEstimate * 150n) / 100n;
-            const approveTx = await tokenContract.approve(contracts.v2.router, amountIn, { gasLimit: approveGasLimit });
-            await approveTx.wait();
-          }
-          
-          const gasEstimate = await router.swapExactTokensForTokens.estimateGas(
-            amountIn,
-            minAmountOut,
-            path,
-            recipient,
-            deadlineTimestamp
-          );
-          const gasLimit = (gasEstimate * 150n) / 100n;
-          tx = await router.swapExactTokensForTokens(
-            amountIn,
-            minAmountOut,
-            path,
-            recipient,
-            deadlineTimestamp,
-            { gasLimit }
-          );
+          const tc = new Contract(fromToken.address, ERC20_ABI, signer);
+          if (await tc.allowance(address, contracts.v2.router) < amountIn) { const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn); await (await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n })).wait(); }
+          const g = await router.swapExactTokensForTokens.estimateGas(amountIn, minAmountOut, path, recipient, deadlineTimestamp);
+          tx = await router.swapExactTokensForTokens(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
         }
       }
 
       const receipt = await tx.wait();
-
-      // Save transaction
       saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
-
-      // Refetch balances
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
-
-      setFromAmount("");
-      setToAmount("");
-      setSmartRoutingResult(null);
-      setRouteHops([]);
-
+      setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
       toast({
         title: "Swap successful!",
         description: (
           <div className="flex items-center gap-2">
-            <span>Swapped {fromAmount} {fromToken.symbol} for {toAmount} {toToken.symbol} via {bestQuote.protocol}</span>
-            <Button 
-              size="sm" 
-              variant="ghost" 
-              className="h-6 px-2"
-              onClick={() => openExplorer(receipt.hash)}
-            >
-              <ExternalLink className="h-3 w-3" />
-            </Button>
+            <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toToken.symbol} via {bestQuote.protocol}</span>
+            <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button>
           </div>
         ),
       });
     } catch (error: any) {
-      console.error('Swap error:', error);
-      toast({
-        title: "Swap failed",
-        description: error.reason || error.message || "Failed to execute swap",
-        variant: "destructive",
-      });
-    } finally {
-      setIsSwapping(false);
-    }
+      toast({ title: "Swap failed", description: error.reason || error.message || "Transaction failed", variant: "destructive" });
+    } finally { setIsSwapping(false); }
   };
 
-  // Fetch balances for selected tokens with auto-refresh
-  const isFromTokenNative = fromToken?.address === "0x0000000000000000000000000000000000000000";
-  const isToTokenNative = toToken?.address === "0x0000000000000000000000000000000000000000";
+  // ── Balances ───────────────────────────────────────────────────────────────
+  const isFromNative = fromToken?.address === "0x0000000000000000000000000000000000000000";
+  const isToNative = toToken?.address === "0x0000000000000000000000000000000000000000";
 
   const { data: fromBalance, refetch: refetchFromBalance } = useBalance({
     address: address as `0x${string}` | undefined,
-    ...(fromToken && !isFromTokenNative ? { token: fromToken.address as `0x${string}` } : {}),
+    ...(fromToken && !isFromNative ? { token: fromToken.address as `0x${string}` } : {}),
   });
-
   const { data: toBalance, refetch: refetchToBalance } = useBalance({
     address: address as `0x${string}` | undefined,
-    ...(toToken && !isToTokenNative ? { token: toToken.address as `0x${string}` } : {}),
+    ...(toToken && !isToNative ? { token: toToken.address as `0x${string}` } : {}),
   });
 
-  // Refetch balances immediately when tokens change
   useEffect(() => {
     if (!isConnected || !fromToken || !toToken) return;
-
-    refetchFromBalance();
-    refetchToBalance();
+    refetchFromBalance(); refetchToBalance();
   }, [isConnected, fromToken?.address, toToken?.address]);
 
-  // Auto-refresh balances every 30 seconds
   useEffect(() => {
     if (!isConnected) return;
-
-    const intervalId = setInterval(() => {
-      refetchFromBalance();
-      refetchToBalance();
-    }, 30000); // 30 seconds
-
-    return () => clearInterval(intervalId);
+    const id = setInterval(() => { refetchFromBalance(); refetchToBalance(); }, 30000);
+    return () => clearInterval(id);
   }, [isConnected, refetchFromBalance, refetchToBalance]);
 
-  let fromBalanceFormatted = "0.00";
-  let toBalanceFormatted = "0.00";
+  let fromBalFmt = "0.00", toBalFmt = "0.00";
+  try { if (fromBalance) fromBalFmt = fmtBal(formatAmount(fromBalance.value, fromBalance.decimals)); } catch { /* ignore */ }
+  try { if (toBalance) toBalFmt = fmtBal(formatAmount(toBalance.value, toBalance.decimals)); } catch { /* ignore */ }
 
-  try {
-    if (fromBalance) {
-      const formatted = formatAmount(fromBalance.value, fromBalance.decimals);
-      fromBalanceFormatted = formatted;
-    }
-  } catch (error) {
-    console.error('Error formatting fromBalance', error);
-  }
+  // ── Derived ────────────────────────────────────────────────────────────────
+  const hasTradeInfo = !!(fromToken && toToken && fromAmount && toAmount && parseFloat(fromAmount) > 0 && parseFloat(toAmount) > 0);
+  const impactColor = priceImpact === null ? "" : priceImpact > 15 ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
+  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping);
+  const protocolLabel = smartRoutingResult?.bestQuote?.protocol;
 
-  try {
-    if (toBalance) {
-      const formatted = formatAmount(toBalance.value, toBalance.decimals);
-      toBalanceFormatted = formatted;
-    }
-  } catch (error) {
-    console.error('Error formatting toBalance', error);
-  }
-
-  // Get native and wrapped tokens for ARC Testnet
-  const nativeSymbol = 'USDC';
-  const wrappedSymbol = 'wUSDC';
-  const nativeToken = tokens.find(t => t.symbol === nativeSymbol);
-  const wrappedToken = tokens.find(t => t.symbol === wrappedSymbol);
-
-  // Define ROUTER_ADDRESS based on chainId
-  let ROUTER_ADDRESS = "";
-  if (contracts) {
-    ROUTER_ADDRESS = contracts.v2.router;
-  }
-
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="container max-w-md mx-auto px-4 py-4 md:py-8 fade-in">
-      <Card className="border-border/40 shadow-2xl backdrop-blur-xl bg-card/95 card-hover overflow-hidden relative">
-        <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-blue-500/5 pointer-events-none"></div>
-        <CardHeader className="space-y-1 pb-4 md:pb-6 relative z-10">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-xl md:text-2xl font-bold bg-gradient-to-r from-foreground to-foreground/80 bg-clip-text">
-              Swap Tokens
-            </CardTitle>
-            <div className="flex items-center gap-2">
-              <Button 
-                data-testid="button-transaction-history"
-                size="icon" 
-                variant="ghost"
-                onClick={() => setShowTransactionHistory(true)}
-                className="h-9 w-9 hover:bg-accent/50 transition-all duration-300"
-              >
-                <Bell className="h-4 w-4" />
-              </Button>
-              <Button 
-                data-testid="button-settings"
-                size="icon" 
-                variant="ghost"
-                onClick={() => setShowSettings(true)}
-                className="h-9 w-9 hover:bg-accent/50 hover:rotate-90 transition-all duration-300"
-              >
-                <Settings className="h-4 w-4" />
-              </Button>
-            </div>
+    <>
+      <style>{`
+        .sw-wrap { display:flex; flex-direction:column; align-items:center; padding:28px 16px 56px; box-sizing:border-box; }
+        .sw-inner { width:100%; max-width:436px; }
+
+        .sw-title { text-align:center; margin-bottom:24px; }
+        .sw-title h1 { font-size:clamp(20px,5vw,28px); font-weight:800; margin:0 0 5px; letter-spacing:-0.02em; background:linear-gradient(135deg,#e2e8f0,#a5b4fc); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
+        .sw-title p { font-size:13px; color:rgba(255,255,255,0.3); margin:0; }
+
+        .sw-shell { background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:24px; overflow:hidden; }
+
+        /* header */
+        .sw-hdr { display:flex; align-items:center; justify-content:space-between; padding:15px 20px; border-bottom:1px solid rgba(255,255,255,0.06); }
+        .sw-hdr-left { display:flex; align-items:center; gap:10px; }
+        .sw-hdr-dot { width:8px; height:8px; border-radius:50%; background:linear-gradient(135deg,#6366f1,#818cf8); box-shadow:0 0 8px rgba(99,102,241,0.6); }
+        .sw-hdr-title { font-size:16px; font-weight:800; color:white; letter-spacing:-0.01em; }
+        .sw-hdr-btns { display:flex; align-items:center; gap:7px; }
+        .sw-hdr-btn { width:34px; height:34px; border-radius:10px; border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.45); display:flex; align-items:center; justify-content:center; cursor:pointer; transition:all 0.2s; }
+        .sw-hdr-btn:hover { background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.85); border-color:rgba(255,255,255,0.16); }
+
+        /* body */
+        .sw-body { padding:16px; display:flex; flex-direction:column; gap:4px; }
+
+        /* token box */
+        .sw-box { background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:18px; padding:14px 16px; transition:border-color 0.2s,background 0.2s; }
+        .sw-box:focus-within { border-color:rgba(99,102,241,0.5); background:rgba(99,102,241,0.035); }
+        .sw-box.to-box { background:rgba(0,0,0,0.12); }
+        .sw-box.to-box:focus-within { border-color:rgba(99,102,241,0.28); }
+
+        .sw-box-top { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+        .sw-box-label { font-size:11px; font-weight:700; color:rgba(255,255,255,0.28); text-transform:uppercase; letter-spacing:0.08em; }
+        .sw-bal { font-size:11px; color:rgba(255,255,255,0.28); }
+        .sw-bal-val { color:rgba(255,255,255,0.6); font-weight:600; cursor:pointer; }
+        .sw-bal-val:hover { color:#a5b4fc; }
+
+        .sw-row { display:flex; align-items:center; gap:12px; }
+        .sw-amount-input { background:transparent; border:none; outline:none; color:white; font-size:clamp(22px,6vw,30px); font-weight:700; flex:1; min-width:0; font-variant-numeric:tabular-nums; }
+        .sw-amount-input::placeholder { color:rgba(255,255,255,0.16); }
+        .sw-amount-input:disabled { opacity:0.5; cursor:not-allowed; }
+        .sw-amount-input[type=number]::-webkit-outer-spin-button,
+        .sw-amount-input[type=number]::-webkit-inner-spin-button { -webkit-appearance:none; }
+
+        .sw-token-col { display:flex; flex-direction:column; align-items:flex-end; gap:7px; flex-shrink:0; }
+        .sw-token-btn { display:flex; align-items:center; gap:8px; padding:8px 13px; border-radius:12px; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1); color:white; font-weight:700; font-size:14px; cursor:pointer; transition:all 0.2s; white-space:nowrap; }
+        .sw-token-btn:hover { background:rgba(99,102,241,0.18); border-color:rgba(99,102,241,0.4); }
+        .sw-token-btn.empty { background:linear-gradient(135deg,rgba(99,102,241,0.22),rgba(139,92,246,0.18)); border-color:rgba(99,102,241,0.4); color:#a5b4fc; }
+        .sw-max-btn { font-size:11px; font-weight:700; letter-spacing:0.05em; padding:3px 10px; border-radius:8px; background:rgba(99,102,241,0.14); border:1px solid rgba(99,102,241,0.3); color:#a5b4fc; cursor:pointer; transition:all 0.2s; }
+        .sw-max-btn:hover { background:rgba(99,102,241,0.28); border-color:rgba(99,102,241,0.55); }
+
+        @keyframes sw-shimmer { 0%,100%{opacity:0.25}50%{opacity:0.55} }
+        .sw-loading-text { font-size:clamp(22px,6vw,30px); font-weight:700; color:rgba(255,255,255,0.35); animation:sw-shimmer 1.4s ease-in-out infinite; }
+
+        /* direction ring */
+        .sw-dir-wrap { display:flex; align-items:center; justify-content:center; height:0; position:relative; z-index:10; }
+        .sw-dir-btn { width:40px; height:40px; border-radius:50%; background:rgba(99,102,241,0.15); border:3px solid rgba(99,102,241,0.2); color:#818cf8; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:all 0.35s cubic-bezier(.4,0,.2,1); margin-top:-20px; margin-bottom:-20px; box-shadow:0 2px 14px rgba(0,0,0,0.35); }
+        .sw-dir-btn:hover:not(:disabled) { background:rgba(99,102,241,0.35); border-color:rgba(99,102,241,0.55); color:#c7d2fe; transform:rotate(180deg); box-shadow:0 4px 20px rgba(99,102,241,0.35); }
+        .sw-dir-btn:disabled { opacity:0.3; cursor:not-allowed; }
+
+        /* high impact */
+        .sw-impact-warn { display:flex; align-items:flex-start; gap:10px; padding:11px 14px; border-radius:14px; background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.22); margin-top:12px; }
+
+        /* trade details */
+        .sw-details-trigger { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; border-radius:14px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.07); cursor:pointer; transition:background 0.2s; margin-top:12px; }
+        .sw-details-trigger:hover { background:rgba(255,255,255,0.06); }
+        .sw-details-panel { margin-top:6px; background:rgba(255,255,255,0.02); border:1px solid rgba(255,255,255,0.06); border-radius:14px; overflow:hidden; }
+        .sw-detail-row { display:flex; align-items:center; justify-content:space-between; padding:10px 14px; }
+        .sw-detail-row + .sw-detail-row { border-top:1px solid rgba(255,255,255,0.05); }
+        .sw-detail-label { font-size:12px; color:rgba(255,255,255,0.33); }
+        .sw-detail-val { font-size:12px; font-weight:600; color:rgba(255,255,255,0.85); font-variant-numeric:tabular-nums; display:flex; align-items:center; gap:5px; }
+        .sw-route-section { padding:10px 14px; border-top:1px solid rgba(255,255,255,0.05); }
+        .sw-routing-note { display:flex; align-items:center; gap:7px; padding:9px 12px; background:rgba(99,102,241,0.08); border:1px solid rgba(99,102,241,0.18); border-radius:11px; margin:10px 14px 12px; }
+
+        .sw-proto { display:inline-flex; align-items:center; padding:2px 8px; border-radius:8px; font-size:10px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; }
+        .sw-proto-v2 { background:rgba(99,102,241,0.14); color:#818cf8; border:1px solid rgba(99,102,241,0.25); }
+        .sw-proto-v3 { background:rgba(139,92,246,0.14); color:#c4b5fd; border:1px solid rgba(139,92,246,0.25); }
+
+        /* submit */
+        .sw-submit { width:100%; height:52px; border-radius:16px; font-weight:800; font-size:16px; letter-spacing:0.02em; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:9px; transition:all 0.22s; margin-top:14px; }
+        .sw-submit.active { background:linear-gradient(135deg,#6366f1,#3b82f6); color:white; box-shadow:0 4px 24px rgba(99,102,241,0.38); }
+        .sw-submit.active:hover { background:linear-gradient(135deg,#4f46e5,#2563eb); box-shadow:0 6px 32px rgba(99,102,241,0.52); transform:translateY(-1px); }
+        .sw-submit.loading { background:rgba(99,102,241,0.28); color:rgba(255,255,255,0.5); cursor:not-allowed; }
+        .sw-submit.off { background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.24); cursor:not-allowed; }
+
+        @keyframes sw-spin { to{transform:rotate(360deg)} }
+        .sw-spin { animation:sw-spin 1s linear infinite; display:inline-block; width:18px; height:18px; border:2.5px solid rgba(255,255,255,0.2); border-top-color:white; border-radius:50%; }
+
+        @media (max-width:400px) { .sw-body{padding:12px;} .sw-box{padding:12px 14px;} .sw-hdr{padding:13px 16px;} }
+      `}</style>
+
+      <div className="sw-wrap">
+        <div className="sw-inner">
+
+          <div className="sw-title">
+            <h1>Swap Tokens</h1>
+            <p>Best rate · Smart routing · V2 &amp; V3</p>
           </div>
-          <p className="text-xs md:text-sm text-muted-foreground">Trade tokens instantly with the best rates</p>
-        </CardHeader>
 
-        <CardContent className="space-y-3 md:space-y-4">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-muted-foreground">From</label>
-              {isConnected && fromToken && (
-                <span className="text-xs text-muted-foreground">
-                  Balance: {fromBalanceFormatted}
-                </span>
-              )}
-            </div>
+          <div className="sw-shell">
 
-            <div className="relative bg-gradient-to-br from-muted/50 to-muted/30 rounded-xl p-4 border border-border/40 hover:border-primary/40 transition-all duration-300 glass group">
-              <Input
-                data-testid="input-from-amount"
-                type="number"
-                placeholder="0.00"
-                value={fromAmount}
-                onChange={(e) => setFromAmount(e.target.value)}
-                className="border-0 bg-transparent text-xl md:text-2xl font-semibold h-auto p-0 focus-visible:ring-0 focus-visible:ring-offset-0 transition-all duration-300"
-              />
-
-              <div className="flex items-center justify-between mt-3">
-                <Button
-                  data-testid="button-select-from-token"
-                  onClick={() => setShowFromSelector(true)}
-                  variant="secondary"
-                  className="h-10 px-3 md:px-4 hover:bg-secondary/80 hover:scale-105 transition-all duration-300 group"
-                >
-                  {fromToken ? (
-                    <div className="flex items-center gap-2">
-                      {fromToken.logoURI ? (
-                        <img 
-                          src={fromToken.logoURI} 
-                          alt={fromToken.symbol} 
-                          className="w-6 h-6 rounded-full group-hover:scale-110 transition-transform duration-300" 
-                          onError={(e) => {
-                            console.error('Failed to load token logo:', fromToken.logoURI);
-                            e.currentTarget.style.display = 'none';
-                          }}
-                        />
-                      ) : (
-                        <div className="w-6 h-6 rounded-full bg-red-500"></div>
-                      )}
-                      <span className="font-semibold text-sm md:text-base">{fromToken.symbol}</span>
-                    </div>
-                  ) : (
-                    "Select token"
-                  )}
-                </Button>
-                {isConnected && fromToken && fromBalance && (
-                  <Button
-                    data-testid="button-max-from"
-                    onClick={() => setFromAmount(fromBalanceFormatted)}
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 px-3 text-xs font-semibold text-primary hover:text-primary/80 hover:bg-primary/10"
-                  >
-                    MAX
-                  </Button>
-                )}
+            {/* Header */}
+            <div className="sw-hdr">
+              <div className="sw-hdr-left">
+                <span className="sw-hdr-dot" />
+                <span className="sw-hdr-title">Swap</span>
+              </div>
+              <div className="sw-hdr-btns">
+                <button className="sw-hdr-btn" data-testid="button-transaction-history" onClick={() => setShowTransactionHistory(true)} title="Transaction history">
+                  <Bell style={{ width: 15, height: 15 }} />
+                </button>
+                <button className="sw-hdr-btn" data-testid="button-settings" onClick={() => setShowSettings(true)} title="Settings">
+                  <Settings style={{ width: 15, height: 15 }} />
+                </button>
               </div>
             </div>
-          </div>
 
-          <div className="flex justify-center -my-2 relative z-10">
-            <Button
-              data-testid="button-swap-direction"
-              size="icon"
-              variant="ghost"
-              onClick={handleSwapTokens}
-              disabled={!fromToken || !toToken}
-              className="rounded-full h-10 w-10 bg-card border-4 border-background hover:bg-primary hover:text-primary-foreground hover:rotate-180 transition-all duration-500 shadow-lg hover:shadow-primary/50 disabled:opacity-50 pulse-glow"
-            >
-              <ArrowDownUp className="h-4 w-4" />
-            </Button>
-          </div>
+            {/* Body */}
+            <div className="sw-body">
 
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-muted-foreground">To</label>
-              {isConnected && toToken && (
-                <span className="text-xs text-muted-foreground">
-                  Balance: {toBalanceFormatted}
-                </span>
-              )}
-            </div>
-
-            <div className="relative bg-gradient-to-br from-muted/50 to-muted/30 rounded-xl p-4 border border-border/40 hover:border-primary/40 transition-all duration-300 glass">
-              <Input
-                data-testid="input-to-amount"
-                type="number"
-                placeholder={isLoadingQuote ? "Calculating..." : "0.00"}
-                value={toAmount}
-                onChange={(e) => setToAmount(e.target.value)}
-                className="border-0 bg-transparent text-xl md:text-2xl font-semibold h-auto p-0 focus-visible:ring-0 focus-visible:ring-offset-0"
-                disabled
-              />
-
-              <div className="flex items-center justify-between mt-3">
-                <Button
-                  data-testid="button-select-to-token"
-                  onClick={() => setShowToSelector(true)}
-                  variant="secondary"
-                  className="h-10 px-3 md:px-4 hover:bg-secondary/80"
-                >
-                  {toToken ? (
-                    <div className="flex items-center gap-2">
-                      {toToken.logoURI ? (
-                        <img 
-                          src={toToken.logoURI} 
-                          alt={toToken.symbol} 
-                          className="w-6 h-6 rounded-full" 
-                          onError={(e) => {
-                            console.error('Failed to load token logo:', toToken.logoURI);
-                            e.currentTarget.style.display = 'none';
-                          }}
-                        />
-                      ) : (
-                        <div className="w-6 h-6 rounded-full bg-red-500"></div>
-                      )}
-                      <span className="font-semibold text-sm md:text-base">{toToken.symbol}</span>
-                    </div>
-                  ) : (
-                    "Select token"
+              {/* FROM box */}
+              <div className="sw-box">
+                <div className="sw-box-top">
+                  <span className="sw-box-label">From</span>
+                  {isConnected && fromToken && (
+                    <span className="sw-bal">
+                      Balance:{" "}
+                      <span className="sw-bal-val" onClick={() => fromBalance && setFromAmount(formatAmount(fromBalance.value, fromBalance.decimals))}>
+                        {fromBalFmt}
+                      </span>
+                    </span>
                   )}
-                </Button>
-              </div>
-            </div>
-          </div>
-
-          {fromToken && toToken && fromAmount && toAmount && (
-            <>
-              {priceImpact !== null && priceImpact > 15 && (
-                <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-4 space-y-2 fade-in">
-                  <div className="flex items-center gap-2 text-red-500">
-                    <AlertTriangle className="h-5 w-5" />
-                    <span className="font-semibold text-sm">High Price Impact Warning!</span>
+                </div>
+                <div className="sw-row">
+                  <input
+                    data-testid="input-from-amount"
+                    type="number" placeholder="0.00" value={fromAmount}
+                    onChange={e => setFromAmount(e.target.value)}
+                    className="sw-amount-input"
+                  />
+                  <div className="sw-token-col">
+                    <button data-testid="button-select-from-token" onClick={() => setShowFromSelector(true)} className={`sw-token-btn ${!fromToken ? "empty" : ""}`}>
+                      {fromToken ? (
+                        <>
+                          <img src={fromToken.logoURI} alt={fromToken.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.14)" }} onError={e => { e.currentTarget.style.display = "none"; }} />
+                          <span>{fromToken.symbol}</span>
+                        </>
+                      ) : <span>Select</span>}
+                    </button>
+                    {isConnected && fromBalance && fromToken && (
+                      <button data-testid="button-max-from" className="sw-max-btn" onClick={() => setFromAmount(formatAmount(fromBalance.value, fromBalance.decimals))}>MAX</button>
+                    )}
                   </div>
-                  <p className="text-xs text-red-400">
-                    This swap has a price impact of {priceImpact.toFixed(2)}%. You may receive significantly less than expected.
-                  </p>
+                </div>
+              </div>
+
+              {/* Direction ring */}
+              <div className="sw-dir-wrap">
+                <button data-testid="button-swap-direction" className="sw-dir-btn" onClick={handleSwapTokens} disabled={!fromToken || !toToken}>
+                  <ArrowDownUp style={{ width: 16, height: 16 }} />
+                </button>
+              </div>
+
+              {/* TO box */}
+              <div className="sw-box to-box">
+                <div className="sw-box-top">
+                  <span className="sw-box-label">To</span>
+                  {isConnected && toToken && (
+                    <span className="sw-bal">Balance: <span style={{ color: "rgba(255,255,255,0.6)", fontWeight: 600 }}>{toBalFmt}</span></span>
+                  )}
+                </div>
+                <div className="sw-row">
+                  {isLoadingQuote ? (
+                    <span className="sw-loading-text">Calculating…</span>
+                  ) : (
+                    <input
+                      data-testid="input-to-amount"
+                      type="number" placeholder="0.00" value={toAmount}
+                      onChange={e => setToAmount(e.target.value)}
+                      disabled className="sw-amount-input"
+                    />
+                  )}
+                  <div className="sw-token-col">
+                    <button data-testid="button-select-to-token" onClick={() => setShowToSelector(true)} className={`sw-token-btn ${!toToken ? "empty" : ""}`}>
+                      {toToken ? (
+                        <>
+                          <img src={toToken.logoURI} alt={toToken.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.14)" }} onError={e => { e.currentTarget.style.display = "none"; }} />
+                          <span>{toToken.symbol}</span>
+                        </>
+                      ) : <span>Select</span>}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* High impact warning */}
+              {hasTradeInfo && priceImpact !== null && priceImpact > 15 && (
+                <div className="sw-impact-warn">
+                  <AlertTriangle style={{ width: 15, height: 15, color: "#f87171", flexShrink: 0, marginTop: 1 }} />
+                  <div>
+                    <p style={{ fontSize: 12, fontWeight: 700, color: "#f87171", margin: 0 }}>High Price Impact — {priceImpact.toFixed(2)}%</p>
+                    <p style={{ fontSize: 11, color: "rgba(248,113,113,0.65)", margin: "3px 0 0", lineHeight: 1.5 }}>You may receive significantly less than expected.</p>
+                  </div>
                 </div>
               )}
-              
-              <Collapsible open={!isPriceImpactCollapsed} onOpenChange={(open) => setIsPriceImpactCollapsed(!open)}>
-                <CollapsibleTrigger asChild>
-                  <Button 
-                    variant="ghost" 
-                    className="w-full flex items-center justify-between p-3 bg-gradient-to-br from-muted/50 to-muted/30 rounded-xl border border-border/40 hover:bg-muted/60 transition-all"
-                  >
-                    <span className="text-sm font-medium">Trade Details</span>
-                    <ChevronDown className={`h-4 w-4 transition-transform duration-200 ${!isPriceImpactCollapsed ? 'rotate-180' : ''}`} />
-                  </Button>
-                </CollapsibleTrigger>
-                
-                <CollapsibleContent className="mt-2">
-                  <div className="bg-gradient-to-br from-muted/50 to-muted/30 rounded-xl p-4 space-y-3 border border-border/40 glass fade-in">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Exchange Rate</span>
-                      <span className="font-medium">
-                        1 {fromToken.symbol} = {(parseFloat(toAmount) / parseFloat(fromAmount)).toFixed(6)} {toToken.symbol}
+
+              {/* Trade details */}
+              {hasTradeInfo && (
+                <>
+                  <div className="sw-details-trigger" onClick={() => setTradeDetailsOpen(o => !o)}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: "rgba(255,255,255,0.45)" }}>
+                        1 {fromToken!.symbol} = {(parseFloat(toAmount) / parseFloat(fromAmount)).toFixed(6)} {toToken!.symbol}
                       </span>
+                      {protocolLabel && (
+                        <span className={`sw-proto ${protocolLabel === "V3" ? "sw-proto-v3" : "sw-proto-v2"}`}>{protocolLabel}</span>
+                      )}
                     </div>
-                    {priceImpact !== null && (
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-muted-foreground">Price Impact</span>
-                        <span className={`font-medium flex items-center gap-1 ${
-                          priceImpact > 15 ? 'text-red-500' : 
-                          priceImpact > 5 ? 'text-orange-500' : 
-                          priceImpact > 2 ? 'text-yellow-500' : 
-                          'text-green-500'
-                        }`}>
-                          {priceImpact > 5 && <AlertTriangle className="h-3 w-3" />}
-                          {priceImpact.toFixed(2)}%
-                        </span>
-                      </div>
-                    )}
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">Minimum Received</span>
-                      <span className="font-medium">
-                        {`${(parseFloat(toAmount) * (100 - slippage) / 100).toFixed(6)} ${toToken.symbol}`}
-                      </span>
-                    </div>
-                    
-                    {routeHops && routeHops.length > 0 && (
-                      <div className="pt-3 border-t border-border/40 mt-3">
-                        <PathVisualizer route={routeHops} />
-                        
-                        {/* Show V2 vs V3 comparison if both quotes available */}
-                        {smartRoutingResult && smartRoutingResult.v2Quote && smartRoutingResult.v3Quote && (
-                          <div className="mt-3 p-2 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-                            <div className="flex items-center gap-2 text-xs">
-                              <Zap className="h-3 w-3 text-blue-400" />
-                              <span className="text-blue-400 font-medium">
-                                Smart Routing: {smartRoutingResult.bestQuote.protocol} selected 
-                                ({formatAmount(smartRoutingResult.bestQuote.outputAmount, toToken?.decimals || 18)} vs {formatAmount(
-                                  smartRoutingResult.bestQuote.protocol === "V3" 
-                                    ? smartRoutingResult.v2Quote.outputAmount 
-                                    : smartRoutingResult.v3Quote.outputAmount,
-                                  toToken?.decimals || 18
-                                )})
-                              </span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    <ChevronDown style={{ width: 15, height: 15, color: "rgba(255,255,255,0.3)", transform: tradeDetailsOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
                   </div>
-                </CollapsibleContent>
-              </Collapsible>
-            </>
-          )}
 
-          {isConnected ? (
-            <Button
-              data-testid="button-swap"
-              onClick={handleSwap}
-              disabled={!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0 || isSwapping}
-              className="w-full h-12 md:h-14 text-base md:text-lg font-semibold bg-gradient-to-r from-primary via-blue-500 to-blue-600 hover:from-primary/90 hover:via-blue-500/90 hover:to-blue-600/90 shadow-xl hover:shadow-2xl hover:shadow-primary/50 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-300 hover:scale-[1.02] relative overflow-hidden group"
-            >
-              <span className="relative z-10">{isSwapping ? "Swapping..." : "Swap"}</span>
-              <span className="absolute inset-0 bg-gradient-to-r from-blue-600 to-primary opacity-0 group-hover:opacity-100 transition-opacity duration-300"></span>
-            </Button>
-          ) : (
-            <Button
-              data-testid="button-connect-wallet"
-              disabled
-              className="w-full h-12 md:h-14 text-base md:text-lg font-semibold"
-            >
-              Connect Wallet
-            </Button>
-          )}
-        </CardContent>
-      </Card>
+                  {tradeDetailsOpen && (
+                    <div className="sw-details-panel">
+                      <div className="sw-detail-row">
+                        <span className="sw-detail-label">Exchange Rate</span>
+                        <span className="sw-detail-val">1 {fromToken!.symbol} = {(parseFloat(toAmount) / parseFloat(fromAmount)).toFixed(6)} {toToken!.symbol}</span>
+                      </div>
+                      {priceImpact !== null && (
+                        <div className="sw-detail-row">
+                          <span className="sw-detail-label">Price Impact</span>
+                          <span className="sw-detail-val" style={{ color: impactColor }}>
+                            {priceImpact > 5 && <AlertTriangle style={{ width: 12, height: 12 }} />}
+                            {priceImpact.toFixed(2)}%
+                          </span>
+                        </div>
+                      )}
+                      <div className="sw-detail-row">
+                        <span className="sw-detail-label">Minimum Received</span>
+                        <span className="sw-detail-val">{(parseFloat(toAmount) * (100 - slippage) / 100).toFixed(6)} {toToken!.symbol}</span>
+                      </div>
+                      <div className="sw-detail-row">
+                        <span className="sw-detail-label">Slippage</span>
+                        <span className="sw-detail-val">{slippage}%</span>
+                      </div>
+                      {routeHops.length > 0 && (
+                        <div className="sw-route-section"><PathVisualizer route={routeHops} /></div>
+                      )}
+                      {smartRoutingResult?.v2Quote && smartRoutingResult?.v3Quote && (
+                        <div className="sw-routing-note">
+                          <Zap style={{ width: 13, height: 13, color: "#818cf8", flexShrink: 0 }} />
+                          <span style={{ fontSize: 11, color: "#a5b4fc", fontWeight: 600 }}>
+                            Smart Routing: {smartRoutingResult.bestQuote.protocol} selected (
+                            {formatAmount(smartRoutingResult.bestQuote.outputAmount, toToken?.decimals || 18)} vs{" "}
+                            {formatAmount(
+                              smartRoutingResult.bestQuote.protocol === "V3"
+                                ? smartRoutingResult.v2Quote.outputAmount
+                                : smartRoutingResult.v3Quote.outputAmount,
+                              toToken?.decimals || 18
+                            )})
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
 
-      <TokenSelector
-        open={showFromSelector}
-        onClose={() => setShowFromSelector(false)}
-        onSelect={(token) => {
-          setFromToken(token);
-          setShowFromSelector(false);
-        }}
-        tokens={tokens}
-        onImport={handleImportToken}
-      />
+              {/* Submit */}
+              {isConnected ? (
+                <button data-testid="button-swap" onClick={handleSwap} disabled={!canSwap} className={`sw-submit ${isSwapping ? "loading" : canSwap ? "active" : "off"}`}>
+                  {isSwapping
+                    ? <><span className="sw-spin" />Swapping…</>
+                    : <><ArrowDownUp style={{ width: 18, height: 18 }} />Swap</>
+                  }
+                </button>
+              ) : (
+                <button disabled data-testid="button-connect-wallet" className="sw-submit off">Connect Wallet to Swap</button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
 
-      <TokenSelector
-        open={showToSelector}
-        onClose={() => setShowToSelector(false)}
-        onSelect={(token) => {
-          setToToken(token);
-          setShowToSelector(false);
-        }}
-        tokens={tokens}
-        onImport={handleImportToken}
-      />
-
-      <SwapSettings
-        open={showSettings}
-        onClose={() => setShowSettings(false)}
-        slippage={slippage}
-        onSlippageChange={setSlippage}
-        deadline={deadline}
-        onDeadlineChange={setDeadline}
-        recipientAddress={recipientAddress}
-        onRecipientAddressChange={setRecipientAddress}
-        quoteRefreshInterval={quoteRefreshInterval}
-        onQuoteRefreshIntervalChange={setQuoteRefreshInterval}
-        v2Enabled={v2Enabled}
-        v3Enabled={v3Enabled}
-        onV2EnabledChange={setV2Enabled}
-        onV3EnabledChange={setV3Enabled}
-      />
-
-      <TransactionHistory
-        open={showTransactionHistory}
-        onClose={() => setShowTransactionHistory(false)}
-      />
-    </div>
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={t => { setFromToken(t); setShowFromSelector(false); }} tokens={tokens} onImport={handleImportToken} />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={t => { setToToken(t); setShowToSelector(false); }} tokens={tokens} onImport={handleImportToken} />
+      <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
+      <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
+    </>
   );
 }
