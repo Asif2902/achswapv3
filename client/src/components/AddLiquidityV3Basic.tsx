@@ -1,13 +1,10 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
-import { Contract, BrowserProvider, parseUnits, formatUnits } from "ethers";
+import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
@@ -20,16 +17,14 @@ import {
 } from "@/lib/abis/v3";
 import {
   priceToSqrtPriceX96,
-  getWideRangeTicks,
   sortTokens,
   getPriceFromAmounts,
   sqrtPriceX96ToPrice,
   getFullRangeTicks,
 } from "@/lib/v3-utils";
-import { calculateAmountsForLiquidity } from "@/lib/v3-liquidity-math";
 import { PoolHealthChecker } from "@/components/PoolHealthChecker";
 import type { PoolHealthResult } from "@/components/PoolHealthChecker";
-import { AlertTriangle, Info, Shield, ExternalLink } from "lucide-react";
+import { Shield, ExternalLink, Plus, RefreshCw, Info, Zap, AlertTriangle } from "lucide-react";
 
 const ERC20_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -45,7 +40,6 @@ function getERC20Address(token: Token, chainId: number): string {
   return token.address;
 }
 
-/** Format a raw BigInt balance to a compact human-readable string */
 function formatBalance(raw: bigint, decimals: number): string {
   const full = parseFloat(formatUnits(raw, decimals));
   if (full === 0) return "0";
@@ -54,6 +48,14 @@ function formatBalance(raw: bigint, decimals: number): string {
   if (full >= 1_000) return `${(full / 1_000).toFixed(2)}K`;
   return full.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
+
+const FEE_OPTIONS = [
+  { value: V3_FEE_TIERS.LOWEST,     label: "0.01%", tag: "Very Stable" },
+  { value: V3_FEE_TIERS.LOW,        label: "0.05%", tag: "Stable"      },
+  { value: V3_FEE_TIERS.MEDIUM,     label: "0.3%",  tag: "Most Pairs"  },
+  { value: V3_FEE_TIERS.HIGH,       label: "1%",    tag: "Exotic"      },
+  { value: V3_FEE_TIERS.ULTRA_HIGH, label: "10%",   tag: "Very Exotic" },
+];
 
 export function AddLiquidityV3Basic() {
   const [tokenA, setTokenA] = useState<Token | null>(null);
@@ -66,12 +68,9 @@ export function AddLiquidityV3Basic() {
   const [selectedFee, setSelectedFee] = useState<number>(V3_FEE_TIERS.MEDIUM);
   const [isAdding, setIsAdding] = useState(false);
 
-  // ── Balances ───────────────────────────────────────────────────────────────
   const [balanceA, setBalanceA] = useState<bigint | null>(null);
   const [balanceB, setBalanceB] = useState<bigint | null>(null);
-  const [isFetchingBalances, setIsFetchingBalances] = useState(false);
 
-  // ── Pool state – fetched once, passed down to PoolHealthChecker as props ──
   const [poolAddress, setPoolAddress]         = useState<string | null>(null);
   const [poolExists, setPoolExists]           = useState(false);
   const [isCheckingPool, setIsCheckingPool]   = useState(false);
@@ -81,23 +80,12 @@ export function AddLiquidityV3Basic() {
   const [activeLiquidity, setActiveLiquidity] = useState<bigint | null>(null);
   const [token0Symbol, setToken0Symbol]       = useState<string>("");
   const [token1Symbol, setToken1Symbol]       = useState<string>("");
-
-  // Health result from checker – used to gate the Add button
-  const [poolHealth, setPoolHealth] = useState<PoolHealthResult | null>(null);
+  const [poolHealth, setPoolHealth]           = useState<PoolHealthResult | null>(null);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
-
   const contracts = chainId ? getContractsForChain(chainId) : null;
-
-  const feeOptions = [
-    { value: V3_FEE_TIERS.LOWEST,     label: "0.01%", description: "Best for very stable pairs" },
-    { value: V3_FEE_TIERS.LOW,        label: "0.05%", description: "Best for stable pairs" },
-    { value: V3_FEE_TIERS.MEDIUM,     label: "0.3%",  description: "Best for most pairs" },
-    { value: V3_FEE_TIERS.HIGH,       label: "1%",    description: "Best for exotic pairs" },
-    { value: V3_FEE_TIERS.ULTRA_HIGH, label: "10%",   description: "Best for very exotic pairs" },
-  ];
 
   // ── Load tokens ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -105,633 +93,505 @@ export function AddLiquidityV3Basic() {
     const chainTokens = getTokensByChainId(chainId);
     const imported = localStorage.getItem("importedTokens");
     const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
-    const chainImportedTokens = importedTokens.filter((t) => t.chainId === chainId);
-    setTokens([...chainTokens, ...chainImportedTokens]);
+    setTokens([...chainTokens, ...importedTokens.filter(t => t.chainId === chainId)]);
   }, [chainId]);
-
-  // ── Import token ───────────────────────────────────────────────────────────
-  const handleImportToken = async (addr: string): Promise<Token | null> => {
-    try {
-      if (!addr || addr.length !== 42 || !addr.startsWith("0x")) {
-        throw new Error("Invalid token address format");
-      }
-      const exists = tokens.find((t) => t.address.toLowerCase() === addr.toLowerCase());
-      if (exists) {
-        toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` });
-        return exists;
-      }
-      const rpcUrl = "https://rpc.testnet.arc.network";
-      const provider = new BrowserProvider({
-        request: async ({ method, params }: any) => {
-          const response = await fetch(rpcUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-          });
-          const data = await response.json();
-          if (data.error) throw new Error(data.error.message);
-          return data.result;
-        },
-      });
-      const ERC20_META_ABI = [
-        "function name() view returns (string)",
-        "function symbol() view returns (string)",
-        "function decimals() view returns (uint8)",
-      ];
-      const contract = new Contract(addr, ERC20_META_ABI, provider);
-      const timeout = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Request timed out")), 10000)
-      );
-      const [name, symbol, decimals] = await Promise.race([
-        Promise.all([contract.name(), contract.symbol(), contract.decimals()]),
-        timeout,
-      ]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
-      const newToken: Token = {
-        address: addr,
-        name,
-        symbol,
-        decimals: Number(decimals),
-        logoURI: "/img/logos/unknown-token.png",
-        verified: false,
-        chainId,
-      };
-      const imported = localStorage.getItem("importedTokens");
-      const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
-      if (!importedTokens.find((t: Token) => t.address.toLowerCase() === addr.toLowerCase())) {
-        importedTokens.push(newToken);
-        localStorage.setItem("importedTokens", JSON.stringify(importedTokens));
-      }
-      setTokens((prev) => [...prev, newToken]);
-      toast({ title: "Token imported", description: `${symbol} has been added to your token list` });
-      return newToken;
-    } catch (error: any) {
-      console.error("Token import error:", error);
-      const msg = error.message.includes("timeout")
-        ? "Request timed out. Please check the address and try again."
-        : error.message.includes("Invalid")
-          ? error.message
-          : "Unable to fetch token data. Please verify the address is correct.";
-      toast({ title: "Import failed", description: msg, variant: "destructive" });
-      return null;
-    }
-  };
 
   // ── Default tokens ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (tokens.length === 0) return;
-    if (!tokenA) {
-      const usdc = tokens.find((t) => t.symbol === "USDC");
-      if (usdc) setTokenA(usdc);
-    }
-    if (!tokenB) {
-      const achs = tokens.find((t) => t.symbol === "ACHS");
-      if (achs) setTokenB(achs);
-    }
+    if (!tokenA) { const u = tokens.find(t => t.symbol === "USDC"); if (u) setTokenA(u); }
+    if (!tokenB) { const a = tokens.find(t => t.symbol === "ACHS"); if (a) setTokenB(a); }
   }, [tokens, tokenA, tokenB]);
 
-  const needsWrapA = tokenA ? isNativeToken(tokenA.address) : false;
-  const needsWrapB = tokenB ? isNativeToken(tokenB.address) : false;
-  const needsWrapping = needsWrapA || needsWrapB;
+  // ── Import token ───────────────────────────────────────────────────────────
+  const handleImportToken = async (addr: string): Promise<Token | null> => {
+    try {
+      if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
+      const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
+      if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` }); return exists; }
+      const provider = new BrowserProvider({ request: async ({ method, params }: any) => {
+        const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+        const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result;
+      }});
+      const ERC20_META_ABI = ["function name() view returns (string)", "function symbol() view returns (string)", "function decimals() view returns (uint8)"];
+      const contract = new Contract(addr, ERC20_META_ABI, provider);
+      const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 10000))]) as [string, string, bigint];
+      if (!chainId) throw new Error("Chain ID not available");
+      const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
+      const imported = localStorage.getItem("importedTokens");
+      const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
+      if (!importedTokens.find((t: Token) => t.address.toLowerCase() === addr.toLowerCase())) { importedTokens.push(newToken); localStorage.setItem("importedTokens", JSON.stringify(importedTokens)); }
+      setTokens(prev => [...prev, newToken]);
+      toast({ title: "Token imported", description: `${symbol} has been added to your token list` });
+      return newToken;
+    } catch (error: any) {
+      toast({ title: "Import failed", description: error.message || "Unable to fetch token data", variant: "destructive" });
+      return null;
+    }
+  };
 
   // ── Fetch balances ─────────────────────────────────────────────────────────
   const fetchBalances = useCallback(async () => {
-    if (!address || !chainId || !window.ethereum) {
-      setBalanceA(null);
-      setBalanceB(null);
-      return;
-    }
-
-    setIsFetchingBalances(true);
+    if (!address || !chainId || !window.ethereum) { setBalanceA(null); setBalanceB(null); return; }
     try {
       const provider = new BrowserProvider(window.ethereum);
-
-      const fetchTokenBalance = async (token: Token | null): Promise<bigint | null> => {
+      const fetch = async (token: Token | null): Promise<bigint | null> => {
         if (!token) return null;
         try {
-          if (isNativeToken(token.address)) {
-            // Native token → use provider.getBalance
-            return await provider.getBalance(address);
-          }
-          const contract = new Contract(token.address, ERC20_ABI, provider);
-          return await contract.balanceOf(address);
-        } catch {
-          return null;
-        }
+          if (isNativeToken(token.address)) return await provider.getBalance(address);
+          return await new Contract(token.address, ERC20_ABI, provider).balanceOf(address);
+        } catch { return null; }
       };
-
-      const [rawA, rawB] = await Promise.all([
-        fetchTokenBalance(tokenA),
-        fetchTokenBalance(tokenB),
-      ]);
-
-      setBalanceA(rawA);
-      setBalanceB(rawB);
-    } catch (err) {
-      console.error("Balance fetch error:", err);
-    } finally {
-      setIsFetchingBalances(false);
-    }
+      const [rawA, rawB] = await Promise.all([fetch(tokenA), fetch(tokenB)]);
+      setBalanceA(rawA); setBalanceB(rawB);
+    } catch { /* ignore */ }
   }, [address, chainId, tokenA, tokenB]);
 
-  // Re-fetch whenever wallet, chain, or selected tokens change
-  useEffect(() => {
-    fetchBalances();
-  }, [fetchBalances]);
+  useEffect(() => { fetchBalances(); }, [fetchBalances]);
 
   // ── Fetch pool state ───────────────────────────────────────────────────────
   const fetchPoolState = async () => {
     if (!tokenA || !tokenB || !contracts || !window.ethereum || !chainId) return;
-
     setIsCheckingPool(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
-
       const erc20A = getERC20Address(tokenA, chainId);
       const erc20B = getERC20Address(tokenB, chainId);
-      const [tok0, tok1] = sortTokens(
-        { ...tokenA, address: erc20A },
-        { ...tokenB, address: erc20B }
-      );
-
-      setToken0Symbol(tok0.symbol);
-      setToken1Symbol(tok1.symbol);
-
+      const [tok0, tok1] = sortTokens({ ...tokenA, address: erc20A }, { ...tokenB, address: erc20B });
+      setToken0Symbol(tok0.symbol); setToken1Symbol(tok1.symbol);
       const addr = await factory.getPool(tok0.address, tok1.address, selectedFee);
       const ZERO = "0x0000000000000000000000000000000000000000";
-
       if (!addr || addr === ZERO) {
-        setPoolAddress(null);
-        setPoolExists(false);
-        setCurrentPrice(null);
-        setCurrentSqrtPriceX96(null);
-        setCurrentTick(null);
-        setActiveLiquidity(null);
-        return;
+        setPoolAddress(null); setPoolExists(false); setCurrentPrice(null);
+        setCurrentSqrtPriceX96(null); setCurrentTick(null); setActiveLiquidity(null); return;
       }
-
-      setPoolAddress(addr);
-      setPoolExists(true);
-
+      setPoolAddress(addr); setPoolExists(true);
       const pool = new Contract(addr, V3_POOL_ABI, provider);
       const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()]);
-
-      const sqrtPriceX96: bigint = slot0[0];
-      const tick = Number(slot0[1]);
-
-      setCurrentSqrtPriceX96(sqrtPriceX96);
-      setCurrentTick(tick);
-      setActiveLiquidity(liq);
-
-      if (sqrtPriceX96 === 0n) {
-        setCurrentPrice(null);
-      } else {
-        setCurrentPrice(sqrtPriceX96ToPrice(sqrtPriceX96, tok0.decimals, tok1.decimals));
-      }
-    } catch (error) {
-      console.error("Error fetching pool state:", error);
-      setPoolExists(false);
-      setCurrentPrice(null);
-      setCurrentSqrtPriceX96(null);
-      setCurrentTick(null);
-      setActiveLiquidity(null);
-    } finally {
-      setIsCheckingPool(false);
-    }
+      const sqrtPriceX96: bigint = slot0[0]; const tick = Number(slot0[1]);
+      setCurrentSqrtPriceX96(sqrtPriceX96); setCurrentTick(tick); setActiveLiquidity(liq);
+      setCurrentPrice(sqrtPriceX96 === 0n ? null : sqrtPriceX96ToPrice(sqrtPriceX96, tok0.decimals, tok1.decimals));
+    } catch (e) { console.error("Pool state error:", e); setPoolExists(false); setCurrentPrice(null); setCurrentSqrtPriceX96(null); setCurrentTick(null); setActiveLiquidity(null); }
+    finally { setIsCheckingPool(false); }
   };
 
-  useEffect(() => {
-    fetchPoolState();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tokenA, tokenB, selectedFee, contracts, chainId]);
+  useEffect(() => { fetchPoolState(); }, [tokenA, tokenB, selectedFee, contracts, chainId]);
 
   // ── Expected price ratio ───────────────────────────────────────────────────
   const expectedPriceRatio = useMemo(() => {
     if (!tokenA || !tokenB || !amountA || !amountB || !chainId) return null;
-    const a = parseFloat(amountA);
-    const b = parseFloat(amountB);
-    if (!a || !b || isNaN(a) || isNaN(b)) return null;
-
-    const erc20A = getERC20Address(tokenA, chainId);
-    const erc20B = getERC20Address(tokenB, chainId);
-    const [tok0] = sortTokens(
-      { ...tokenA, address: erc20A },
-      { ...tokenB, address: erc20B }
-    );
-    const isToken0A = erc20A.toLowerCase() === tok0.address.toLowerCase();
-    return isToken0A ? b / a : a / b;
+    const a = parseFloat(amountA); const b = parseFloat(amountB);
+    if (!a || !b) return null;
+    const erc20A = getERC20Address(tokenA, chainId); const erc20B = getERC20Address(tokenB, chainId);
+    const [tok0] = sortTokens({ ...tokenA, address: erc20A }, { ...tokenB, address: erc20B });
+    return erc20A.toLowerCase() === tok0.address.toLowerCase() ? b / a : a / b;
   }, [tokenA, tokenB, amountA, amountB, chainId]);
 
-  // ── Auto-calculate amountB from pool price ─────────────────────────────────
+  // ── Auto-calc amountB ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!currentPrice || !amountA || !tokenA || !tokenB || !chainId) return;
-    const amountAFloat = parseFloat(amountA);
-    if (isNaN(amountAFloat) || amountAFloat <= 0) return;
-    try {
-      const [tok0] = sortTokens(
-        { ...tokenA, address: getERC20Address(tokenA, chainId) },
-        { ...tokenB, address: getERC20Address(tokenB, chainId) }
-      );
-      const isToken0A = getERC20Address(tokenA, chainId).toLowerCase() === tok0.address.toLowerCase();
-      const calculated = isToken0A ? amountAFloat * currentPrice : amountAFloat / currentPrice;
-      setAmountB(calculated.toFixed(6));
-    } catch (err) {
-      console.error("Amount calc error:", err);
-    }
+    const v = parseFloat(amountA); if (isNaN(v) || v <= 0) return;
+    const [tok0] = sortTokens({ ...tokenA, address: getERC20Address(tokenA, chainId) }, { ...tokenB, address: getERC20Address(tokenB, chainId) });
+    const isToken0A = getERC20Address(tokenA, chainId).toLowerCase() === tok0.address.toLowerCase();
+    setAmountB((isToken0A ? v * currentPrice : v / currentPrice).toFixed(6));
   }, [amountA, currentPrice, tokenA, tokenB, chainId]);
 
-  // ── "Max" helpers ──────────────────────────────────────────────────────────
-  const handleMaxA = () => {
-    if (balanceA === null || !tokenA) return;
-    setAmountA(formatUnits(balanceA, tokenA.decimals));
-  };
-
-  const handleMaxB = () => {
-    if (balanceB === null || !tokenB) return;
-    setAmountB(formatUnits(balanceB, tokenB.decimals));
-  };
+  const amountAExceedsBalance = isConnected && balanceA !== null && tokenA !== null && amountA !== "" && parseFloat(amountA) > 0 && parseAmount(amountA, tokenA.decimals) > balanceA;
+  const amountBExceedsBalance = isConnected && balanceB !== null && tokenB !== null && amountB !== "" && parseFloat(amountB) > 0 && parseAmount(amountB, tokenB.decimals) > balanceB;
 
   // ── Add liquidity ──────────────────────────────────────────────────────────
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !amountA || !amountB || !address || !contracts || !window.ethereum || !chainId) return;
-
     setIsAdding(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-
-      const positionManager = new Contract(
-        contracts.v3.nonfungiblePositionManager,
-        NONFUNGIBLE_POSITION_MANAGER_ABI,
-        signer
-      );
-
+      const pm = new Contract(contracts.v3.nonfungiblePositionManager, NONFUNGIBLE_POSITION_MANAGER_ABI, signer);
       const tokenAIsNative = isNativeToken(tokenA.address);
       const tokenBIsNative = isNativeToken(tokenB.address);
       const tokenAERC20 = getERC20Address(tokenA, chainId);
       const tokenBERC20 = getERC20Address(tokenB, chainId);
-
-      const [token0, token1] = sortTokens(
-        { ...tokenA, address: tokenAERC20 },
-        { ...tokenB, address: tokenBERC20 }
-      );
+      const [token0, token1] = sortTokens({ ...tokenA, address: tokenAERC20 }, { ...tokenB, address: tokenBERC20 });
       const isToken0A = tokenAERC20.toLowerCase() === token0.address.toLowerCase();
-
       const amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
       const amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
-
       let nativeAmount = 0n;
       if (tokenAIsNative) nativeAmount = parseAmount(amountA, tokenA.decimals);
       else if (tokenBIsNative) nativeAmount = parseAmount(amountB, tokenB.decimals);
-
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const existingPool = await factory.getPool(token0.address, token1.address, selectedFee);
       const ZERO = "0x0000000000000000000000000000000000000000";
-
       if (!existingPool || existingPool === ZERO) {
         const price = getPriceFromAmounts(amount0Desired, amount1Desired, token0.decimals, token1.decimals);
         const sqrtPriceX96 = priceToSqrtPriceX96(price, token0.decimals, token1.decimals);
-
         toast({ title: "Creating V3 pool…", description: "Initializing new pool with current price" });
-
         if (nativeAmount > 0n) {
-          const createData = positionManager.interface.encodeFunctionData(
-            "createAndInitializePoolIfNecessary",
-            [token0.address, token1.address, selectedFee, sqrtPriceX96]
-          );
-          const refundData = positionManager.interface.encodeFunctionData("refundETH", []);
-          const tx = await positionManager.multicall([createData, refundData], { value: nativeAmount });
+          const tx = await pm.multicall([pm.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [token0.address, token1.address, selectedFee, sqrtPriceX96]), pm.interface.encodeFunctionData("refundETH", [])], { value: nativeAmount });
           await tx.wait();
-        } else {
-          const tx = await positionManager.createAndInitializePoolIfNecessary(
-            token0.address, token1.address, selectedFee, sqrtPriceX96
-          );
-          await tx.wait();
-        }
+        } else { await (await pm.createAndInitializePoolIfNecessary(token0.address, token1.address, selectedFee, sqrtPriceX96)).wait(); }
       }
-
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
-
       toast({ title: "Approving tokens…", description: "Please approve token spending" });
-
-      if (!tokenAIsNative || !isToken0A) {
-        const c = new Contract(token0.address, ERC20_ABI, signer);
-        const allowance = await c.allowance(address, contracts.v3.nonfungiblePositionManager);
-        if (allowance < amount0Desired) {
-          await (await c.approve(contracts.v3.nonfungiblePositionManager, amount0Desired)).wait();
-        }
-      }
-
-      if (!tokenBIsNative || isToken0A) {
-        const c = new Contract(token1.address, ERC20_ABI, signer);
-        const allowance = await c.allowance(address, contracts.v3.nonfungiblePositionManager);
-        if (allowance < amount1Desired) {
-          await (await c.approve(contracts.v3.nonfungiblePositionManager, amount1Desired)).wait();
-        }
-      }
-
-      const amount0Min = (amount0Desired * 98n) / 100n;
-      const amount1Min = (amount1Desired * 98n) / 100n;
-      const deadline = Math.floor(Date.now() / 1000) + 1200;
-
+      if (!tokenAIsNative || !isToken0A) { const c = new Contract(token0.address, ERC20_ABI, signer); if ((await c.allowance(address, contracts.v3.nonfungiblePositionManager)) < amount0Desired) await (await c.approve(contracts.v3.nonfungiblePositionManager, amount0Desired)).wait(); }
+      if (!tokenBIsNative || isToken0A) { const c = new Contract(token1.address, ERC20_ABI, signer); if ((await c.allowance(address, contracts.v3.nonfungiblePositionManager)) < amount1Desired) await (await c.approve(contracts.v3.nonfungiblePositionManager, amount1Desired)).wait(); }
+      const params = { token0: token0.address, token1: token1.address, fee: selectedFee, tickLower, tickUpper, amount0Desired, amount1Desired, amount0Min: (amount0Desired * 98n) / 100n, amount1Min: (amount1Desired * 98n) / 100n, recipient: address, deadline: Math.floor(Date.now() / 1000) + 1200 };
       toast({ title: "Adding liquidity…", description: "Creating V3 position" });
-
-      const params = {
-        token0: token0.address,
-        token1: token1.address,
-        fee: selectedFee,
-        tickLower,
-        tickUpper,
-        amount0Desired,
-        amount1Desired,
-        amount0Min,
-        amount1Min,
-        recipient: address,
-        deadline,
-      };
-
       let receipt;
       if (nativeAmount > 0n) {
-        const mintData   = positionManager.interface.encodeFunctionData("mint", [params]);
-        const refundData = positionManager.interface.encodeFunctionData("refundETH", []);
-        const gasEst  = await positionManager.multicall.estimateGas([mintData, refundData], { value: nativeAmount });
-        const gasLimit = (gasEst * 150n) / 100n;
-        const tx = await positionManager.multicall([mintData, refundData], { value: nativeAmount, gasLimit });
-        receipt = await tx.wait();
+        const gasEst = await pm.multicall.estimateGas([pm.interface.encodeFunctionData("mint", [params]), pm.interface.encodeFunctionData("refundETH", [])], { value: nativeAmount });
+        receipt = await (await pm.multicall([pm.interface.encodeFunctionData("mint", [params]), pm.interface.encodeFunctionData("refundETH", [])], { value: nativeAmount, gasLimit: gasEst * 150n / 100n })).wait();
       } else {
-        const gasEst  = await positionManager.mint.estimateGas(params);
-        const gasLimit = (gasEst * 150n) / 100n;
-        const tx = await positionManager.mint(params, { gasLimit });
-        receipt = await tx.wait();
+        const gasEst = await pm.mint.estimateGas(params);
+        receipt = await (await pm.mint(params, { gasLimit: gasEst * 150n / 100n })).wait();
       }
-
-      setAmountA("");
-      setAmountB("");
-
-      // Refresh pool state and balances after successful add
+      setAmountA(""); setAmountB("");
       await Promise.all([fetchPoolState(), fetchBalances()]);
-
-      toast({
-        title: "Liquidity added!",
-        description: (
-          <div className="flex items-center gap-2">
-            <span>Successfully added V3 liquidity (Basic Mode – Safe Range)</span>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-6 px-2"
-              onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}
-            >
-              <ExternalLink className="h-3 w-3" />
-            </Button>
-          </div>
-        ),
-      });
+      toast({ title: "Liquidity added!", description: (<div className="flex items-center gap-2"><span>V3 position created (Safe Range)</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}><ExternalLink className="h-3 w-3" /></Button></div>) });
     } catch (error: any) {
       console.error("Add liquidity error:", error);
-      toast({
-        title: "Failed to add liquidity",
-        description: error.reason || error.message || "Transaction failed",
-        variant: "destructive",
-      });
-    } finally {
-      setIsAdding(false);
-    }
+      toast({ title: "Failed to add liquidity", description: error.reason || error.message || "Transaction failed", variant: "destructive" });
+    } finally { setIsAdding(false); }
   };
 
-  const addButtonLabel = () => {
-    if (isAdding) return "Adding Liquidity…";
-    if (poolHealth?.severity === "error") return "Fix Pool Issues Before Adding";
-    return "Add V3 Liquidity (Safe Mode)";
-  };
-
-  // ── Derived: is amountA over balance? ─────────────────────────────────────
-  const amountAExceedsBalance =
-    isConnected &&
-    balanceA !== null &&
-    tokenA !== null &&
-    amountA !== "" &&
-    parseFloat(amountA) > 0 &&
-    parseAmount(amountA, tokenA.decimals) > balanceA;
-
-  const amountBExceedsBalance =
-    isConnected &&
-    balanceB !== null &&
-    tokenB !== null &&
-    amountB !== "" &&
-    parseFloat(amountB) > 0 &&
-    parseAmount(amountB, tokenB.decimals) > balanceB;
+  const canSubmit = tokenA && tokenB && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !amountAExceedsBalance && !amountBExceedsBalance && poolHealth?.severity !== "error";
 
   return (
-    <div className="space-y-4">
-      {/* Info Banner */}
-      <div className="flex items-start gap-3 p-4 bg-blue-500/10 border border-blue-500/20 rounded-lg">
-        <Shield className="h-5 w-5 text-blue-400 shrink-0 mt-0.5" />
-        <div className="space-y-1">
-          <h3 className="font-semibold text-blue-400 text-sm">Basic Mode – Safe &amp; Simple</h3>
-          <p className="text-xs text-slate-300">
-            Your liquidity will be placed in a wide price range for safety. Recommended for beginners and provides
-            protection against impermanent loss.
-          </p>
+    <>
+      <style>{`
+        .v3b-token-box {
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.08);
+          border-radius: 16px;
+          transition: border-color 0.2s, background 0.2s;
+        }
+        .v3b-token-box:focus-within {
+          border-color: rgba(139,92,246,0.5);
+          background: rgba(139,92,246,0.04);
+        }
+        .v3b-token-box.error-border {
+          border-color: rgba(239,68,68,0.5) !important;
+        }
+        .v3b-token-btn {
+          display: flex; align-items: center; gap: 8px;
+          padding: 8px 14px; border-radius: 12px;
+          background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
+          color: white; font-weight: 600; font-size: 14px;
+          cursor: pointer; transition: all 0.2s; white-space: nowrap;
+        }
+        .v3b-token-btn:hover { background: rgba(139,92,246,0.2); border-color: rgba(139,92,246,0.4); }
+        .v3b-token-btn.empty { background: linear-gradient(135deg,rgba(139,92,246,0.25),rgba(99,102,241,0.25)); border-color: rgba(139,92,246,0.4); color: #c4b5fd; }
+        .v3b-max-btn {
+          font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
+          padding: 3px 10px; border-radius: 8px;
+          background: rgba(139,92,246,0.15); border: 1px solid rgba(139,92,246,0.3);
+          color: #c4b5fd; cursor: pointer; transition: all 0.2s;
+        }
+        .v3b-max-btn:hover { background: rgba(139,92,246,0.3); border-color: rgba(139,92,246,0.6); }
+        .v3b-max-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .v3b-input {
+          background: transparent; border: none; outline: none;
+          color: white; font-size: clamp(20px,5vw,28px); font-weight: 700;
+          width: 100%; font-variant-numeric: tabular-nums;
+        }
+        .v3b-input::placeholder { color: rgba(255,255,255,0.2); }
+        .v3b-input:disabled { opacity: 0.6; cursor: not-allowed; }
+        .v3b-input[type=number]::-webkit-outer-spin-button,
+        .v3b-input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+        .v3b-divider-ring {
+          width: 40px; height: 40px; border-radius: 50%;
+          background: rgba(139,92,246,0.15); border: 1px solid rgba(139,92,246,0.3);
+          display: flex; align-items: center; justify-content: center; color: #c4b5fd; flex-shrink: 0;
+        }
+        .v3b-fee-grid { display: grid; grid-template-columns: repeat(5,1fr); gap: 6px; }
+        @media (max-width: 400px) { .v3b-fee-grid { grid-template-columns: repeat(3,1fr); } }
+        .v3b-fee-btn {
+          display: flex; flex-direction: column; align-items: center;
+          padding: 10px 6px; border-radius: 12px; border: 1px solid transparent;
+          background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.4);
+          cursor: pointer; transition: all 0.2s; text-align: center;
+        }
+        .v3b-fee-btn:hover { background: rgba(139,92,246,0.12); color: rgba(255,255,255,0.7); }
+        .v3b-fee-btn.active {
+          background: rgba(139,92,246,0.2); border-color: rgba(139,92,246,0.5); color: #c4b5fd;
+        }
+        .v3b-fee-label { font-size: 13px; font-weight: 800; }
+        .v3b-fee-tag { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; opacity: 0.65; margin-top: 2px; }
+        .v3b-card {
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.07);
+          border-radius: 16px; overflow: hidden;
+        }
+        .v3b-card-header {
+          display: flex; align-items: center; justify-content: space-between;
+          padding: 12px 16px;
+          background: rgba(0,0,0,0.15);
+          border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .v3b-submit-btn {
+          width: 100%; height: 52px; border-radius: 16px;
+          font-weight: 700; font-size: 15px; letter-spacing: 0.02em;
+          border: none; cursor: pointer; transition: all 0.2s;
+          display: flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .v3b-submit-btn.active {
+          background: linear-gradient(135deg,#8b5cf6,#6366f1);
+          color: white; box-shadow: 0 4px 24px rgba(139,92,246,0.35);
+        }
+        .v3b-submit-btn.active:hover {
+          background: linear-gradient(135deg,#7c3aed,#4f46e5);
+          box-shadow: 0 6px 32px rgba(139,92,246,0.5); transform: translateY(-1px);
+        }
+        .v3b-submit-btn.loading { background: rgba(139,92,246,0.3); color: rgba(255,255,255,0.5); cursor: not-allowed; }
+        .v3b-submit-btn.disabled { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.25); cursor: not-allowed; }
+        @keyframes v3b-spin { to { transform: rotate(360deg); } }
+        .v3b-spin { animation: v3b-spin 1s linear infinite; }
+        @keyframes v3b-pulse { 0%,100%{opacity:1}50%{opacity:0.4} }
+        .v3b-pulse { animation: v3b-pulse 1.5s ease-in-out infinite; }
+        .v3b-stat-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 16px; }
+        .v3b-stat-row + .v3b-stat-row { border-top: 1px solid rgba(255,255,255,0.05); }
+        .v3b-error-text { font-size: 11px; color: #f87171; margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+      `}</style>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+
+        {/* ── Safe mode banner ── */}
+        <div style={{
+          display: "flex", alignItems: "flex-start", gap: 12,
+          padding: "12px 16px", borderRadius: 14,
+          background: "rgba(139,92,246,0.08)", border: "1px solid rgba(139,92,246,0.2)"
+        }}>
+          <div style={{ width: 32, height: 32, borderRadius: 10, background: "rgba(139,92,246,0.2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 }}>
+            <Shield style={{ width: 16, height: 16, color: "#c4b5fd" }} />
+          </div>
+          <div>
+            <p style={{ fontSize: 12, fontWeight: 700, color: "#c4b5fd", margin: 0 }}>Basic Mode — Safe &amp; Simple</p>
+            <p style={{ fontSize: 11, color: "rgba(196,181,253,0.55)", margin: 0, marginTop: 3, lineHeight: 1.5 }}>
+              Full-range liquidity for maximum safety. Recommended for beginners — no manual tick management required.
+            </p>
+          </div>
         </div>
+
+        {/* ── Token A ── */}
+        <div className={`v3b-token-box ${amountAExceedsBalance ? "error-border" : ""}`} style={{ padding: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Token A</span>
+            {isConnected && tokenA && (
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
+                Balance:{" "}
+                <span
+                  onClick={() => balanceA !== null && setAmountA(formatUnits(balanceA, tokenA.decimals))}
+                  style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600, cursor: balanceA !== null ? "pointer" : "default" }}
+                >
+                  {balanceA !== null ? formatBalance(balanceA, tokenA.decimals) : "—"} {tokenA.symbol}
+                </span>
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <input
+              type="number" placeholder="0.00" value={amountA}
+              onChange={e => setAmountA(e.target.value)}
+              className="v3b-input" style={{ flex: 1, minWidth: 0 }}
+            />
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+              <button onClick={() => setShowTokenASelector(true)} className={`v3b-token-btn ${!tokenA ? "empty" : ""}`}>
+                {tokenA ? (<><img src={tokenA.logoURI} alt={tokenA.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenA.symbol}</span></>) : <span>Select token</span>}
+              </button>
+              {isConnected && tokenA && balanceA !== null && (
+                <button className="v3b-max-btn" onClick={() => setAmountA(formatUnits(balanceA, tokenA.decimals))}>MAX</button>
+              )}
+            </div>
+          </div>
+          {amountAExceedsBalance && (
+            <p className="v3b-error-text">
+              <AlertTriangle style={{ width: 11, height: 11 }} /> Exceeds balance
+            </p>
+          )}
+        </div>
+
+        {/* ── Plus divider ── */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div className="v3b-divider-ring"><Plus style={{ width: 18, height: 18 }} /></div>
+        </div>
+
+        {/* ── Token B ── */}
+        <div className={`v3b-token-box ${amountBExceedsBalance ? "error-border" : ""}`} style={{ padding: 16 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <span style={{ fontSize: 11, fontWeight: 600, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Token B</span>
+            {isConnected && tokenB && (
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
+                Balance:{" "}
+                <span
+                  onClick={() => balanceB !== null && !poolExists && setAmountB(formatUnits(balanceB, tokenB.decimals))}
+                  style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600, cursor: (balanceB !== null && !poolExists) ? "pointer" : "default" }}
+                >
+                  {balanceB !== null ? formatBalance(balanceB, tokenB.decimals) : "—"} {tokenB.symbol}
+                </span>
+              </span>
+            )}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <input
+              type="number" placeholder={poolExists && currentPrice ? "Auto-calculated" : "0.00"} value={amountB}
+              onChange={e => setAmountB(e.target.value)}
+              disabled={poolExists && !!currentPrice}
+              className="v3b-input" style={{ flex: 1, minWidth: 0, opacity: poolExists && currentPrice ? 0.7 : 1 }}
+            />
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+              <button onClick={() => setShowTokenBSelector(true)} className={`v3b-token-btn ${!tokenB ? "empty" : ""}`}>
+                {tokenB ? (<><img src={tokenB.logoURI} alt={tokenB.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenB.symbol}</span></>) : <span>Select token</span>}
+              </button>
+              {isConnected && tokenB && balanceB !== null && !(poolExists && currentPrice) && (
+                <button className="v3b-max-btn" onClick={() => setAmountB(formatUnits(balanceB, tokenB.decimals))}>MAX</button>
+              )}
+            </div>
+          </div>
+          {poolExists && currentPrice && amountB && (
+            <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
+              <Info style={{ width: 12, height: 12, color: "rgba(196,181,253,0.6)", flexShrink: 0 }} />
+              <span style={{ fontSize: 11, color: "rgba(196,181,253,0.6)" }}>Calculated from pool price</span>
+            </div>
+          )}
+          {amountBExceedsBalance && (
+            <p className="v3b-error-text"><AlertTriangle style={{ width: 11, height: 11 }} /> Exceeds balance</p>
+          )}
+        </div>
+
+        {/* ── Fee tier ── */}
+        <div className="v3b-card">
+          <div className="v3b-card-header">
+            <span style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Fee Tier</span>
+            <span style={{ fontSize: 11, color: "rgba(196,181,253,0.6)" }}>{FEE_OPTIONS.find(f => f.value === selectedFee)?.tag}</span>
+          </div>
+          <div style={{ padding: "12px 14px" }}>
+            <div className="v3b-fee-grid">
+              {FEE_OPTIONS.map(opt => (
+                <button key={opt.value} onClick={() => setSelectedFee(opt.value)} className={`v3b-fee-btn ${selectedFee === opt.value ? "active" : ""}`}>
+                  <span className="v3b-fee-label">{opt.label}</span>
+                  <span className="v3b-fee-tag">{opt.tag}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Pool info card ── */}
+        {tokenA && tokenB && (
+          <div className="v3b-card">
+            <div className="v3b-card-header">
+              <span style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,0.35)", textTransform: "uppercase", letterSpacing: "0.08em" }}>Pool State</span>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                {/* Status dot */}
+                <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 10px", borderRadius: 20, background: isCheckingPool ? "rgba(255,255,255,0.05)" : poolExists ? "rgba(139,92,246,0.12)" : "rgba(99,102,241,0.12)", border: `1px solid ${isCheckingPool ? "transparent" : poolExists ? "rgba(139,92,246,0.3)" : "rgba(99,102,241,0.3)"}` }}>
+                  <span className={isCheckingPool ? "v3b-pulse" : ""} style={{ width: 6, height: 6, borderRadius: "50%", background: isCheckingPool ? "#6b7280" : poolExists ? "#a78bfa" : "#818cf8", display: "inline-block" }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: isCheckingPool ? "#6b7280" : poolExists ? "#c4b5fd" : "#a5b4fc" }}>
+                    {isCheckingPool ? "Checking…" : poolExists ? "Pool Exists" : "New Pool"}
+                  </span>
+                </div>
+                <button
+                  onClick={fetchPoolState}
+                  disabled={isCheckingPool}
+                  style={{ display: "flex", alignItems: "center", gap: 4, padding: "4px 10px", borderRadius: 8, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.4)", fontSize: 11, fontWeight: 600, cursor: "pointer", transition: "all 0.2s" }}
+                >
+                  <RefreshCw style={{ width: 11, height: 11 }} className={isCheckingPool ? "v3b-spin" : ""} />
+                </button>
+              </div>
+            </div>
+
+            {poolExists && currentPrice && (
+              <>
+                <div className="v3b-stat-row">
+                  <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Current Price</span>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: "white", fontVariantNumeric: "tabular-nums" }}>
+                    1 {token0Symbol} = {currentPrice.toFixed(6)} {token1Symbol}
+                  </span>
+                </div>
+                <div className="v3b-stat-row">
+                  <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Range</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#c4b5fd" }}>Full Range</span>
+                </div>
+                <div className="v3b-stat-row">
+                  <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Slippage</span>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: "#4ade80" }}>2%</span>
+                </div>
+              </>
+            )}
+
+            {!poolExists && !isCheckingPool && (
+              <>
+                <div className="v3b-stat-row">
+                  <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>
+                    {amountA && amountB ? "Initial ratio" : "Set initial price ratio"}
+                  </span>
+                  {amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 ? (
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#a5b4fc" }}>
+                      1 {tokenA.symbol} = {(parseFloat(amountB) / parseFloat(amountA)).toFixed(6)} {tokenB.symbol}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 12, color: "rgba(255,255,255,0.25)", fontStyle: "italic" }}>Enter amounts</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 16px", background: "rgba(245,158,11,0.05)", borderTop: "1px solid rgba(245,158,11,0.15)" }}>
+                  <AlertTriangle style={{ width: 13, height: 13, color: "#f59e0b", flexShrink: 0, marginTop: 1 }} />
+                  <p style={{ fontSize: 11, color: "rgba(245,158,11,0.7)", margin: 0, lineHeight: 1.5 }}>
+                    Creating a new pool. The amounts you enter set the initial price.
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ── Pool health checker ── */}
+        {tokenA && tokenB && !isCheckingPool && (
+          <PoolHealthChecker
+            poolAddress={poolAddress}
+            poolExists={poolExists}
+            sqrtPriceX96={currentSqrtPriceX96}
+            currentTick={currentTick}
+            currentPrice={currentPrice}
+            activeLiquidity={activeLiquidity}
+            token0Symbol={token0Symbol}
+            token1Symbol={token1Symbol}
+            expectedPriceRatio={expectedPriceRatio}
+            tokenA={tokenA}
+            tokenB={tokenB}
+            fee={selectedFee}
+            chainId={chainId}
+            onHealthChange={setPoolHealth}
+            onFixed={fetchPoolState}
+          />
+        )}
+
+        {/* ── Submit ── */}
+        {isConnected ? (
+          <button
+            onClick={handleAddLiquidity}
+            disabled={!canSubmit}
+            className={`v3b-submit-btn ${isAdding ? "loading" : canSubmit ? "active" : "disabled"}`}
+          >
+            {isAdding ? (
+              <>
+                <span style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.2)", borderTopColor: "white", borderRadius: "50%", display: "inline-block" }} className="v3b-spin" />
+                {poolExists ? "Adding Liquidity…" : "Creating Pool & Adding…"}
+              </>
+            ) : poolHealth?.severity === "error" ? (
+              "Fix Pool Issues First"
+            ) : (
+              <>
+                <Zap style={{ width: 18, height: 18 }} />
+                Add V3 Liquidity
+              </>
+            )}
+          </button>
+        ) : (
+          <button disabled className="v3b-submit-btn disabled">Connect Wallet to Continue</button>
+        )}
       </div>
 
-      {/* Token Selection */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-4">
-
-          {/* ── Token A ── */}
-          <div className="space-y-2">
-            {/* Label row: left = "Token A", right = balance */}
-            <div className="flex items-center justify-between">
-              <Label className="text-sm text-slate-400">Token A</Label>
-              {isConnected && tokenA && (
-                <button
-                  type="button"
-                  onClick={handleMaxA}
-                  className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
-                  disabled={balanceA === null}
-                >
-                  {balanceA !== null
-                    ? `Balance: ${formatBalance(balanceA, tokenA.decimals)} ${tokenA.symbol}`
-                    : "Balance: —"}
-                </button>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Input
-                  type="number"
-                  placeholder="0.00"
-                  value={amountA}
-                  onChange={(e) => setAmountA(e.target.value)}
-                  className={`w-full bg-slate-800 border-slate-600 ${
-                    amountAExceedsBalance ? "border-red-500 focus-visible:ring-red-500" : ""
-                  }`}
-                />
-                {amountAExceedsBalance && (
-                  <p className="absolute -bottom-4 left-0 text-xs text-red-400">
-                    Exceeds balance
-                  </p>
-                )}
-              </div>
-              <Button variant="outline" onClick={() => setShowTokenASelector(true)} className="min-w-[120px]">
-                {tokenA ? (
-                  <div className="flex items-center gap-2">
-                    {tokenA.logoURI && <img src={tokenA.logoURI} alt={tokenA.symbol} className="w-5 h-5 rounded-full" />}
-                    <span>{tokenA.symbol}</span>
-                  </div>
-                ) : (
-                  <span>Select Token</span>
-                )}
-              </Button>
-            </div>
-          </div>
-
-          {/* ── Token B ── */}
-          <div className="space-y-2 pt-2">
-            {/* Label row: left = "Token B", right = balance */}
-            <div className="flex items-center justify-between">
-              <Label className="text-sm text-slate-400">Token B</Label>
-              {isConnected && tokenB && (
-                <button
-                  type="button"
-                  onClick={handleMaxB}
-                  className="text-xs text-slate-400 hover:text-slate-200 transition-colors"
-                  disabled={balanceB === null || (poolExists && !!currentPrice)}
-                >
-                  {balanceB !== null
-                    ? `Balance: ${formatBalance(balanceB, tokenB.decimals)} ${tokenB.symbol}`
-                    : "Balance: —"}
-                </button>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <div className="relative flex-1">
-                <Input
-                  type="number"
-                  placeholder="0.00"
-                  value={amountB}
-                  onChange={(e) => setAmountB(e.target.value)}
-                  className={`w-full bg-slate-800 border-slate-600 ${
-                    amountBExceedsBalance ? "border-red-500 focus-visible:ring-red-500" : ""
-                  }`}
-                  disabled={poolExists && !!currentPrice}
-                />
-                {amountBExceedsBalance && (
-                  <p className="absolute -bottom-4 left-0 text-xs text-red-400">
-                    Exceeds balance
-                  </p>
-                )}
-              </div>
-              <Button variant="outline" onClick={() => setShowTokenBSelector(true)} className="min-w-[120px]">
-                {tokenB ? (
-                  <div className="flex items-center gap-2">
-                    {tokenB.logoURI && <img src={tokenB.logoURI} alt={tokenB.symbol} className="w-5 h-5 rounded-full" />}
-                    <span>{tokenB.symbol}</span>
-                  </div>
-                ) : (
-                  <span>Select Token</span>
-                )}
-              </Button>
-            </div>
-          </div>
-
-        </CardContent>
-      </Card>
-
-      {/* Fee Tier Selection */}
-      <Card className="bg-slate-900 border-slate-700">
-        <CardContent className="p-6 space-y-3">
-          <Label className="text-sm text-slate-400">Fee Tier</Label>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-            {feeOptions.map((option) => (
-              <Button
-                key={option.value}
-                variant={selectedFee === option.value ? "default" : "outline"}
-                onClick={() => setSelectedFee(option.value)}
-                className="flex flex-col h-auto py-3"
-              >
-                <span className="font-semibold">{option.label}</span>
-                <span className="text-xs opacity-70">{option.description}</span>
-              </Button>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Pool Health Checker */}
-      {tokenA && tokenB && (
-        <>
-          {isCheckingPool ? (
-            <div className="flex items-center gap-2 p-3 rounded-lg bg-slate-800/50 border border-slate-700 text-slate-400 text-sm">
-              <div className="h-4 w-4 rounded-full border-2 border-slate-600 border-t-slate-300 animate-spin" />
-              Checking pool…
-            </div>
-          ) : (
-            <PoolHealthChecker
-              poolAddress={poolAddress}
-              poolExists={poolExists}
-              sqrtPriceX96={currentSqrtPriceX96}
-              currentTick={currentTick}
-              currentPrice={currentPrice}
-              activeLiquidity={activeLiquidity}
-              token0Symbol={token0Symbol}
-              token1Symbol={token1Symbol}
-              expectedPriceRatio={expectedPriceRatio}
-              tokenA={tokenA}
-              tokenB={tokenB}
-              fee={selectedFee}
-              chainId={chainId}
-              onHealthChange={setPoolHealth}
-              onFixed={fetchPoolState}
-            />
-          )}
-        </>
-      )}
-
-      {/* Add Liquidity Button */}
-      {isConnected ? (
-        <Button
-          onClick={handleAddLiquidity}
-          disabled={
-            !tokenA ||
-            !tokenB ||
-            !amountA ||
-            !amountB ||
-            isAdding ||
-            parseFloat(amountA) <= 0 ||
-            parseFloat(amountB) <= 0 ||
-            amountAExceedsBalance ||
-            amountBExceedsBalance ||
-            poolHealth?.severity === "error"
-          }
-          className="w-full h-12 text-base font-semibold"
-        >
-          {addButtonLabel()}
-        </Button>
-      ) : (
-        <Button disabled className="w-full h-12">
-          Connect Wallet
-        </Button>
-      )}
-
-      {/* Token Selectors */}
-      <TokenSelector
-        open={showTokenASelector}
-        onClose={() => setShowTokenASelector(false)}
-        onSelect={(token) => { setTokenA(token); setShowTokenASelector(false); }}
-        tokens={tokens}
-        onImport={handleImportToken}
-      />
-      <TokenSelector
-        open={showTokenBSelector}
-        onClose={() => setShowTokenBSelector(false)}
-        onSelect={(token) => { setTokenB(token); setShowTokenBSelector(false); }}
-        tokens={tokens}
-        onImport={handleImportToken}
-      />
-    </div>
+      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens} onImport={handleImportToken} />
+      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens} onImport={handleImportToken} />
+    </>
   );
 }
