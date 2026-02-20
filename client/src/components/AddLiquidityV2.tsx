@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Plus, ExternalLink } from "lucide-react";
+import { Plus, ExternalLink, Info, ChevronDown, ChevronUp, Droplets, TrendingUp } from "lucide-react";
 import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
@@ -33,12 +33,12 @@ export function AddLiquidityV2() {
   const [reserveA, setReserveA] = useState<bigint>(0n);
   const [reserveB, setReserveB] = useState<bigint>(0n);
   const [isLoadingPair, setIsLoadingPair] = useState(false);
+  const [showPoolInfo, setShowPoolInfo] = useState(true);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
 
-  // Get chain-specific contracts
   const contracts = chainId ? getContractsForChain(chainId) : null;
 
   const FACTORY_ABI = [
@@ -64,7 +64,6 @@ export function AddLiquidityV2() {
     }
   };
 
-  // Check if pair exists and fetch reserves
   useEffect(() => {
     const checkPairExists = async () => {
       if (!tokenA || !tokenB || !window.ethereum) {
@@ -81,7 +80,6 @@ export function AddLiquidityV2() {
         const provider = new BrowserProvider(window.ethereum);
         const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
 
-        // Get wrapped token for ARC Testnet
         const wrappedToken = tokens.find(t => t.symbol === 'wUSDC');
         const wrappedAddress = wrappedToken?.address;
 
@@ -94,42 +92,30 @@ export function AddLiquidityV2() {
           return;
         }
 
-        // Convert native token to wrapped for pool lookup
         const isTokenANative = tokenA.address === "0x0000000000000000000000000000000000000000";
         const isTokenBNative = tokenB.address === "0x0000000000000000000000000000000000000000";
         const tokenAAddress = isTokenANative ? wrappedAddress : tokenA.address;
         const tokenBAddress = isTokenBNative ? wrappedAddress : tokenB.address;
 
-        console.log('Checking pair:', { tokenAAddress, tokenBAddress, isTokenANative, isTokenBNative, factoryAddress: contracts.v2.factory });
-
         const pairAddress = await factory.getPair(tokenAAddress, tokenBAddress);
-        console.log('Pair lookup result:', pairAddress);
 
         if (pairAddress === "0x0000000000000000000000000000000000000000") {
-          console.log('No existing pair found');
           setPairExists(false);
           setReserveA(0n);
           setReserveB(0n);
         } else {
-          console.log('Pair found at:', pairAddress);
           setPairExists(true);
 
-          // Fetch reserves
           const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
           const [reserve0, reserve1] = await pairContract.getReserves();
           const token0Address = await pairContract.token0();
 
-          console.log('Reserves:', { reserve0: reserve0.toString(), reserve1: reserve1.toString(), token0: token0Address });
-
-          // Determine which reserve corresponds to which token (using pool addresses)
           if (tokenAAddress.toLowerCase() === token0Address.toLowerCase()) {
             setReserveA(reserve0);
             setReserveB(reserve1);
-            console.log('Reserve mapping: reserveA=reserve0, reserveB=reserve1');
           } else {
             setReserveA(reserve1);
             setReserveB(reserve0);
-            console.log('Reserve mapping: reserveA=reserve1, reserveB=reserve0');
           }
         }
       } catch (error) {
@@ -145,27 +131,12 @@ export function AddLiquidityV2() {
     checkPairExists();
   }, [tokenA, tokenB, tokens, address]);
 
-  // Auto-calculate amountB based on pool ratio when amountA changes
   useEffect(() => {
-    // Only auto-calculate if pool exists AND has reserves
-    if (!pairExists || !tokenA || !tokenB || !amountA || parseFloat(amountA) <= 0) {
-      return;
-    }
-
-    // If pool exists but has no reserves (all liquidity removed), don't auto-calculate
-    if (reserveA === 0n || reserveB === 0n) {
-      return;
-    }
+    if (!pairExists || !tokenA || !tokenB || !amountA || parseFloat(amountA) <= 0) return;
+    if (reserveA === 0n || reserveB === 0n) return;
 
     try {
       const amountABigInt = parseAmount(amountA, tokenA.decimals);
-      
-      // Calculate amountB = amountA * reserveB / reserveA
-      // This works for any decimal combination because:
-      // - amountABigInt is in tokenA's decimals
-      // - reserveA is in tokenA's decimals
-      // - reserveB is in tokenB's decimals
-      // - Result will be in tokenB's decimals
       const amountBBigInt = (amountABigInt * reserveB) / reserveA;
       const calculatedAmountB = formatAmount(amountBBigInt, tokenB.decimals);
       setAmountB(calculatedAmountB);
@@ -177,20 +148,15 @@ export function AddLiquidityV2() {
   const loadTokens = async () => {
     try {
       if (!chainId) return;
-
-      // Filter tokens by current chain ID
       const chainTokens = getTokensByChainId(chainId);
-
       const imported = localStorage.getItem('importedTokens');
       const importedTokens = imported ? JSON.parse(imported) : [];
       const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
 
-      // Process tokens to add fallback logos
       const processedDefaultTokens = chainTokens.map(token => ({
         ...token,
         logoURI: token.logoURI || `/img/logos/unknown-token.png`
       }));
-
       const processedImportedTokens = chainImportedTokens.map((token: Token) => ({
         ...token,
         logoURI: token.logoURI || `/img/logos/unknown-token.png`
@@ -208,31 +174,21 @@ export function AddLiquidityV2() {
         throw new Error("Invalid token address format");
       }
 
-      // Check if token already exists in default or imported tokens
       const exists = tokens.find(t => t.address.toLowerCase() === address.toLowerCase());
       if (exists) {
-        toast({
-          title: "Token already added",
-          description: `${exists.symbol} is already in your token list`,
-        });
+        toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` });
         return exists;
       }
 
-      // Use public RPC for token data (no wallet needed) - chain-specific
-      const rpcUrl = chainId === 2201 
-        ? 'https://rpc.testnet.stable.xyz/' 
+      const rpcUrl = chainId === 2201
+        ? 'https://rpc.testnet.stable.xyz/'
         : 'https://rpc.testnet.arc.network';
       const provider = new BrowserProvider({
         request: async ({ method, params }: any) => {
           const response = await fetch(rpcUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              jsonrpc: '2.0',
-              id: 1,
-              method,
-              params,
-            }),
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
           });
           const data = await response.json();
           if (data.error) throw new Error(data.error.message);
@@ -246,20 +202,14 @@ export function AddLiquidityV2() {
       );
 
       const [name, symbol, decimals] = await Promise.race([
-        Promise.all([
-          contract.name(),
-          contract.symbol(),
-          contract.decimals(),
-        ]),
+        Promise.all([contract.name(), contract.symbol(), contract.decimals()]),
         timeout
       ]) as [string, string, bigint];
 
       if (!chainId) throw new Error("Chain ID not available");
 
       const newToken: Token = {
-        address,
-        name,
-        symbol,
+        address, name, symbol,
         decimals: Number(decimals),
         logoURI: "/img/logos/unknown-token.png",
         verified: false,
@@ -268,7 +218,6 @@ export function AddLiquidityV2() {
 
       const imported = localStorage.getItem('importedTokens');
       const importedTokens = imported ? JSON.parse(imported) : [];
-
       const alreadyImported = importedTokens.find((t: Token) => t.address.toLowerCase() === address.toLowerCase());
       if (!alreadyImported) {
         importedTokens.push(newToken);
@@ -276,39 +225,19 @@ export function AddLiquidityV2() {
       }
 
       setTokens(prev => [...prev, newToken]);
-
-      toast({
-        title: "Token imported",
-        description: `${symbol} has been added to your token list`,
-      });
-
+      toast({ title: "Token imported", description: `${symbol} has been added to your token list` });
       return newToken;
     } catch (error: any) {
       console.error('Token import error:', error);
-      let errorMessage = "Failed to import token";
+      let errorMessage = "Unable to fetch token data. Please verify the address is correct.";
+      if (error.message.includes("timeout")) errorMessage = "Request timed out. Please check the address and try again.";
+      else if (error.message.includes("Invalid") || error.message.includes("wallet") || error.message.includes("already")) errorMessage = error.message;
 
-      if (error.message.includes("timeout")) {
-        errorMessage = "Request timed out. Please check the address and try again.";
-      } else if (error.message.includes("Invalid")) {
-        errorMessage = error.message;
-      } else if (error.message.includes("wallet")) {
-        errorMessage = error.message;
-      } else if (error.message.includes("already")) {
-        errorMessage = error.message;
-      } else {
-        errorMessage = "Unable to fetch token data. Please verify the address is correct.";
-      }
-
-      toast({
-        title: "Import failed",
-        description: errorMessage,
-        variant: "destructive",
-      });
+      toast({ title: "Import failed", description: errorMessage, variant: "destructive" });
       return null;
     }
   };
 
-  // Fetch balances for selected tokens
   const isTokenANative = tokenA?.address === "0x0000000000000000000000000000000000000000";
   const isTokenBNative = tokenB?.address === "0x0000000000000000000000000000000000000000";
 
@@ -316,43 +245,26 @@ export function AddLiquidityV2() {
     address: address as `0x${string}` | undefined,
     ...(tokenA && !isTokenANative ? { token: tokenA.address as `0x${string}` } : {}),
   });
-
   const { data: balanceB, refetch: refetchBalanceB } = useBalance({
     address: address as `0x${string}` | undefined,
     ...(tokenB && !isTokenBNative ? { token: tokenB.address as `0x${string}` } : {}),
   });
 
-  let balanceAFormatted = "0.00";
-  let balanceBFormatted = "0.00";
-  
-  if (balanceA) {
-    balanceAFormatted = formatAmount(balanceA.value, balanceA.decimals);
-  }
-  
-  if (balanceB) {
-    balanceBFormatted = formatAmount(balanceB.value, balanceB.decimals);
-  }
+  const balanceAFormatted = balanceA ? formatAmount(balanceA.value, balanceA.decimals) : "0.00";
+  const balanceBFormatted = balanceB ? formatAmount(balanceB.value, balanceB.decimals) : "0.00";
 
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !amountA || !amountB || parseFloat(amountA) <= 0 || parseFloat(amountB) <= 0) return;
 
     setIsAdding(true);
     try {
-      if (!address || !window.ethereum) {
-        throw new Error("Please connect your wallet");
-      }
+      if (!address || !window.ethereum) throw new Error("Please connect your wallet");
 
-      // Validate balances before proceeding
       const amountADesired = parseAmount(amountA, tokenA.decimals);
       const amountBDesired = parseAmount(amountB, tokenB.decimals);
 
-      if (balanceA && amountADesired > balanceA.value) {
-        throw new Error(`Insufficient ${tokenA.symbol} balance`);
-      }
-
-      if (balanceB && amountBDesired > balanceB.value) {
-        throw new Error(`Insufficient ${tokenB.symbol} balance`);
-      }
+      if (balanceA && amountADesired > balanceA.value) throw new Error(`Insufficient ${tokenA.symbol} balance`);
+      if (balanceB && amountBDesired > balanceB.value) throw new Error(`Insufficient ${tokenB.symbol} balance`);
 
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
@@ -360,54 +272,35 @@ export function AddLiquidityV2() {
       if (!contracts) throw new Error("Chain contracts not configured");
       const router = new Contract(contracts.v2.router, ROUTER_ABI, signer);
 
-      // For new pools, use 0 minimum amounts. For existing pools, use 5% slippage tolerance
       let amountAMin: bigint;
       let amountBMin: bigint;
-      
+
       if (!pairExists || reserveA === 0n || reserveB === 0n) {
-        // New pool - no slippage impact, use 0 minimums
         amountAMin = 0n;
         amountBMin = 0n;
       } else {
-        // Existing pool - apply 5% slippage tolerance
         amountAMin = amountADesired * 95n / 100n;
         amountBMin = amountBDesired * 95n / 100n;
       }
 
-      // Deadline: 20 minutes from now
       const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
 
-      // Get wrapped token for native conversion (chain-specific)
       const wrappedSymbol = chainId === 2201 ? 'wUSDT' : 'wUSDC';
       const wrappedToken = tokens.find(t => t.symbol === wrappedSymbol);
       const wrappedAddress = wrappedToken?.address;
-      
-      if (!wrappedAddress) {
-        throw new Error(`${wrappedSymbol} token not found`);
-      }
-
-      console.log('Adding liquidity:', {
-        tokenA: tokenA.symbol,
-        tokenB: tokenB.symbol,
-        amountADesired: amountADesired.toString(),
-        amountBDesired: amountBDesired.toString(),
-        amountAMin: amountAMin.toString(),
-        amountBMin: amountBMin.toString(),
-      });
+      if (!wrappedAddress) throw new Error(`${wrappedSymbol} token not found`);
 
       toast({
         title: "Adding liquidity",
         description: `Adding ${amountA} ${tokenA.symbol} and ${amountB} ${tokenB.symbol}`,
       });
 
-      // Convert native token to wrapped for pool operations
       const tokenAAddress = isTokenANative ? wrappedAddress : tokenA.address;
       const tokenBAddress = isTokenBNative ? wrappedAddress : tokenB.address;
 
       let tx;
 
       if (isTokenANative || isTokenBNative) {
-        // Add liquidity with native USDC (acts as ETH)
         const token = isTokenANative ? tokenB : tokenA;
         const tokenAddress = isTokenANative ? tokenBAddress : tokenAAddress;
         const tokenAmount = isTokenANative ? amountBDesired : amountADesired;
@@ -415,7 +308,6 @@ export function AddLiquidityV2() {
         const ethAmount = isTokenANative ? amountADesired : amountBDesired;
         const ethAmountMin = isTokenANative ? amountAMin : amountBMin;
 
-        // Approve token (if not native)
         const tokenContract = new Contract(token.address, ERC20_ABI, signer);
         const allowance = await tokenContract.allowance(address, contracts.v2.router);
 
@@ -424,8 +316,6 @@ export function AddLiquidityV2() {
           const approveGasLimit = (approveGasEstimate * 150n) / 100n;
           const approveTx = await tokenContract.approve(contracts.v2.router, tokenAmount, { gasLimit: approveGasLimit });
           const approveReceipt = await approveTx.wait();
-
-          // Refetch balances after approval
           await Promise.all([refetchBalanceA(), refetchBalanceB()]);
 
           toast({
@@ -433,12 +323,7 @@ export function AddLiquidityV2() {
             description: (
               <div className="flex items-center gap-2">
                 <span>Token approval confirmed</span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2"
-                  onClick={() => openExplorer(approveReceipt.hash)}
-                >
+                <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(approveReceipt.hash)}>
                   <ExternalLink className="h-3 w-3" />
                 </Button>
               </div>
@@ -446,28 +331,10 @@ export function AddLiquidityV2() {
           });
         }
 
-        const gasEstimate = await router.addLiquidityETH.estimateGas(
-          tokenAddress,
-          tokenAmount,
-          tokenAmountMin,
-          ethAmountMin,
-          address,
-          deadline,
-          { value: ethAmount }
-        );
+        const gasEstimate = await router.addLiquidityETH.estimateGas(tokenAddress, tokenAmount, tokenAmountMin, ethAmountMin, address, deadline, { value: ethAmount });
         const gasLimit = (gasEstimate * 150n) / 100n;
-        tx = await router.addLiquidityETH(
-          tokenAddress,
-          tokenAmount,
-          tokenAmountMin,
-          ethAmountMin,
-          address,
-          deadline,
-          { value: ethAmount, gasLimit }
-        );
+        tx = await router.addLiquidityETH(tokenAddress, tokenAmount, tokenAmountMin, ethAmountMin, address, deadline, { value: ethAmount, gasLimit });
       } else {
-        // Add liquidity with two ERC20 tokens
-        // Approve both tokens
         const tokenAContract = new Contract(tokenAAddress, ERC20_ABI, signer);
         const tokenBContract = new Contract(tokenBAddress, ERC20_ABI, signer);
 
@@ -479,21 +346,14 @@ export function AddLiquidityV2() {
           const approveGasLimit = (approveGasEstimate * 150n) / 100n;
           const approveTx = await tokenAContract.approve(contracts.v2.router, amountADesired, { gasLimit: approveGasLimit });
           const approveReceipt = await approveTx.wait();
-
-          // Refetch balances after approval
           await Promise.all([refetchBalanceA(), refetchBalanceB()]);
 
           toast({
             title: "Approval successful",
             description: (
               <div className="flex items-center gap-2">
-                <span>Token approval confirmed</span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2"
-                  onClick={() => openExplorer(approveReceipt.hash)}
-                >
+                <span>Token A approval confirmed</span>
+                <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(approveReceipt.hash)}>
                   <ExternalLink className="h-3 w-3" />
                 </Button>
               </div>
@@ -506,21 +366,14 @@ export function AddLiquidityV2() {
           const approveGasLimit = (approveGasEstimate * 150n) / 100n;
           const approveTx = await tokenBContract.approve(contracts.v2.router, amountBDesired, { gasLimit: approveGasLimit });
           const approveReceipt = await approveTx.wait();
-
-          // Refetch balances after approval
           await Promise.all([refetchBalanceA(), refetchBalanceB()]);
 
           toast({
             title: "Approval successful",
             description: (
               <div className="flex items-center gap-2">
-                <span>Token approval confirmed</span>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 px-2"
-                  onClick={() => openExplorer(approveReceipt.hash)}
-                >
+                <span>Token B approval confirmed</span>
+                <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(approveReceipt.hash)}>
                   <ExternalLink className="h-3 w-3" />
                 </Button>
               </div>
@@ -528,36 +381,14 @@ export function AddLiquidityV2() {
           });
         }
 
-        const gasEstimate = await router.addLiquidity.estimateGas(
-          tokenAAddress,
-          tokenBAddress,
-          amountADesired,
-          amountBDesired,
-          amountAMin,
-          amountBMin,
-          address,
-          deadline
-        );
+        const gasEstimate = await router.addLiquidity.estimateGas(tokenAAddress, tokenBAddress, amountADesired, amountBDesired, amountAMin, amountBMin, address, deadline);
         const gasLimit = (gasEstimate * 150n) / 100n;
-        tx = await router.addLiquidity(
-          tokenAAddress,
-          tokenBAddress,
-          amountADesired,
-          amountBDesired,
-          amountAMin,
-          amountBMin,
-          address,
-          deadline,
-          { gasLimit }
-        );
+        tx = await router.addLiquidity(tokenAAddress, tokenBAddress, amountADesired, amountBDesired, amountAMin, amountBMin, address, deadline, { gasLimit });
       }
 
       await tx.wait();
-
       setAmountA("");
       setAmountB("");
-
-      // Wait a moment for blockchain to update, then refetch balances
       await new Promise(resolve => setTimeout(resolve, 1500));
       await Promise.all([refetchBalanceA(), refetchBalanceB()]);
 
@@ -566,12 +397,7 @@ export function AddLiquidityV2() {
         description: (
           <div className="flex items-center gap-2">
             <span>Successfully added liquidity to {tokenA.symbol}/{tokenB.symbol} pool</span>
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-6 px-2"
-              onClick={() => openExplorer(tx.hash)}
-            >
+            <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(tx.hash)}>
               <ExternalLink className="h-3 w-3" />
             </Button>
           </div>
@@ -589,231 +415,315 @@ export function AddLiquidityV2() {
     }
   };
 
+  // Pool status derived values
+  const poolHasLiquidity = pairExists && reserveA > 0n && reserveB > 0n;
+  const poolIsEmpty = pairExists && (reserveA === 0n || reserveB === 0n);
+  const isNewPool = !pairExists;
+  const isRatioLocked = poolHasLiquidity;
+
+  const poolStatusConfig = isLoadingPair
+    ? { label: "Checking…", color: "text-slate-400", bg: "bg-slate-500/10 border-slate-500/20", dot: "bg-slate-400" }
+    : poolHasLiquidity
+    ? { label: "Active Pool", color: "text-emerald-400", bg: "bg-emerald-500/10 border-emerald-500/20", dot: "bg-emerald-400" }
+    : poolIsEmpty
+    ? { label: "Empty Pool", color: "text-amber-400", bg: "bg-amber-500/10 border-amber-500/20", dot: "bg-amber-400" }
+    : { label: "New Pool", color: "text-blue-400", bg: "bg-blue-500/10 border-blue-500/20", dot: "bg-blue-400" };
+
+  const canSubmit = tokenA && tokenB && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding;
+
   return (
-    <div className="container max-w-md mx-auto px-4 py-4 md:py-8">
-      <Card className="border-border/40 shadow-xl backdrop-blur-sm bg-card/95">
-        <CardHeader className="space-y-1 pb-4 md:pb-6">
-          <CardTitle className="text-xl md:text-2xl font-bold">Add Liquidity</CardTitle>
-          <p className="text-xs md:text-sm text-muted-foreground">
-            Add liquidity to earn fees on swaps
-          </p>
-        </CardHeader>
+    <div className="w-full space-y-3">
+      {/* Token A Input */}
+      <div className="rounded-2xl bg-slate-800/60 border border-slate-700/50 p-4 space-y-3 transition-all hover:border-slate-600/60">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Token A</span>
+          {isConnected && tokenA && (
+            <span className="text-xs text-slate-400">
+              Balance: <span className="text-slate-300 font-medium">{balanceAFormatted}</span>
+            </span>
+          )}
+        </div>
 
-        <CardContent className="space-y-3 md:space-y-4">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-muted-foreground">Token A</label>
-              {isConnected && tokenA && (
-                <span className="text-xs text-muted-foreground">
-                  Balance: {balanceAFormatted}
-                </span>
+        <div className="flex items-center gap-3">
+          <Input
+            data-testid="input-token-a-amount"
+            type="number"
+            placeholder="0.00"
+            value={amountA}
+            onChange={(e) => setAmountA(e.target.value)}
+            className="border-0 bg-transparent text-2xl sm:text-3xl font-bold h-auto p-0 focus-visible:ring-0 focus-visible:ring-offset-0 text-white placeholder:text-slate-600 flex-1 min-w-0"
+          />
+
+          <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+            <Button
+              data-testid="button-select-token-a"
+              onClick={() => setShowTokenASelector(true)}
+              variant="secondary"
+              className="h-10 px-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-xl gap-2 min-w-[110px] justify-between"
+            >
+              {tokenA ? (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <img
+                      src={tokenA.logoURI}
+                      alt={tokenA.symbol}
+                      className="w-5 h-5 rounded-full flex-shrink-0"
+                      onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                    />
+                    <span className="font-semibold text-sm text-white">{tokenA.symbol}</span>
+                  </div>
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                </>
+              ) : (
+                <>
+                  <span className="text-slate-300 text-sm">Select</span>
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                </>
+              )}
+            </Button>
+
+            {isConnected && tokenA && balanceA && (
+              <button
+                data-testid="button-max-token-a"
+                onClick={() => setAmountA(balanceAFormatted)}
+                className="text-[10px] font-bold text-blue-400 hover:text-blue-300 bg-blue-500/10 hover:bg-blue-500/20 px-2 py-0.5 rounded-md transition-colors"
+              >
+                MAX
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Plus Divider */}
+      <div className="flex items-center justify-center">
+        <div className="flex items-center gap-3 w-full">
+          <div className="flex-1 h-px bg-slate-700/60" />
+          <div className="w-9 h-9 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center flex-shrink-0 shadow-md">
+            <Plus className="h-4 w-4 text-slate-400" />
+          </div>
+          <div className="flex-1 h-px bg-slate-700/60" />
+        </div>
+      </div>
+
+      {/* Token B Input */}
+      <div className={`rounded-2xl bg-slate-800/60 border p-4 space-y-3 transition-all ${
+        isRatioLocked
+          ? "border-blue-500/30 bg-slate-800/40"
+          : "border-slate-700/50 hover:border-slate-600/60"
+      }`}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">Token B</span>
+            {isRatioLocked && (
+              <span className="text-[10px] font-semibold text-blue-400 bg-blue-500/10 border border-blue-500/20 px-1.5 py-0.5 rounded-full">
+                Auto
+              </span>
+            )}
+          </div>
+          {isConnected && tokenB && (
+            <span className="text-xs text-slate-400">
+              Balance: <span className="text-slate-300 font-medium">{balanceBFormatted}</span>
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-3">
+          <Input
+            data-testid="input-token-b-amount"
+            type="number"
+            placeholder={isRatioLocked ? "Calculated automatically" : "0.00"}
+            value={amountB}
+            onChange={(e) => (!isRatioLocked ? setAmountB(e.target.value) : null)}
+            disabled={isRatioLocked}
+            className={`border-0 bg-transparent text-2xl sm:text-3xl font-bold h-auto p-0 focus-visible:ring-0 focus-visible:ring-offset-0 flex-1 min-w-0 ${
+              isRatioLocked
+                ? "text-slate-400 cursor-not-allowed placeholder:text-slate-600"
+                : "text-white placeholder:text-slate-600"
+            }`}
+          />
+
+          <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+            <Button
+              data-testid="button-select-token-b"
+              onClick={() => setShowTokenBSelector(true)}
+              variant="secondary"
+              className="h-10 px-3 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded-xl gap-2 min-w-[110px] justify-between"
+            >
+              {tokenB ? (
+                <>
+                  <div className="flex items-center gap-1.5">
+                    <img
+                      src={tokenB.logoURI}
+                      alt={tokenB.symbol}
+                      className="w-5 h-5 rounded-full flex-shrink-0"
+                      onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                    />
+                    <span className="font-semibold text-sm text-white">{tokenB.symbol}</span>
+                  </div>
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                </>
+              ) : (
+                <>
+                  <span className="text-slate-300 text-sm">Select</span>
+                  <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+                </>
+              )}
+            </Button>
+
+            {isConnected && tokenB && balanceB && !isRatioLocked && (
+              <button
+                data-testid="button-max-token-b"
+                onClick={() => setAmountB(balanceBFormatted)}
+                className="text-[10px] font-bold text-blue-400 hover:text-blue-300 bg-blue-500/10 hover:bg-blue-500/20 px-2 py-0.5 rounded-md transition-colors"
+              >
+                MAX
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Pool Info Panel - only shown when both tokens selected */}
+      {tokenA && tokenB && (
+        <div className={`rounded-2xl border overflow-hidden transition-all ${poolStatusConfig.bg}`}>
+          {/* Header - always visible, acts as toggle */}
+          <button
+            className="w-full flex items-center justify-between px-4 py-3"
+            onClick={() => setShowPoolInfo(p => !p)}
+          >
+            <div className="flex items-center gap-2.5">
+              <div className={`w-2 h-2 rounded-full flex-shrink-0 ${poolStatusConfig.dot} ${
+                isLoadingPair ? "animate-pulse" : poolHasLiquidity ? "animate-pulse" : ""
+              }`} />
+              <span className={`text-sm font-semibold ${poolStatusConfig.color}`}>
+                {poolStatusConfig.label}
+              </span>
+              {poolHasLiquidity && (
+                <span className="hidden sm:inline text-xs text-slate-500">· Ratio locked to pool</span>
               )}
             </div>
-
-            <div className="relative bg-muted/50 rounded-xl p-4 border border-border/40 hover:border-border/60 transition-colors">
-              <Input
-                data-testid="input-token-a-amount"
-                type="number"
-                placeholder="0.00"
-                value={amountA}
-                onChange={(e) => setAmountA(e.target.value)}
-                className="border-0 bg-transparent text-xl md:text-2xl font-semibold h-auto p-0 focus-visible:ring-0 focus-visible:ring-offset-0"
-              />
-
-              <div className="flex items-center justify-between mt-3">
-                <Button
-                  data-testid="button-select-token-a"
-                  onClick={() => setShowTokenASelector(true)}
-                  variant="secondary"
-                  className="h-10 px-3 md:px-4 hover:bg-secondary/80"
-                >
-                  {tokenA ? (
-                    <div className="flex items-center gap-2">
-                      <img src={tokenA.logoURI} alt={tokenA.symbol} className="w-6 h-6 rounded-full" />
-                      <span className="font-semibold text-sm md:text-base">{tokenA.symbol}</span>
-                    </div>
-                  ) : (
-                    "Select token"
-                  )}
-                </Button>
-                {isConnected && tokenA && balanceA && (
-                  <Button
-                    data-testid="button-max-token-a"
-                    onClick={() => setAmountA(balanceAFormatted)}
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 px-3 text-xs font-semibold text-primary hover:text-primary/80 hover:bg-primary/10"
-                  >
-                    MAX
-                  </Button>
-                )}
-              </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsLoadingPair(true);
+                  setTimeout(() => setTokenA(tokenA), 100);
+                }}
+                disabled={isLoadingPair}
+                className="text-xs text-slate-500 hover:text-slate-300 transition-colors px-2 py-0.5 rounded hover:bg-slate-700/50"
+                data-testid="button-refresh-pool"
+              >
+                {isLoadingPair ? "…" : "Refresh"}
+              </button>
+              {showPoolInfo
+                ? <ChevronUp className="h-4 w-4 text-slate-500" />
+                : <ChevronDown className="h-4 w-4 text-slate-500" />
+              }
             </div>
-          </div>
+          </button>
 
-          <div className="flex justify-center -my-2">
-            <div className="rounded-full h-10 w-10 bg-card border-4 border-background flex items-center justify-center shadow-md">
-              <Plus className="h-5 w-5 text-primary" />
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-sm font-medium text-muted-foreground">Token B</label>
-              {isConnected && tokenB && (
-                <span className="text-xs text-muted-foreground">
-                  Balance: {balanceBFormatted}
-                </span>
-              )}
-            </div>
-
-            <div className="relative bg-muted/50 rounded-xl p-4 border border-border/40 hover:border-border/60 transition-colors">
-              <Input
-                data-testid="input-token-b-amount"
-                type="number"
-                placeholder={pairExists && reserveA > 0n && reserveB > 0n ? "Calculated from pool ratio" : "0.00"}
-                value={amountB}
-                onChange={(e) => (pairExists && reserveA > 0n && reserveB > 0n ? null : setAmountB(e.target.value))}
-                disabled={pairExists && reserveA > 0n && reserveB > 0n}
-                className="border-0 bg-transparent text-xl md:text-2xl font-semibold h-auto p-0 focus-visible:ring-0 focus-visible:ring-offset-0 disabled:opacity-100 disabled:cursor-not-allowed"
-              />
-
-              <div className="flex items-center justify-between mt-3">
-                <Button
-                  data-testid="button-select-token-b"
-                  onClick={() => setShowTokenBSelector(true)}
-                  variant="secondary"
-                  className="h-10 px-3 md:px-4 hover:bg-secondary/80"
-                >
-                  {tokenB ? (
-                    <div className="flex items-center gap-2">
-                      <img src={tokenB.logoURI} alt={tokenB.symbol} className="w-6 h-6 rounded-full" />
-                      <span className="font-semibold text-sm md:text-base">{tokenB.symbol}</span>
-                    </div>
-                  ) : (
-                    "Select token"
-                  )}
-                </Button>
-                {isConnected && tokenB && balanceB && !(pairExists && reserveA > 0n && reserveB > 0n) && (
-                  <Button
-                    data-testid="button-max-token-b"
-                    onClick={() => setAmountB(balanceBFormatted)}
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 px-3 text-xs font-semibold text-primary hover:text-primary/80 hover:bg-primary/10"
-                  >
-                    MAX
-                  </Button>
-                )}
-              </div>
-            </div>
-          </div>
-
-          {tokenA && tokenB && (
-            <div className="space-y-3">
-              {/* Pool Status Card */}
-              <div className="bg-primary/5 border border-primary/30 rounded-xl p-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-muted-foreground">Pool Information</span>
-                  <div className="flex items-center gap-2">
-                    <span className={`text-sm font-semibold px-2.5 py-1 rounded-full ${
-                      isLoadingPair 
-                        ? 'bg-muted text-muted-foreground' 
-                        : pairExists && reserveA > 0n && reserveB > 0n 
-                          ? 'bg-green-500/20 text-green-400' 
-                          : pairExists ? 'bg-yellow-500/20 text-yellow-400' 
-                          : 'bg-blue-500/20 text-blue-400'
-                    }`}>
-                      {isLoadingPair ? "Checking..." : pairExists && reserveA > 0n && reserveB > 0n ? "Existing" : pairExists ? "Empty" : "New"}
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => {
-                        setIsLoadingPair(true);
-                        setTimeout(() => {
-                          // Trigger check by causing a state update
-                          setTokenA(tokenA);
-                        }, 100);
-                      }}
-                      disabled={isLoadingPair}
-                      className="h-7 px-2 text-xs"
-                      data-testid="button-refresh-pool"
-                    >
-                      Refresh
-                    </Button>
-                  </div>
-                </div>
-
-                {/* Current Pool Ratio */}
-                {pairExists && reserveA > 0n && reserveB > 0n && (
-                  <div className="pt-2 border-t border-primary/20 space-y-1.5">
-                    <p className="text-xs text-muted-foreground">Current Pool Ratio:</p>
-                    <p className="text-base font-semibold text-foreground">
-                      1 {tokenA.symbol} = {calculateRatio(reserveB, tokenB.decimals, reserveA, tokenA.decimals)} {tokenB.symbol}
-                    </p>
-                    <p className="text-xs text-muted-foreground">Your deposit must match this ratio</p>
-                  </div>
-                )}
-
-                {/* Initial Ratio For New Pool */}
-                {(!pairExists || (pairExists && (reserveA === 0n || reserveB === 0n))) && (
-                  <div className="pt-2 border-t border-primary/20 space-y-1.5">
-                    <p className="text-xs text-muted-foreground">
-                      {pairExists ? "Pool exists but is empty. Set initial ratio:" : "New Pool - Set initial ratio:"}
-                    </p>
-                    {amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 ? (
-                      <p className="text-base font-semibold text-foreground">
-                        1 {tokenA.symbol} = {(parseFloat(amountB) / parseFloat(amountA)).toFixed(6)} {tokenB.symbol}
+          {/* Collapsible content */}
+          {showPoolInfo && (
+            <div className="px-4 pb-4 space-y-3 border-t border-white/5 pt-3">
+              {poolHasLiquidity && (
+                <>
+                  {/* Current ratio */}
+                  <div className="flex items-start gap-3">
+                    <TrendingUp className="h-4 w-4 text-emerald-400 mt-0.5 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-slate-500 mb-0.5">Current pool ratio</p>
+                      <p className="text-sm font-semibold text-white break-words">
+                        1 {tokenA.symbol} = {calculateRatio(reserveB, tokenB.decimals, reserveA, tokenA.decimals)} {tokenB.symbol}
                       </p>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">Enter amounts to see ratio</p>
-                    )}
+                    </div>
                   </div>
-                )}
-              </div>
+                  <div className="flex items-start gap-3">
+                    <Info className="h-4 w-4 text-slate-500 mt-0.5 flex-shrink-0" />
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      Token B amount is calculated automatically to match the pool ratio.
+                    </p>
+                  </div>
+                </>
+              )}
+
+              {(isNewPool || poolIsEmpty) && (
+                <>
+                  <div className="flex items-start gap-3">
+                    <Droplets className="h-4 w-4 text-blue-400 mt-0.5 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs text-slate-500 mb-0.5">
+                        {poolIsEmpty ? "Pool is empty — set the opening ratio" : "You are creating a new pool"}
+                      </p>
+                      {amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 ? (
+                        <p className="text-sm font-semibold text-white break-words">
+                          1 {tokenA.symbol} = {(parseFloat(amountB) / parseFloat(amountA)).toFixed(6)} {tokenB.symbol}
+                        </p>
+                      ) : (
+                        <p className="text-sm text-slate-500">Enter amounts above to preview ratio</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Info className="h-4 w-4 text-slate-500 mt-0.5 flex-shrink-0" />
+                    <p className="text-xs text-slate-500 leading-relaxed">
+                      The ratio you set becomes the initial price for this pool. Choose carefully.
+                    </p>
+                  </div>
+                </>
+              )}
             </div>
           )}
+        </div>
+      )}
 
-          {isConnected ? (
-            <Button
-              data-testid="button-add-liquidity"
-              onClick={handleAddLiquidity}
-              disabled={!tokenA || !tokenB || !amountA || !amountB || parseFloat(amountA) <= 0 || parseFloat(amountB) <= 0 || isAdding}
-              className="w-full h-12 md:h-14 text-base md:text-lg font-semibold bg-gradient-to-r from-primary to-blue-600 hover:from-primary/90 hover:to-blue-600/90 shadow-lg disabled:opacity-50 disabled:cursor-not-allowed transition-all"
-            >
-              {isAdding ? "Adding Liquidity..." : "Add Liquidity"}
-            </Button>
+      {/* CTA */}
+      {isConnected ? (
+        <Button
+          data-testid="button-add-liquidity"
+          onClick={handleAddLiquidity}
+          disabled={!canSubmit}
+          className="w-full h-13 text-base font-bold rounded-2xl bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 disabled:from-slate-700 disabled:to-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed shadow-lg shadow-blue-500/20 transition-all duration-200 hover:shadow-blue-500/30 hover:scale-[1.01] active:scale-[0.99]"
+          style={{ height: "52px" }}
+        >
+          {isAdding ? (
+            <span className="flex items-center gap-2">
+              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+              </svg>
+              Adding Liquidity…
+            </span>
+          ) : !tokenA || !tokenB ? (
+            "Select Tokens"
+          ) : !amountA || !amountB || parseFloat(amountA) <= 0 || parseFloat(amountB) <= 0 ? (
+            "Enter Amounts"
           ) : (
-            <Button
-              data-testid="button-connect-wallet"
-              disabled
-              className="w-full h-12 md:h-14 text-base md:text-lg font-semibold"
-            >
-              Connect Wallet
-            </Button>
+            "Add Liquidity"
           )}
-        </CardContent>
-      </Card>
+        </Button>
+      ) : (
+        <Button
+          data-testid="button-connect-wallet"
+          disabled
+          className="w-full h-13 text-base font-bold rounded-2xl bg-slate-700 text-slate-500 cursor-not-allowed"
+          style={{ height: "52px" }}
+        >
+          Connect Wallet to Continue
+        </Button>
+      )}
 
       <TokenSelector
         open={showTokenASelector}
         onClose={() => setShowTokenASelector(false)}
-        onSelect={(token) => {
-          setTokenA(token);
-          setShowTokenASelector(false);
-        }}
+        onSelect={(token) => { setTokenA(token); setShowTokenASelector(false); }}
         tokens={tokens}
         onImport={handleImportToken}
       />
-
       <TokenSelector
         open={showTokenBSelector}
         onClose={() => setShowTokenBSelector(false)}
-        onSelect={(token) => {
-          setTokenB(token);
-          setShowTokenBSelector(false);
-        }}
+        onSelect={(token) => { setTokenB(token); setShowTokenBSelector(false); }}
         tokens={tokens}
         onImport={handleImportToken}
       />
