@@ -1,6 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from "react";
-import { Input } from "@/components/ui/input";
-import { Search, CheckCircle2, AlertCircle, X, Zap, TrendingUp } from "lucide-react";
+import { Search, CheckCircle2, AlertCircle, X } from "lucide-react";
 import { useAccount, useBalance } from "wagmi";
 import { isAddress } from "ethers";
 import type { Token } from "@shared/schema";
@@ -28,7 +27,13 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
     if (open) {
       setMounted(true);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
-      setTimeout(() => inputRef.current?.focus(), 120);
+      // Only auto-focus on desktop (pointer: fine).
+      // On mobile, immediately focusing opens the keyboard which is disruptive —
+      // users can tap the search bar themselves when they need it.
+      const isDesktop = window.matchMedia("(pointer: fine)").matches;
+      if (isDesktop) {
+        setTimeout(() => inputRef.current?.focus(), 120);
+      }
     } else {
       setVisible(false);
       const t = setTimeout(() => {
@@ -39,6 +44,16 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
       return () => clearTimeout(t);
     }
   }, [open]);
+
+  // Close on Escape key
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [open, onClose]);
 
   const filteredTokens = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -87,6 +102,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
       {/* Backdrop */}
       <div
         onClick={onClose}
+        onTouchMove={(e) => e.preventDefault()}
         className="fixed inset-0 z-50 transition-all duration-300"
         style={{
           background: "rgba(0,0,0,0.7)",
@@ -101,23 +117,21 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
         style={{ pointerEvents: "none" }}
       >
         <div
-          className="relative w-full sm:max-w-md sm:rounded-2xl overflow-hidden"
+          data-token-panel
+          className="relative w-full sm:max-w-md overflow-hidden"
           style={{
             pointerEvents: "auto",
             background: "linear-gradient(145deg, #0f1117 0%, #0d0f14 100%)",
             border: "1px solid rgba(255,255,255,0.07)",
             boxShadow: "0 -4px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.04)",
             borderRadius: "20px 20px 0 0",
-            transform: visible
-              ? "translateY(0) scale(1)"
-              : "translateY(100%) scale(1)",
+            transform: visible ? "translateY(0) scale(1)" : "translateY(100%) scale(1)",
             opacity: visible ? 1 : 0,
             transition: "transform 0.32s cubic-bezier(0.32,0.72,0,1), opacity 0.2s ease",
             maxHeight: "92dvh",
             display: "flex",
             flexDirection: "column",
           }}
-          // Desktop override via media query workaround via inline + class
         >
           {/* Drag handle — mobile only */}
           <div className="flex justify-center pt-3 pb-1 sm:hidden">
@@ -133,6 +147,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
             <button
               onClick={onClose}
               className="w-8 h-8 rounded-xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/8 transition-all"
+              aria-label="Close"
             >
               <X className="w-4 h-4" />
             </button>
@@ -141,12 +156,12 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
           {/* Search */}
           <div className="px-5 pb-3 flex-shrink-0">
             <div
-              className="relative group"
+              className="relative"
               style={{
                 background: "rgba(255,255,255,0.04)",
                 border: "1px solid rgba(255,255,255,0.08)",
                 borderRadius: 12,
-                transition: "border-color 0.2s",
+                transition: "border-color 0.2s, box-shadow 0.2s",
               }}
               onFocusCapture={(e) => {
                 (e.currentTarget as HTMLDivElement).style.borderColor = "rgba(99,102,241,0.5)";
@@ -165,12 +180,19 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
                 placeholder="Search name or paste address…"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="w-full bg-transparent pl-10 pr-4 py-3 text-sm text-white placeholder:text-white/25 outline-none"
+                // Mobile keyboard improvements
+                inputMode="search"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
+                className="w-full bg-transparent pl-10 pr-10 py-3 text-sm text-white placeholder:text-white/25 outline-none"
               />
               {searchQuery && (
                 <button
                   onClick={() => setSearchQuery("")}
                   className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-white/10 flex items-center justify-center text-white/50 hover:text-white hover:bg-white/20 transition-all"
+                  aria-label="Clear search"
                 >
                   <X className="w-3 h-3" />
                 </button>
@@ -180,7 +202,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
 
           {/* Import warning */}
           {showImportButton && (
-            <div className="mx-5 mb-3 flex-shrink-0 rounded-xl overflow-hidden"
+            <div
+              className="mx-5 mb-3 flex-shrink-0 rounded-xl overflow-hidden"
               style={{
                 background: "rgba(234,179,8,0.06)",
                 border: "1px solid rgba(234,179,8,0.2)",
@@ -223,10 +246,14 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
             </div>
           )}
 
-          {/* Import error (standalone) */}
+          {/* Import error (standalone, shown after showImportButton disappears) */}
           {importError && !showImportButton && (
-            <div className="mx-5 mb-3 flex-shrink-0 px-3.5 py-2.5 rounded-xl text-xs text-red-300 flex items-center gap-2"
-              style={{ background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.2)" }}
+            <div
+              className="mx-5 mb-3 flex-shrink-0 px-3.5 py-2.5 rounded-xl text-xs text-red-300 flex items-center gap-2"
+              style={{
+                background: "rgba(239,68,68,0.08)",
+                border: "1px solid rgba(239,68,68,0.2)",
+              }}
             >
               <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
               {importError}
@@ -234,20 +261,33 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
           )}
 
           {/* Divider */}
-          <div className="mx-5 h-px flex-shrink-0" style={{ background: "rgba(255,255,255,0.05)" }} />
+          <div
+            className="mx-5 h-px flex-shrink-0"
+            style={{ background: "rgba(255,255,255,0.05)" }}
+          />
 
           {/* Token list */}
-          <div className="flex-1 overflow-y-auto overscroll-contain px-3 py-2"
-            style={{ scrollbarWidth: "none" }}
+          <div
+            className="flex-1 overflow-y-auto overscroll-contain px-3 py-2"
+            style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
           >
             {filteredTokens.length === 0 && !showImportButton ? (
               <div className="flex flex-col items-center justify-center py-16 gap-3">
-                <div className="w-12 h-12 rounded-2xl flex items-center justify-center"
+                <div
+                  className="w-12 h-12 rounded-2xl flex items-center justify-center"
                   style={{ background: "rgba(255,255,255,0.04)" }}
                 >
                   <Search className="w-5 h-5 text-white/20" />
                 </div>
                 <p className="text-sm text-white/30">No tokens found</p>
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
+                  >
+                    Clear search
+                  </button>
+                )}
               </div>
             ) : (
               filteredTokens.map((token, i) => (
@@ -260,13 +300,13 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
                 />
               ))
             )}
-            {/* Bottom safe area spacer for mobile */}
+            {/* Bottom safe area spacer */}
             <div className="h-safe-area-bottom h-4 sm:h-2" />
           </div>
         </div>
       </div>
 
-      {/* Desktop: fix border radius */}
+      {/* Fix border radius + entrance animation on desktop */}
       <style>{`
         @media (min-width: 640px) {
           [data-token-panel] {
@@ -274,10 +314,13 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
             transform: ${visible ? "translateY(0) scale(1)" : "translateY(12px) scale(0.97)"} !important;
           }
         }
+        [data-token-panel] ::-webkit-scrollbar { display: none; }
       `}</style>
     </>
   );
 }
+
+// ─── Token Row ────────────────────────────────────────────────────────────────
 
 function TokenRow({
   token,
@@ -301,38 +344,43 @@ function TokenRow({
     if (balance && userAddress) {
       const formatted = formatAmount(balance.value, balance.decimals);
       const num = parseFloat(formatted);
-      displayBalance = num > 0
-        ? num < 0.0001
-          ? "<0.0001"
-          : num >= 1000
-          ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
-          : formatted
-        : "";
+      displayBalance =
+        num > 0
+          ? num < 0.0001
+            ? "<0.0001"
+            : num >= 1000
+              ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
+              : formatted
+          : "";
     }
   } catch {}
 
   const [imgError, setImgError] = useState(false);
-  const [hovered, setHovered] = useState(false);
+  const [pressed, setPressed] = useState(false);
 
   return (
     <button
       data-testid={`button-select-token-${token.symbol}`}
       onClick={onClick}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all text-left relative group"
+      onPointerDown={() => setPressed(true)}
+      onPointerUp={() => setPressed(false)}
+      onPointerLeave={() => setPressed(false)}
+      className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all text-left relative active:scale-[0.98]"
       style={{
-        background: hovered ? "rgba(255,255,255,0.05)" : "transparent",
+        // Using pointer state covers both hover (desktop) and tap (mobile)
+        background: pressed ? "rgba(255,255,255,0.08)" : "transparent",
+        transition: "background 0.12s ease, transform 0.1s ease",
         animationDelay: `${index * 18}ms`,
       }}
     >
-      {/* Hover accent bar */}
+      {/* Accent bar — desktop hover indicator */}
       <div
-        className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full transition-all duration-150"
+        className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full pointer-events-none"
         style={{
           background: "linear-gradient(180deg, #6366f1, #8b5cf6)",
-          opacity: hovered ? 1 : 0,
-          transform: hovered ? "scaleY(1)" : "scaleY(0.4)",
+          opacity: pressed ? 1 : 0,
+          transform: pressed ? "scaleY(1)" : "scaleY(0.4)",
+          transition: "opacity 0.12s, transform 0.12s",
         }}
       />
 
@@ -342,8 +390,7 @@ function TokenRow({
           <div
             className="w-9 h-9 rounded-full overflow-hidden"
             style={{
-              boxShadow: hovered ? "0 0 0 2px rgba(99,102,241,0.4)" : "0 0 0 1px rgba(255,255,255,0.08)",
-              transition: "box-shadow 0.15s",
+              boxShadow: "0 0 0 1px rgba(255,255,255,0.08)",
             }}
           >
             <img
@@ -351,14 +398,22 @@ function TokenRow({
               alt={token.symbol}
               className="w-full h-full object-cover"
               onError={() => setImgError(true)}
+              loading="lazy"
             />
           </div>
           {token.verified && (
-            <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center"
-              style={{ background: "#0f1117", boxShadow: "0 0 0 1px rgba(255,255,255,0.06)" }}
+            <div
+              className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center"
+              style={{
+                background: "#0f1117",
+                boxShadow: "0 0 0 1px rgba(255,255,255,0.06)",
+              }}
             >
               <div className="w-2.5 h-2.5 rounded-full bg-blue-500 flex items-center justify-center">
-                <CheckCircle2 className="w-2 h-2 text-white" data-testid={`icon-verified-${token.symbol}`} />
+                <CheckCircle2
+                  className="w-2 h-2 text-white"
+                  data-testid={`icon-verified-${token.symbol}`}
+                />
               </div>
             </div>
           )}
@@ -367,9 +422,12 @@ function TokenRow({
         {/* Token info */}
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <span className="font-semibold text-sm text-white tracking-tight">{token.symbol}</span>
+            <span className="font-semibold text-sm text-white tracking-tight">
+              {token.symbol}
+            </span>
             {!token.verified && (
-              <span className="text-[9px] px-1.5 py-0.5 rounded-full font-medium"
+              <span
+                className="text-[9px] px-1.5 py-0.5 rounded-full font-medium"
                 style={{
                   background: "rgba(255,255,255,0.06)",
                   color: "rgba(255,255,255,0.3)",
@@ -380,7 +438,10 @@ function TokenRow({
               </span>
             )}
           </div>
-          <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>
+          <p
+            className="text-[11px] truncate mt-0.5"
+            style={{ color: "rgba(255,255,255,0.35)" }}
+          >
             {token.name}
           </p>
         </div>
