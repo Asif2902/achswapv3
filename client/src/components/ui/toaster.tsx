@@ -20,12 +20,6 @@ export function Toaster() {
   return (
     <ToastProvider swipeDirection="right">
       {toasts.map(function ({ id, title, description, action, rawError, variant, duration = 5000, ...props }) {
-        const progressColor = 
-          variant === "destructive" ? "bg-red-500" :
-          variant === "success" ? "bg-emerald-500" :
-          variant === "warning" ? "bg-amber-500" :
-          "bg-indigo-500"
-        
         return (
           <Toast 
             key={id} 
@@ -41,7 +35,7 @@ export function Toaster() {
                   <ToastDescription>{description}</ToastDescription>
                 )}
                 {rawError && (
-                  <div className="mt-3 pt-3 border-t border-white/[0.06]">
+                  <div className="mt-3 pt-3 border-t border-zinc-800">
                     <CopyButton text={rawError} />
                   </div>
                 )}
@@ -51,15 +45,17 @@ export function Toaster() {
             {action}
             <ToastClose />
             
-            <div 
-              className="absolute bottom-0 left-0 right-0 h-1 overflow-hidden rounded-b-2xl"
-              style={{ background: "rgba(255,255,255,0.04)" }}
-            >
+            <div className="absolute bottom-0 left-0 right-0 h-1 bg-zinc-800/50 overflow-hidden rounded-b-xl">
               <div 
-                className={cn("h-full animate-shrink rounded-full", progressColor)}
+                className={cn(
+                  "h-full animate-shrink rounded-full",
+                  variant === "destructive" ? "bg-red-500" :
+                  variant === "success" ? "bg-emerald-500" :
+                  variant === "warning" ? "bg-amber-500" :
+                  "bg-cyan-500"
+                )}
                 style={{ 
                   animation: `shrink ${duration}ms linear forwards`,
-                  boxShadow: `0 0 8px var(--tw-shadow-color, currentColor)`
                 }}
               />
             </div>
