@@ -10,6 +10,7 @@ import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
 import { defaultTokens, getTokensByChainId } from "@/data/tokens";
 import { formatAmount, parseAmount, calculateRatio } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
+import { getErrorForToast } from "@/lib/error-utils";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -139,7 +140,8 @@ export function AddLiquidityV2() {
       toast({ title: "Token imported", description: `${symbol} has been added to your token list` });
       return newToken;
     } catch (error: any) {
-      toast({ title: "Import failed", description: error.message || "Unable to fetch token data", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
       return null;
     }
   };
@@ -231,7 +233,8 @@ export function AddLiquidityV2() {
       toast({ title: "Liquidity added!", description: (<div className="flex items-center gap-2"><span>Successfully added to {tokenA.symbol}/{tokenB.symbol} pool</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(tx.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
     } catch (error: any) {
       console.error('Add liquidity error:', error);
-      toast({ title: "Failed to add liquidity", description: error.reason || error.message || "An error occurred", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
     } finally { setIsAdding(false); }
   };
 

@@ -8,6 +8,7 @@ import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
+import { getErrorForToast } from "@/lib/error-utils";
 import {
   NONFUNGIBLE_POSITION_MANAGER_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS,
 } from "@/lib/abis/v3";
@@ -179,7 +180,8 @@ export function AddLiquidityV3Advanced() {
       toast({ title: "Token imported", description: `${symbol} added` });
       return newToken;
     } catch (error: any) {
-      toast({ title: "Import failed", description: error.message || "Unable to fetch token data", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
       return null;
     }
   };
@@ -367,7 +369,8 @@ export function AddLiquidityV3Advanced() {
       toast({ title: "Liquidity added!", description: (<div className="flex items-center gap-2"><span>V3 position created</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}><ExternalLink className="h-3 w-3" /></Button></div>) });
     } catch (error: any) {
       console.error("Add liquidity error:", error);
-      toast({ title: "Failed to add liquidity", description: error.reason || error.message || "Transaction failed", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
     } finally { setIsAdding(false); }
   };
 

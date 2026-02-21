@@ -8,6 +8,7 @@ import { Contract, BrowserProvider } from "ethers";
 import { getTokensByChainId } from "@/data/tokens";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
+import { getErrorForToast } from "@/lib/error-utils";
 import { V3_MIGRATOR_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { priceToSqrtPriceX96, sqrtPriceX96ToPrice, getPriceFromAmounts, getFullRangeTicks } from "@/lib/v3-utils";
 import {
@@ -278,7 +279,8 @@ export function MigrateV2ToV3() {
       });
     } catch (error: any) {
       console.error("Migration error:", error);
-      toast({ title: "Migration failed", description: error.reason || error.message || "Transaction failed", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
     } finally { setIsMigrating(false); }
   };
 
