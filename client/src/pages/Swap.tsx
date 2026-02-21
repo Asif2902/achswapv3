@@ -266,11 +266,14 @@ export default function Swap() {
 
       if (bestQuote.protocol === "V3") {
         const swapRouter = new Contract(contracts.v3.swapRouter, SWAP_ROUTER_V3_ABI, signer);
-        const fromNative = isNativeToken(fromToken.address); const toNative = isNativeToken(toToken.address);
+        const fromNative = isNativeToken(fromToken.address);
+        const toNative = isNativeToken(toToken.address);
         const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
         if (!wrappedAddr) throw new Error("No wrapped token configured");
         const fromERC20 = fromNative ? wrappedAddr : fromToken.address;
         const toERC20 = toNative ? wrappedAddr : toToken.address;
+
+        // Approve input token if not native
         if (!fromNative) {
           const tc = new Contract(fromERC20, ERC20_ABI, signer);
           if (await tc.allowance(address, contracts.v3.swapRouter) < amountIn) {
@@ -279,13 +282,35 @@ export default function Swap() {
             await (await tc.approve(contracts.v3.swapRouter, amountIn, { gasLimit: ag * 150n / 100n })).wait();
           }
         }
-        const calls: string[] = []; const totalValue = fromNative ? amountIn : 0n;
+
+        const calls: string[] = [];
+        const totalValue = fromNative ? amountIn : 0n;
+
         if (bestQuote.route.length === 1) {
+          // ─────────────────────────────────────────────────────────────────
+          // FIX: When the output is native (toNative), the swap must send
+          // wrapped tokens to the ROUTER (not the user) so that the
+          // subsequent unwrapWETH9 call can pull them out and forward ETH
+          // to the user. Sending directly to the user leaves the router
+          // with nothing to unwrap → "insufficient weth9" revert.
+          // ─────────────────────────────────────────────────────────────────
+          const swapRecipient = toNative ? contracts.v3.swapRouter : recipient;
+
           calls.push(swapRouter.interface.encodeFunctionData("exactInputSingle", [{
-            tokenIn: fromERC20, tokenOut: toERC20, fee: bestQuote.route[0].fee || 3000,
-            recipient, deadline: deadlineTimestamp, amountIn, amountOutMinimum: minAmountOut, sqrtPriceLimitX96: 0n,
+            tokenIn: fromERC20,
+            tokenOut: toERC20,
+            fee: bestQuote.route[0].fee || 3000,
+            recipient: swapRecipient,
+            deadline: deadlineTimestamp,
+            amountIn,
+            amountOutMinimum: minAmountOut,
+            sqrtPriceLimitX96: 0n,
           }]));
-          if (toNative) calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
+
+          if (toNative) {
+            calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
+          }
+
           try {
             tx = await executeWithRetry(async () => {
               const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
@@ -309,32 +334,66 @@ export default function Swap() {
                 if (o !== path[path.length - 1]) path.push(o);
               }
               const altMin = (altQ.outputAmount * (10000n - slippageBps)) / 10000n;
-              const g = await router.swapExactTokensForTokens.estimateGas(amountIn, altMin, path, recipient, deadlineTimestamp);
-              tx = await router.swapExactTokensForTokens(amountIn, altMin, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
+
+              if (fromNative) {
+                const g = await router.swapExactETHForTokens.estimateGas(altMin, path, recipient, deadlineTimestamp, { value: amountIn });
+                tx = await router.swapExactETHForTokens(altMin, path, recipient, deadlineTimestamp, { value: amountIn, gasLimit: g * 150n / 100n });
+              } else if (toNative) {
+                // Ensure approval for V2 router
+                const tc = new Contract(fromERC20, ERC20_ABI, signer);
+                if (await tc.allowance(address, contracts.v2.router) < amountIn) {
+                  const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn);
+                  await (await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n })).wait();
+                }
+                const g = await router.swapExactTokensForETH.estimateGas(amountIn, altMin, path, recipient, deadlineTimestamp);
+                tx = await router.swapExactTokensForETH(amountIn, altMin, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
+              } else {
+                const g = await router.swapExactTokensForTokens.estimateGas(amountIn, altMin, path, recipient, deadlineTimestamp);
+                tx = await router.swapExactTokensForTokens(amountIn, altMin, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
+              }
             } else throw v3Err;
           }
         } else {
+          // Multi-hop V3 path
           const { encodePath } = await import("@/lib/v3-utils");
-          const tks: string[] = [fromERC20]; const fees: number[] = [];
+          const tks: string[] = [fromERC20];
+          const fees: number[] = [];
           for (const hop of bestQuote.route) {
             const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
             if (o !== tks[tks.length - 1]) { tks.push(o); fees.push(hop.fee || 3000); }
           }
+
+          // ─────────────────────────────────────────────────────────────────
+          // FIX (multi-hop): Same as single-hop — when toNative, direct
+          // output to the router so unwrapWETH9 can forward ETH to user.
+          // ─────────────────────────────────────────────────────────────────
+          const swapRecipient = toNative ? contracts.v3.swapRouter : recipient;
+
           calls.push(swapRouter.interface.encodeFunctionData("exactInput", [{
-            path: encodePath(tks, fees), recipient, deadline: deadlineTimestamp, amountIn, amountOutMinimum: minAmountOut,
+            path: encodePath(tks, fees),
+            recipient: swapRecipient,
+            deadline: deadlineTimestamp,
+            amountIn,
+            amountOutMinimum: minAmountOut,
           }]));
-          if (toNative) calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
+
+          if (toNative) {
+            calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
+          }
+
           const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
           tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
         }
       } else {
+        // ── V2 path ────────────────────────────────────────────────────────
         const V2_ABI = [
           "function swapExactTokensForTokens(uint,uint,address[],address,uint) external returns (uint[])",
           "function swapExactETHForTokens(uint,address[],address,uint) external payable returns (uint[])",
           "function swapExactTokensForETH(uint,uint,address[],address,uint) external returns (uint[])",
         ];
         const router = new Contract(contracts.v2.router, V2_ABI, signer);
-        const fromNative = isNativeToken(fromToken.address); const toNative = isNativeToken(toToken.address);
+        const fromNative = isNativeToken(fromToken.address);
+        const toNative = isNativeToken(toToken.address);
         const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
         const path: string[] = [];
         for (let i = 0; i < bestQuote.route.length; i++) {
