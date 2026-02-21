@@ -56,6 +56,7 @@ export function RemoveLiquidityV2() {
   const [importTokenB, setImportTokenB] = useState<Token | null>(null);
   const [showTokenASelector, setShowTokenASelector] = useState(false);
   const [showTokenBSelector, setShowTokenBSelector] = useState(false);
+  const [tokens, setTokens] = useState<Token[]>([]);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -68,14 +69,31 @@ export function RemoveLiquidityV2() {
     knownTokens.find((t) => t.symbol === symbol)?.logoURI ??
     "/img/logos/unknown-token.png";
 
+  // Load tokens
+  useEffect(() => {
+    if (!chainId) return;
+    const chainTokens = getTokensByChainId(chainId);
+    const imported = localStorage.getItem("importedTokens");
+    const importedTokens = imported ? JSON.parse(imported) : [];
+    const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
+    const processed = chainTokens.map(token => ({ ...token, logoURI: token.logoURI || "/img/logos/unknown-token.png" }));
+    setTokens([...processed, ...chainImportedTokens]);
+  }, [chainId]);
+
   const loadPositions = useCallback(async () => {
-    if (!address || !contracts || !window.ethereum) return;
+    if (!address || !contracts || !window.ethereum) {
+      console.log("loadPositions: missing requirements", { address: !!address, contracts: !!contracts, ethereum: !!window.ethereum });
+      return;
+    }
     setIsLoading(true);
     try {
+      console.log("Loading V2 positions for:", address);
       const provider = new BrowserProvider(window.ethereum);
       const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
       
       const pairsLength = await factory.allPairsLength();
+      console.log("Total V2 pairs:", pairsLength.toString());
+      
       const userPositions: V2Position[] = [];
       const BATCH_SIZE = 20;
       
@@ -133,6 +151,7 @@ export function RemoveLiquidityV2() {
       }
       
       setPositions(userPositions);
+      console.log("Found V2 positions:", userPositions.length);
       if (userPositions.length > 0 && !selectedPosition) {
         setSelectedPosition(userPositions[0]);
       }
@@ -670,18 +689,18 @@ export function RemoveLiquidityV2() {
       )}
 
       {/* Token Selectors */}
-      {showTokenASelector && (
-        <TokenSelector
-          onClose={() => setShowTokenASelector(false)}
-          onSelect={(token) => { setImportTokenA(token); setShowTokenASelector(false); }}
-        />
-      )}
-      {showTokenBSelector && (
-        <TokenSelector
-          onClose={() => setShowTokenBSelector(false)}
-          onSelect={(token) => { setImportTokenB(token); setShowTokenBSelector(false); }}
-        />
-      )}
+      <TokenSelector
+        open={showTokenASelector}
+        onClose={() => setShowTokenASelector(false)}
+        onSelect={(token) => { setImportTokenA(token); setShowTokenASelector(false); }}
+        tokens={tokens}
+      />
+      <TokenSelector
+        open={showTokenBSelector}
+        onClose={() => setShowTokenBSelector(false)}
+        onSelect={(token) => { setImportTokenB(token); setShowTokenBSelector(false); }}
+        tokens={tokens}
+      />
     </div>
   );
 }
