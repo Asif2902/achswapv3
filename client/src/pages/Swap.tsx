@@ -17,6 +17,7 @@ import { getContractsForChain } from "@/lib/contracts";
 import { getSmartRouteQuote, type SmartRoutingResult } from "@/lib/smart-routing";
 import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
 import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
+import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
 import { getErrorForToast } from "@/lib/error-utils";
 
 const ERC20_ABI = [
