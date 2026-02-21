@@ -11,6 +11,7 @@ import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
 import { defaultTokens, getTokensByChainId } from "@/data/tokens";
 import { formatAmount, parseAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
+import { getErrorForToast } from "@/lib/error-utils";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -123,7 +124,8 @@ export function RemoveLiquidityV2() {
       return newToken;
     } catch (error: any) {
       console.error('Token import error:', error);
-      toast({ title: "Import failed", description: error.message || "Failed to import token", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
       return null;
     }
   };
@@ -211,7 +213,8 @@ export function RemoveLiquidityV2() {
       fetchPairInfo();
     } catch (error: any) {
       console.error('Remove liquidity error:', error);
-      toast({ title: "Failed to remove liquidity", description: error.reason || error.message || "An error occurred", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
     } finally {
       setIsRemoving(false);
     }

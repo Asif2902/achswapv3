@@ -17,7 +17,7 @@ import { getContractsForChain } from "@/lib/contracts";
 import { getSmartRouteQuote, type SmartRoutingResult } from "@/lib/smart-routing";
 import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
 import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
-import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
+import { getErrorForToast } from "@/lib/error-utils";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -122,7 +122,8 @@ export default function Swap() {
       toast({ title: "Token imported", description: `${symbol} added to your list` });
       return newToken;
     } catch (error: any) {
-      toast({ title: "Import failed", description: error.message.includes("timeout") ? "Request timed out." : "Unable to fetch token data", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
       return null;
     }
   };
@@ -208,7 +209,10 @@ export default function Swap() {
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
       toast({ title: "Wrap successful!", description: (<div className="flex items-center gap-2"><span>Wrapped {amount} USDC → wUSDC</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
-    } catch (error: any) { toast({ title: "Wrap failed", description: error.reason || error.message, variant: "destructive" }); }
+    } catch (error: any) { 
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" }); 
+    }
     finally { setIsSwapping(false); }
   };
 
@@ -225,7 +229,10 @@ export default function Swap() {
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
       toast({ title: "Unwrap successful!", description: (<div className="flex items-center gap-2"><span>Unwrapped {amount} wUSDC → USDC</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
-    } catch (error: any) { toast({ title: "Unwrap failed", description: error.reason || error.message, variant: "destructive" }); }
+    } catch (error: any) { 
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" }); 
+    }
     finally { setIsSwapping(false); }
   };
 
@@ -448,7 +455,13 @@ export default function Swap() {
         ),
       });
     } catch (error: any) {
-      toast({ title: "Swap failed", description: error.reason || error.message || "Transaction failed", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ 
+        title: errorInfo.title, 
+        description: errorInfo.description, 
+        rawError: errorInfo.rawError,
+        variant: "destructive" 
+      });
     } finally { setIsSwapping(false); }
   };
 
