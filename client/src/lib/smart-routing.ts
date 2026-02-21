@@ -1,4 +1,4 @@
-import { Contract, BrowserProvider } from "ethers";
+import { Contract, type Provider } from "ethers";
 import { Token } from "@shared/schema";
 import { parseAmount } from "./decimal-utils";
 import { QUOTER_V2_ABI, V3_FEE_TIERS } from "./abis/v3";
@@ -46,7 +46,7 @@ export interface SmartRoutingResult {
  * Get V2 quote for a swap - tries direct path first, then fallback to wrapped token route
  */
 export async function getV2Quote(
-  provider: BrowserProvider,
+  provider: Provider,
   routerAddress: string,
   fromToken: Token,
   toToken: Token,
@@ -129,7 +129,7 @@ export async function getV2Quote(
  * V3 only works with ERC20 tokens, so native tokens must use wrapped address
  */
 export async function getV3Quote(
-  provider: BrowserProvider,
+  provider: Provider,
   quoterAddress: string,
   fromToken: Token,
   toToken: Token,
@@ -241,8 +241,7 @@ export async function getV3Quote(
               // Calculate price impact for multi-hop route
               const priceImpact = await calculateV3MultiHopPriceImpact(
                 quoter,
-                [fromTokenERC20, wrappedTokenAddress, toTokenERC20],
-                [fee1, fee2],
+                path,
                 amountIn,
                 outputAmount
               );
@@ -302,7 +301,7 @@ export async function getV3Quote(
  * Get best quote from V2 and V3
  */
 export async function getSmartRouteQuote(
-  provider: BrowserProvider,
+  provider: Provider,
   v2RouterAddress: string,
   v3QuoterAddress: string,
   fromToken: Token,
@@ -481,8 +480,7 @@ async function calculateV3PriceImpact(
  */
 async function calculateV3MultiHopPriceImpact(
   quoter: Contract,
-  path: string,
-  fees: number[],
+  encodedPath: string,
   amountIn: bigint,
   outputAmount: bigint
 ): Promise<number> {
@@ -490,8 +488,6 @@ async function calculateV3MultiHopPriceImpact(
     const halfAmountBigInt = amountIn / 2n;
     
     if (halfAmountBigInt > 0n) {
-      const { encodePath } = await import("./v3-utils");
-      const encodedPath = encodePath(path, fees);
       
       const result = await quoter.quoteExactInput.staticCall(encodedPath, halfAmountBigInt);
       const halfAmountOutput = result[0];
