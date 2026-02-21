@@ -22,6 +22,7 @@ const ERC20_ABI = [
 const FACTORY_ABI = [
   "function allPairsLength() view returns (uint256)",
   "function allPairs(uint256) view returns (address)",
+  "function getPair(address, address) view returns (address)",
 ];
 
 const PAIR_ABI = [
@@ -94,60 +95,66 @@ export function RemoveLiquidityV2() {
       const pairsLength = await factory.allPairsLength();
       console.log("Total V2 pairs:", pairsLength.toString());
       
-      const userPositions: V2Position[] = [];
-      const BATCH_SIZE = 20;
+      // Get all pair addresses first
+      const pairAddresses: string[] = [];
+      for (let i = 0; i < Number(pairsLength); i++) {
+        const pairAddr = await factory.allPairs(i);
+        pairAddresses.push(pairAddr);
+      }
       
-      for (let i = 0; i < Number(pairsLength); i += BATCH_SIZE) {
-        const batchPromises = [];
-        for (let j = i; j < Math.min(i + BATCH_SIZE, Number(pairsLength)); j++) {
-          batchPromises.push(factory.allPairs(j));
-        }
-        const batchAddresses = await Promise.all(batchPromises);
+      console.log("Got all pair addresses:", pairAddresses.length);
+      
+      // Check balances for all pairs in parallel
+      const pairContracts = pairAddresses.map(addr => new Contract(addr, PAIR_ABI, provider));
+      const balances = await Promise.all(pairContracts.map(pair => pair.balanceOf(address)));
+      
+      // Filter pairs with balance and get details in parallel
+      const positionsWithBalance = pairAddresses.filter((_, i) => balances[i] > 0n);
+      console.log("Pairs with balance:", positionsWithBalance.length);
+      
+      if (positionsWithBalance.length === 0) {
+        setPositions([]);
+        return;
+      }
+      
+      const userPositions: V2Position[] = [];
+      
+      // Process each position with balance
+      for (const pairAddress of positionsWithBalance) {
+        const pair = new Contract(pairAddress, PAIR_ABI, provider);
+        const [token0Address, token1Address, reserves, totalSupply, liquidity] = await Promise.all([
+          pair.token0(),
+          pair.token1(),
+          pair.getReserves(),
+          pair.totalSupply(),
+          pair.balanceOf(address),
+        ]);
         
-        const balancePromises = batchAddresses.map(addr => {
-          const pair = new Contract(addr, PAIR_ABI, provider);
-          return pair.balanceOf(address);
+        const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
+        const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
+        
+        const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = await Promise.all([
+          token0Contract.symbol(),
+          token0Contract.decimals(),
+          token1Contract.symbol(),
+          token1Contract.decimals(),
+        ]);
+        
+        const amount0 = liquidity * reserves.reserve0 / totalSupply;
+        const amount1 = liquidity * reserves.reserve1 / totalSupply;
+        
+        userPositions.push({
+          pairAddress,
+          token0Address,
+          token0Symbol,
+          token0Decimals,
+          token1Address,
+          token1Symbol,
+          token1Decimals,
+          liquidity,
+          amount0,
+          amount1,
         });
-        const balances = await Promise.all(balancePromises);
-        
-        for (let k = 0; k < batchAddresses.length; k++) {
-          if (balances[k] > 0n) {
-            const pair = new Contract(batchAddresses[k], PAIR_ABI, provider);
-            const [token0Address, token1Address, reserves, totalSupply] = await Promise.all([
-              pair.token0(),
-              pair.token1(),
-              pair.getReserves(),
-              pair.totalSupply(),
-            ]);
-            
-            const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
-            const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
-            
-            const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = await Promise.all([
-              token0Contract.symbol(),
-              token0Contract.decimals(),
-              token1Contract.symbol(),
-              token1Contract.decimals(),
-            ]);
-            
-            const liquidity = balances[k];
-            const amount0 = liquidity * reserves.reserve0 / totalSupply;
-            const amount1 = liquidity * reserves.reserve1 / totalSupply;
-            
-            userPositions.push({
-              pairAddress: batchAddresses[k],
-              token0Address,
-              token0Symbol,
-              token0Decimals,
-              token1Address,
-              token1Symbol,
-              token1Decimals,
-              liquidity,
-              amount0,
-              amount1,
-            });
-          }
-        }
       }
       
       setPositions(userPositions);
