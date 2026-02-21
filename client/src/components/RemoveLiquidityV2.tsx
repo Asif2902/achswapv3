@@ -152,7 +152,7 @@ export function RemoveLiquidityV2() {
       
       setPositions(userPositions);
       console.log("Found V2 positions:", userPositions.length);
-      if (userPositions.length > 0 && !selectedPosition) {
+      if (userPositions.length > 0 && selectedPosition === null) {
         setSelectedPosition(userPositions[0]);
       }
     } catch (error) {
@@ -160,13 +160,13 @@ export function RemoveLiquidityV2() {
     } finally {
       setIsLoading(false);
     }
-  }, [address, contracts, selectedPosition]);
+  }, [address, contracts]);
 
   useEffect(() => {
     if (isConnected && address) {
       loadPositions();
     }
-  }, [isConnected, address, loadPositions]);
+  }, [isConnected, address]);
 
   const handleImportPool = async () => {
     if (!importTokenA || !importTokenB || !contracts || !window.ethereum) return;
