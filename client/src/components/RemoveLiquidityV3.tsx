@@ -461,49 +461,28 @@ export function RemoveLiquidityV3() {
   const fmt = (amount: bigint, decimals: number): string =>
     amount === 0n ? "0" : formatAmount(amount, decimals);
 
+  const fmtCompact = (amount: bigint, decimals: number): string => {
+    const num = parseFloat(formatAmount(amount, decimals));
+    if (num === 0) return "0";
+    if (num >= 1_000_000_000) return (num / 1_000_000_000).toFixed(2) + "B";
+    if (num >= 1_000_000) return (num / 1_000_000).toFixed(2) + "M";
+    if (num >= 1_000) return (num / 1_000).toFixed(2) + "K";
+    return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  };
+
   const hasFees = (p: V3Position) =>
     p.unclaimedFees0 > 0n || p.unclaimedFees1 > 0n;
 
   const previewAmounts = useMemo(() => {
     if (!selectedPosition) return null;
-    const liquidityToRemove = selectedPosition.liquidity * BigInt(percentage[0]) / 100n;
-    if (liquidityToRemove === 0n) return { amount0: 0n, amount1: 0n };
+    const percent = BigInt(percentage[0]);
+    if (percent === 0n) return { amount0: 0n, amount1: 0n };
 
-    const currentSqrtPriceX96 = selectedPosition.amount0 > 0n || selectedPosition.amount1 > 0n
-      ? calculateSqrtPriceX96(selectedPosition.amount0, selectedPosition.amount1, selectedPosition.tickLower, selectedPosition.tickUpper)
-      : 2n ** 96n;
+    const amount0 = selectedPosition.amount0 * percent / 100n;
+    const amount1 = selectedPosition.amount1 * percent / 100n;
 
-    const tokenAmounts = getTokensFromLiquidity(
-      liquidityToRemove,
-      currentSqrtPriceX96,
-      selectedPosition.tickLower,
-      selectedPosition.tickUpper,
-    );
-
-    return {
-      amount0: tokenAmounts.amount0,
-      amount1: tokenAmounts.amount1,
-    };
+    return { amount0, amount1 };
   }, [selectedPosition, percentage]);
-
-  function calculateSqrtPriceX96(amount0: bigint, amount1: bigint, tickLower: number, tickUpper: number): bigint {
-    if (amount0 === 0n && amount1 === 0n) return 2n ** 96n;
-    if (amount0 === 0n) {
-      const sqrtPriceUpperX96 = tickToSqrtPriceX96(tickUpper);
-      return sqrtPriceUpperX96 * 50n / 100n;
-    }
-    if (amount1 === 0n) {
-      const sqrtPriceLowerX96 = tickToSqrtPriceX96(tickLower);
-      return sqrtPriceLowerX96 * 150n / 100n;
-    }
-    return 2n ** 96n;
-  }
-
-  function tickToSqrtPriceX96(tick: number): bigint {
-    const Q96 = 2n ** 96n;
-    const ratio = BigInt(Math.floor(Math.pow(1.0001, tick) * Number(Q96)));
-    return ratio;
-  }
 
   // ── Not connected ──────────────────────────────────────────────────────────
   if (!isConnected) {
@@ -668,7 +647,7 @@ export function RemoveLiquidityV3() {
                           />
                           <div>
                             <p className="text-sm font-semibold tabular-nums">
-                              {fmt(position.amount0, position.token0Decimals)}
+                              {fmtCompact(position.amount0, position.token0Decimals)}
                             </p>
                             <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
                           </div>
@@ -682,7 +661,7 @@ export function RemoveLiquidityV3() {
                           />
                           <div>
                             <p className="text-sm font-semibold tabular-nums">
-                              {fmt(position.amount1, position.token1Decimals)}
+                              {fmtCompact(position.amount1, position.token1Decimals)}
                             </p>
                             <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
                           </div>
@@ -740,20 +719,32 @@ export function RemoveLiquidityV3() {
                       </span>
                     </div>
 
-                    <Slider
-                      value={percentage}
-                      onValueChange={setPercentage}
-                      max={100}
-                      step={1}
-                      className="py-1"
-                    />
+                    <div 
+                      className="relative py-2 cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const x = e.clientX - rect.left;
+                        const percent = Math.round((x / rect.width) * 100);
+                        const clampedPercent = Math.max(0, Math.min(100, percent));
+                        setPercentage([clampedPercent]);
+                      }}
+                    >
+                      <Slider
+                        value={percentage}
+                        onValueChange={setPercentage}
+                        max={100}
+                        step={1}
+                        className="py-1"
+                      />
+                    </div>
 
                     <div className="grid grid-cols-4 gap-1.5 mt-3">
                       {[25, 50, 75, 100].map((value) => (
                         <button
                           key={value}
                           onClick={(e) => { e.stopPropagation(); setPercentage([value]); }}
-                          className={`py-2.5 rounded-lg text-xs font-semibold transition-all min-h-[44px] flex items-center justify-center ${
+                          className={`py-2.5 rounded-lg text-xs font-semibold transition-all min-h-[44px] flex items-center justify-center touch-manipulation ${
                             percentage[0] === value
                               ? "bg-primary text-primary-foreground shadow-sm"
                               : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -784,7 +775,7 @@ export function RemoveLiquidityV3() {
                           />
                           <div>
                             <p className="text-sm font-semibold tabular-nums">
-                              {fmt(previewAmounts.amount0, position.token0Decimals)}
+                              {fmtCompact(previewAmounts.amount0, position.token0Decimals)}
                             </p>
                             <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
                           </div>
@@ -798,7 +789,7 @@ export function RemoveLiquidityV3() {
                           />
                           <div>
                             <p className="text-sm font-semibold tabular-nums">
-                              {fmt(previewAmounts.amount1, position.token1Decimals)}
+                              {fmtCompact(previewAmounts.amount1, position.token1Decimals)}
                             </p>
                             <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
                           </div>
