@@ -262,4 +262,3 @@ Add tokens to `client/src/data/tokens.ts`:
 - V3 pools require the pool to be initialized before adding liquidity
 
 ---
-

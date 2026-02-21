@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Slider } from "@/components/ui/slider";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import { Contract, BrowserProvider } from "ethers";
@@ -9,7 +10,7 @@ import { NONFUNGIBLE_POSITION_MANAGER_ABI, V3_POOL_ABI, V3_FACTORY_ABI, FEE_TIER
 import { formatAmount } from "@/lib/decimal-utils";
 import { getTokensFromLiquidity } from "@/lib/v3-liquidity-math";
 import { getTokensByChainId } from "@/data/tokens";
-import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign, Wallet, ChevronRight, Zap } from "lucide-react";
+import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign, Wallet, ChevronRight, Zap, ArrowDown } from "lucide-react";
 
 const ERC20_ABI = [
   "function symbol() view returns (string)",
@@ -72,11 +73,18 @@ interface V3Position {
   unclaimedFees1: bigint;
   amount0: bigint;
   amount1: bigint;
+  currentTick?: number;
+}
+
+function getPositionStatus(currentTick: number | undefined, tickLower: number, tickUpper: number): "in-range" | "out-of-range" {
+  if (currentTick === undefined) return "out-of-range";
+  return currentTick >= tickLower && currentTick < tickUpper ? "in-range" : "out-of-range";
 }
 
 export function RemoveLiquidityV3() {
   const [positions, setPositions] = useState<V3Position[]>([]);
   const [selectedPosition, setSelectedPosition] = useState<V3Position | null>(null);
+  const [percentage, setPercentage] = useState([50]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRemoving, setIsRemoving] = useState(false);
   const [isCollecting, setIsCollecting] = useState(false);
@@ -137,6 +145,7 @@ export function RemoveLiquidityV3() {
           let amount1 = 0n;
           let unclaimedFees0 = tokensOwed0;
           let unclaimedFees1 = tokensOwed1;
+          let currentTick: number | undefined = undefined;
 
           try {
             const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
@@ -165,7 +174,7 @@ export function RemoveLiquidityV3() {
               ]);
 
               let currentSqrtPriceX96: bigint = slot0[0];
-              const currentTick: number = Number(slot0[1]);
+              currentTick = Number(slot0[1]);
               if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
 
               const feeGrowthOutsideLower0: bigint = tickLowerData[2];
@@ -241,6 +250,7 @@ export function RemoveLiquidityV3() {
             unclaimedFees1,
             amount0,
             amount1,
+            currentTick,
           });
         } catch (error) {
           console.error(`Error loading position ${i}:`, error);
@@ -350,15 +360,20 @@ export function RemoveLiquidityV3() {
         signer,
       );
 
+      const liquidityToRemove = selectedPosition.liquidity * BigInt(percentage[0]) / 100n;
+      const isFullRemove = percentage[0] === 100;
+
       toast({
-        title: "Removing liquidity…",
-        description: "Decreasing liquidity, collecting tokens, and burning NFT",
+        title: isFullRemove ? "Removing liquidity…" : `Removing ${percentage[0]}% of liquidity…`,
+        description: isFullRemove 
+          ? "Decreasing liquidity, collecting tokens, and burning NFT"
+          : "Decreasing liquidity and collecting tokens",
       });
 
       const decreaseData = positionManager.interface.encodeFunctionData("decreaseLiquidity", [
         {
           tokenId: selectedPosition.tokenId,
-          liquidity: selectedPosition.liquidity,
+          liquidity: liquidityToRemove,
           amount0Min: 0n,
           amount1Min: 0n,
           deadline: Math.floor(Date.now() / 1000) + 1200,
@@ -374,11 +389,16 @@ export function RemoveLiquidityV3() {
         },
       ]);
 
-      const burnData = positionManager.interface.encodeFunctionData("burn", [
-        selectedPosition.tokenId,
-      ]);
+      let calls = [decreaseData, collectData];
+      
+      if (isFullRemove) {
+        const burnData = positionManager.interface.encodeFunctionData("burn", [
+          selectedPosition.tokenId,
+        ]);
+        calls.push(burnData);
+      }
 
-      const multicallTx = await positionManager.multicall([decreaseData, collectData, burnData]);
+      const multicallTx = await positionManager.multicall(calls);
       const receipt = await multicallTx.wait();
 
       let amount0Collected = 0n;
@@ -397,7 +417,7 @@ export function RemoveLiquidityV3() {
       }
 
       toast({
-        title: "Liquidity removed!",
+        title: isFullRemove ? "Liquidity removed!" : `Removed ${percentage[0]}% of liquidity!`,
         description: (
           <div className="flex flex-col gap-1">
             <span>
@@ -406,7 +426,7 @@ export function RemoveLiquidityV3() {
               {formatAmount(amount1Collected, selectedPosition.token1Decimals)}{" "}
               {selectedPosition.token1Symbol}
             </span>
-            <span className="text-xs opacity-60">NFT position burned</span>
+            {isFullRemove && <span className="text-xs opacity-60">NFT position burned</span>}
             <Button
               size="sm"
               variant="ghost"
@@ -421,6 +441,7 @@ export function RemoveLiquidityV3() {
 
       await loadPositions();
       setSelectedPosition(null);
+      setPercentage([50]);
     } catch (error: any) {
       console.error("Remove liquidity error:", error);
       toast({
@@ -440,8 +461,28 @@ export function RemoveLiquidityV3() {
   const fmt = (amount: bigint, decimals: number): string =>
     amount === 0n ? "0" : formatAmount(amount, decimals);
 
+  const fmtCompact = (amount: bigint, decimals: number): string => {
+    const num = parseFloat(formatAmount(amount, decimals));
+    if (num === 0) return "0";
+    if (num >= 1_000_000_000) return (num / 1_000_000_000).toFixed(2) + "B";
+    if (num >= 1_000_000) return (num / 1_000_000).toFixed(2) + "M";
+    if (num >= 1_000) return (num / 1_000).toFixed(2) + "K";
+    return num.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  };
+
   const hasFees = (p: V3Position) =>
     p.unclaimedFees0 > 0n || p.unclaimedFees1 > 0n;
+
+  const previewAmounts = useMemo(() => {
+    if (!selectedPosition) return null;
+    const percent = BigInt(percentage[0]);
+    if (percent === 0n) return { amount0: 0n, amount1: 0n };
+
+    const amount0 = selectedPosition.amount0 * percent / 100n;
+    const amount1 = selectedPosition.amount1 * percent / 100n;
+
+    return { amount0, amount1 };
+  }, [selectedPosition, percentage]);
 
   // ── Not connected ──────────────────────────────────────────────────────────
   if (!isConnected) {
@@ -552,6 +593,15 @@ export function RemoveLiquidityV3() {
                       <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/20">
                         {feeTierLabel}
                       </span>
+                      {position.liquidity > 0n && (
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
+                          getPositionStatus(position.currentTick, position.tickLower, position.tickUpper) === "in-range"
+                            ? "bg-orange-500/15 text-orange-400 border border-orange-500/20"
+                            : "bg-amber-500/15 text-amber-400 border border-amber-500/20"
+                        }`}>
+                          {getPositionStatus(position.currentTick, position.tickLower, position.tickUpper) === "in-range" ? "In Range" : "Out of Range"}
+                        </span>
+                      )}
                     </div>
                     <p className="text-[11px] text-muted-foreground mt-0.5">
                       #{position.tokenId.toString()} · V3 Position
@@ -597,7 +647,7 @@ export function RemoveLiquidityV3() {
                           />
                           <div>
                             <p className="text-sm font-semibold tabular-nums">
-                              {fmt(position.amount0, position.token0Decimals)}
+                              {fmtCompact(position.amount0, position.token0Decimals)}
                             </p>
                             <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
                           </div>
@@ -611,7 +661,7 @@ export function RemoveLiquidityV3() {
                           />
                           <div>
                             <p className="text-sm font-semibold tabular-nums">
-                              {fmt(position.amount1, position.token1Decimals)}
+                              {fmtCompact(position.amount1, position.token1Decimals)}
                             </p>
                             <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
                           </div>
@@ -660,6 +710,89 @@ export function RemoveLiquidityV3() {
                     </div>
                   </div>
 
+                  {/* Percentage selector */}
+                  <div className="px-4 py-3 bg-muted/10">
+                    <div className="flex items-center justify-between mb-3">
+                      <span className="text-sm font-medium text-muted-foreground">Remove amount</span>
+                      <span className="text-2xl font-bold text-primary tabular-nums">
+                        {percentage[0]}%
+                      </span>
+                    </div>
+
+                    <div 
+                      className="relative py-2 cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                      }}
+                    >
+                      <Slider
+                        value={percentage}
+                        onValueChange={setPercentage}
+                        max={100}
+                        step={1}
+                        className="py-1"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-1.5 mt-3">
+                      {[25, 50, 75, 100].map((value) => (
+                        <button
+                          key={value}
+                          onClick={(e) => { e.stopPropagation(); setPercentage([value]); }}
+                          className={`py-2.5 rounded-lg text-xs font-semibold transition-all min-h-[44px] flex items-center justify-center touch-manipulation ${
+                            percentage[0] === value
+                              ? "bg-primary text-primary-foreground shadow-sm"
+                              : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground"
+                          }`}
+                        >
+                          {value === 100 ? "MAX" : `${value}%`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Preview amount to receive */}
+                  {previewAmounts && (previewAmounts.amount0 > 0n || previewAmounts.amount1 > 0n) && (
+                    <div className="px-4 py-3 bg-muted/10">
+                      <div className="flex items-center gap-1.5 mb-2.5">
+                        <ArrowDown className="w-3 h-3 text-primary/70" />
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                          Liquidity to receive
+                        </span>
+                      </div>
+                      <div className="flex gap-6">
+                        <div className="flex items-center gap-2">
+                          <img
+                            src={getTokenLogo(position.token0Symbol)}
+                            alt={position.token0Symbol}
+                            className="w-5 h-5 rounded-full flex-shrink-0"
+                            onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                          />
+                          <div>
+                            <p className="text-sm font-semibold tabular-nums">
+                              {fmtCompact(previewAmounts.amount0, position.token0Decimals)}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <img
+                            src={getTokenLogo(position.token1Symbol)}
+                            alt={position.token1Symbol}
+                            className="w-5 h-5 rounded-full flex-shrink-0"
+                            onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                          />
+                          <div>
+                            <p className="text-sm font-semibold tabular-nums">
+                              {fmtCompact(previewAmounts.amount1, position.token1Decimals)}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Action buttons */}
                   <div className="px-4 py-3 space-y-2 bg-muted/5">
                     <Button
@@ -698,8 +831,13 @@ export function RemoveLiquidityV3() {
                           <span className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                           Removing…
                         </span>
+                      ) : percentage[0] === 100 ? (
+                        <span className="flex items-center gap-2">
+                          <Trash2 className="w-4 h-4" />
+                          Remove 100% & Burn NFT
+                        </span>
                       ) : (
-                        "Remove All Liquidity"
+                        `Remove ${percentage[0]}% Liquidity`
                       )}
                     </Button>
                   </div>

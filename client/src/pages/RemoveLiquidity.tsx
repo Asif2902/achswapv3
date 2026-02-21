@@ -1,38 +1,49 @@
 import { useState } from "react";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RemoveLiquidityV2 } from "@/components/RemoveLiquidityV2";
 import { RemoveLiquidityV3 } from "@/components/RemoveLiquidityV3";
+import { Droplets, Zap } from "lucide-react";
+
+type Proto = "v2" | "v3";
 
 export default function RemoveLiquidity() {
+  const [proto, setProto] = useState<Proto>("v2");
+
   return (
-    <div className="container mx-auto px-3 sm:px-4 py-4 sm:py-8 max-w-2xl">
-      <Card className="bg-slate-900/50 border-slate-700">
-        <CardHeader className="p-4 sm:p-6">
-          <CardTitle className="text-xl sm:text-2xl md:text-3xl font-bold text-center">
-            Remove Liquidity
-          </CardTitle>
-          <p className="text-center text-slate-400 text-xs sm:text-sm mt-2">
-            Withdraw your liquidity from pools
-          </p>
-        </CardHeader>
-        <CardContent className="p-3 sm:p-6">
-          <Tabs defaultValue="v2" className="w-full">
-            <TabsList className="grid w-full grid-cols-2 mb-4 sm:mb-6 h-9 sm:h-10">
-              <TabsTrigger value="v2" className="text-xs sm:text-sm">V2</TabsTrigger>
-              <TabsTrigger value="v3" className="text-xs sm:text-sm">V3 / Collect Fees</TabsTrigger>
-            </TabsList>
+    <div className="min-h-screen flex flex-col items-center px-4 py-6 pb-12 box-border">
+      <div className="w-full max-w-[480px]">
 
-            <TabsContent value="v2">
-              <RemoveLiquidityV2 />
-            </TabsContent>
+        <div className="text-center mb-6">
+          <h1 className="text-2xl font-extrabold text-white mb-1.5 tracking-tight">Remove Liquidity</h1>
+          <p className="text-xs text-white/35 m-0">Withdraw your liquidity from pools</p>
+        </div>
 
-            <TabsContent value="v3">
-              <RemoveLiquidityV3 />
-            </TabsContent>
-          </Tabs>
-        </CardContent>
-      </Card>
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          <button
+            className={`flex flex-col items-center gap-1 p-3.5 rounded-2xl border bg-white/[0.03] border-white/[0.07] cursor-pointer transition-all duration-200 text-white/35 hover:bg-white/[0.06] hover:text-white/60 ${
+              proto === "v2" ? "!bg-indigo-500/12 !border-indigo-500/40 !text-indigo-300" : ""
+            }`}
+            onClick={() => setProto("v2")}
+          >
+            <Droplets style={{ width: 20, height: 20 }} />
+            <span className="text-base font-extrabold tracking-tight">V2</span>
+            <span className="text-[10px] font-semibold tracking-widest uppercase opacity-70">Classic AMM</span>
+          </button>
+          <button
+            className={`flex flex-col items-center gap-1 p-3.5 rounded-2xl border bg-white/[0.03] border-white/[0.07] cursor-pointer transition-all duration-200 text-white/35 hover:bg-white/[0.06] hover:text-white/60 ${
+              proto === "v3" ? "!bg-violet-500/12 !border-violet-500/40 !text-violet-300" : ""
+            }`}
+            onClick={() => setProto("v3")}
+          >
+            <Zap style={{ width: 20, height: 20 }} />
+            <span className="text-base font-extrabold tracking-tight">V3</span>
+            <span className="text-[10px] font-semibold tracking-widest uppercase opacity-70">Collect Fees</span>
+          </button>
+        </div>
+
+        {proto === "v2" && <RemoveLiquidityV2 />}
+        {proto === "v3" && <RemoveLiquidityV3 />}
+
+      </div>
     </div>
   );
 }
