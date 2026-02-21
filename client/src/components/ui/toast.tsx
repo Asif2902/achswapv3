@@ -23,14 +23,14 @@ const ToastViewport = React.forwardRef<
 ToastViewport.displayName = ToastPrimitives.Viewport.displayName
 
 const toastVariants = cva(
-  "group pointer-events-auto relative overflow-hidden rounded-xl border p-4 shadow-2xl transition-all duration-300",
+  "group pointer-events-auto relative overflow-hidden rounded-2xl border p-4 shadow-2xl transition-all duration-300",
   {
     variants: {
       variant: {
-        default: "border-zinc-800 bg-zinc-950/95 text-zinc-100 backdrop-blur-xl",
-        destructive: "border-red-500/50 bg-red-950/95 text-red-100 backdrop-blur-xl",
-        success: "border-emerald-500/50 bg-emerald-950/95 text-emerald-100 backdrop-blur-xl",
-        warning: "border-amber-500/50 bg-amber-950/95 text-amber-100 backdrop-blur-xl",
+        default: "bg-white/[0.03] border-white/[0.08] text-white",
+        destructive: "bg-red-500/[0.08] border-red-500/[0.2] text-red-100",
+        success: "bg-emerald-500/[0.08] border-emerald-500/[0.2] text-emerald-100",
+        warning: "bg-amber-500/[0.08] border-amber-500/[0.2] text-amber-100",
       },
     },
     defaultVariants: {
@@ -61,7 +61,7 @@ const ToastAction = React.forwardRef<
   <ToastPrimitives.Action
     ref={ref}
     className={cn(
-      "inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 text-sm font-semibold text-zinc-100 transition-all hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-zinc-950 disabled:pointer-events-none disabled:opacity-50",
+      "inline-flex h-8 shrink-0 items-center justify-center rounded-xl border border-white/[0.1] bg-white/[0.05] px-3 text-sm font-semibold text-white transition-all hover:bg-indigo-500/[0.15] hover:border-indigo-500/[0.3] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-[#0f1117] disabled:pointer-events-none disabled:opacity-50",
       className
     )}
     {...props}
@@ -76,7 +76,7 @@ const ToastClose = React.forwardRef<
   <ToastPrimitives.Close
     ref={ref}
     className={cn(
-      "absolute right-3 top-3 rounded-lg p-1.5 text-zinc-500 opacity-0 transition-all hover:bg-zinc-800 hover:text-zinc-300 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-cyan-500 group-hover:opacity-100",
+      "absolute right-3 top-3 rounded-xl p-1.5 text-white/[0.3] opacity-0 transition-all hover:bg-white/[0.08] hover:text-white/[0.6] focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-indigo-500 group-hover:opacity-100",
       className
     )}
     toast-close=""
@@ -93,7 +93,7 @@ const ToastTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <ToastPrimitives.Title
     ref={ref}
-    className={cn("text-sm font-bold tracking-wide uppercase", className)}
+    className={cn("text-sm font-bold tracking-wide uppercase text-white/[0.9]", className)}
     {...props}
   />
 ))
@@ -105,7 +105,7 @@ const ToastDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <ToastPrimitives.Description
     ref={ref}
-    className={cn("text-sm text-zinc-400 leading-relaxed", className)}
+    className={cn("text-sm text-white/[0.45] leading-relaxed", className)}
     {...props}
   />
 ))
@@ -116,28 +116,13 @@ const ToastIcon = ({ variant }: { variant?: string }) => {
   
   switch (variant) {
     case "destructive":
-      return (
-        <div className="relative">
-          <AlertCircle className={`${iconClass} text-red-400`} />
-          <div className="absolute inset-0 blur-md bg-red-400/50" />
-        </div>
-      )
+      return <AlertCircle className={`${iconClass} text-red-400`} />
     case "success":
-      return (
-        <div className="relative">
-          <CheckCircle2 className={`${iconClass} text-emerald-400`} />
-          <div className="absolute inset-0 blur-md bg-emerald-400/50" />
-        </div>
-      )
+      return <CheckCircle2 className={`${iconClass} text-emerald-400`} />
     case "warning":
-      return (
-        <div className="relative">
-          <AlertTriangle className={`${iconClass} text-amber-400`} />
-          <div className="absolute inset-0 blur-md bg-amber-400/50" />
-        </div>
-      )
+      return <AlertTriangle className={`${iconClass} text-amber-400`} />
     default:
-      return <Info className={`${iconClass} text-cyan-400`} />
+      return <Info className={`${iconClass} text-indigo-400`} />
   }
 }
 
@@ -161,9 +146,9 @@ const CopyButton = ({ text }: { text?: string }) => {
       onClick={handleCopy}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
-        "bg-zinc-800/80 border border-zinc-700 hover:border-cyan-500/50 hover:bg-zinc-700",
-        "text-zinc-400 hover:text-cyan-400",
-        "focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
+        "bg-white/[0.04] border border-white/[0.08] hover:bg-indigo-500/[0.12] hover:border-indigo-500/[0.25]",
+        "text-white/[0.4] hover:text-indigo-300",
+        "focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
       )}
       title="Copy error details for debugging"
     >
