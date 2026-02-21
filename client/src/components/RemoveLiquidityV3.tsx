@@ -723,11 +723,6 @@ export function RemoveLiquidityV3() {
                       className="relative py-2 cursor-pointer"
                       onClick={(e) => {
                         e.stopPropagation();
-                        const rect = e.currentTarget.getBoundingClientRect();
-                        const x = e.clientX - rect.left;
-                        const percent = Math.round((x / rect.width) * 100);
-                        const clampedPercent = Math.max(0, Math.min(100, percent));
-                        setPercentage([clampedPercent]);
                       }}
                     >
                       <Slider
