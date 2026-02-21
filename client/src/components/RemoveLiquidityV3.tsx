@@ -757,7 +757,7 @@ export function RemoveLiquidityV3() {
                       <div className="flex items-center gap-1.5 mb-2.5">
                         <ArrowDown className="w-3 h-3 text-primary/70" />
                         <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                          You will receive
+                          Liquidity to receive
                         </span>
                       </div>
                       <div className="flex gap-6">
