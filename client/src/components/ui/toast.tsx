@@ -14,7 +14,7 @@ const ToastViewport = React.forwardRef<
   <ToastPrimitives.Viewport
     ref={ref}
     className={cn(
-      "fixed top-0 z-[100] flex max-h-screen w-full flex-col-reverse p-4 sm:bottom-0 sm:right-0 sm:top-auto sm:flex-col md:max-w-[420px]",
+      "fixed top-0 right-0 z-[100] flex max-h-screen w-full flex-col-reverse p-4 gap-3 sm:bottom-0 sm:right-0 sm:top-auto sm:flex-col md:max-w-[380px]",
       className
     )}
     {...props}
@@ -23,14 +23,14 @@ const ToastViewport = React.forwardRef<
 ToastViewport.displayName = ToastPrimitives.Viewport.displayName
 
 const toastVariants = cva(
-  "group pointer-events-auto relative flex w-full items-start gap-3 overflow-hidden rounded-lg border p-4 shadow-lg transition-all",
+  "group pointer-events-auto relative overflow-hidden rounded-xl border p-4 shadow-2xl transition-all duration-300",
   {
     variants: {
       variant: {
-        default: "border-zinc-200 bg-white text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100",
-        destructive: "border-red-200 bg-red-50 text-red-900 dark:border-red-900/50 dark:bg-red-950 dark:text-red-100",
-        success: "border-green-200 bg-green-50 text-green-900 dark:border-green-900/50 dark:bg-green-950 dark:text-green-100",
-        warning: "border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950 dark:text-amber-100",
+        default: "border-zinc-800 bg-zinc-950/95 text-zinc-100 backdrop-blur-xl",
+        destructive: "border-red-500/50 bg-red-950/95 text-red-100 backdrop-blur-xl",
+        success: "border-emerald-500/50 bg-emerald-950/95 text-emerald-100 backdrop-blur-xl",
+        warning: "border-amber-500/50 bg-amber-950/95 text-amber-100 backdrop-blur-xl",
       },
     },
     defaultVariants: {
@@ -61,7 +61,7 @@ const ToastAction = React.forwardRef<
   <ToastPrimitives.Action
     ref={ref}
     className={cn(
-      "inline-flex h-8 shrink-0 items-center justify-center rounded-md border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-secondary focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none disabled:opacity-50",
+      "inline-flex h-8 shrink-0 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-800/80 px-3 text-sm font-semibold text-zinc-100 transition-all hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:ring-offset-2 focus:ring-offset-zinc-950 disabled:pointer-events-none disabled:opacity-50",
       className
     )}
     {...props}
@@ -76,7 +76,7 @@ const ToastClose = React.forwardRef<
   <ToastPrimitives.Close
     ref={ref}
     className={cn(
-      "absolute right-2 top-2 rounded-md p-1 opacity-0 transition-opacity hover:bg-black/5 focus:opacity-100 focus:outline-none focus:ring-2 group-hover:opacity-100",
+      "absolute right-3 top-3 rounded-lg p-1.5 text-zinc-500 opacity-0 transition-all hover:bg-zinc-800 hover:text-zinc-300 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-cyan-500 group-hover:opacity-100",
       className
     )}
     toast-close=""
@@ -93,7 +93,7 @@ const ToastTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <ToastPrimitives.Title
     ref={ref}
-    className={cn("text-sm font-semibold flex items-center gap-2", className)}
+    className={cn("text-sm font-bold tracking-wide uppercase", className)}
     {...props}
   />
 ))
@@ -105,22 +105,39 @@ const ToastDescription = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <ToastPrimitives.Description
     ref={ref}
-    className={cn("text-sm opacity-80", className)}
+    className={cn("text-sm text-zinc-400 leading-relaxed", className)}
     {...props}
   />
 ))
 ToastDescription.displayName = ToastPrimitives.Description.displayName
 
 const ToastIcon = ({ variant }: { variant?: string }) => {
+  const iconClass = "h-5 w-5 shrink-0"
+  
   switch (variant) {
     case "destructive":
-      return <AlertCircle className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />
+      return (
+        <div className="relative">
+          <AlertCircle className={`${iconClass} text-red-400`} />
+          <div className="absolute inset-0 blur-md bg-red-400/50" />
+        </div>
+      )
     case "success":
-      return <CheckCircle2 className="h-5 w-5 text-green-500 shrink-0 mt-0.5" />
+      return (
+        <div className="relative">
+          <CheckCircle2 className={`${iconClass} text-emerald-400`} />
+          <div className="absolute inset-0 blur-md bg-emerald-400/50" />
+        </div>
+      )
     case "warning":
-      return <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+      return (
+        <div className="relative">
+          <AlertTriangle className={`${iconClass} text-amber-400`} />
+          <div className="absolute inset-0 blur-md bg-amber-400/50" />
+        </div>
+      )
     default:
-      return <Info className="h-5 w-5 text-zinc-500 shrink-0 mt-0.5" />
+      return <Info className={`${iconClass} text-cyan-400`} />
   }
 }
 
@@ -143,17 +160,17 @@ const CopyButton = ({ text }: { text?: string }) => {
     <button
       onClick={handleCopy}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors",
-        "bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700",
-        "text-zinc-600 dark:text-zinc-400",
-        "focus:outline-none focus:ring-2 focus:ring-offset-1"
+        "inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all",
+        "bg-zinc-800/80 border border-zinc-700 hover:border-cyan-500/50 hover:bg-zinc-700",
+        "text-zinc-400 hover:text-cyan-400",
+        "focus:outline-none focus:ring-2 focus:ring-cyan-500/50"
       )}
       title="Copy error details for debugging"
     >
       {copied ? (
         <>
-          <Check className="h-3 w-3 text-green-500" />
-          <span className="text-green-600 dark:text-green-400">Copied</span>
+          <Check className="h-3 w-3 text-emerald-400" />
+          <span className="text-emerald-400">Copied!</span>
         </>
       ) : (
         <>
