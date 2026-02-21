@@ -10,7 +10,7 @@ import { PathVisualizer, type RouteHop } from "@/components/PathVisualizer";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
-import { Contract, BrowserProvider, getAddress } from "ethers";
+import { Contract, BrowserProvider, JsonRpcProvider, getAddress } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
@@ -152,10 +152,15 @@ export default function Swap() {
       setToAmount(fromAmount); setPriceImpact(0);
       setRouteHops([{ tokenIn: fromToken, tokenOut: toToken, protocol: "V2" }]); return;
     }
-    if (!window.ethereum || !contracts) return;
+    if (!contracts) return;
     setIsLoadingQuote(true);
+    let provider;
     try {
-      const provider = new BrowserProvider(window.ethereum);
+      if (window.ethereum) {
+        provider = new BrowserProvider(window.ethereum);
+      } else {
+        provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
+      }
       const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
       if (!wrappedTokenData) throw new Error("wUSDC not found");
       const amountIn = parseAmount(fromAmount, fromToken.decimals);
@@ -252,8 +257,18 @@ export default function Swap() {
       const slippageBps = BigInt(Math.floor(slippage * 100));
       const minAmountOut = (bestQuote.outputAmount * (10000n - slippageBps)) / 10000n;
       const deadlineTimestamp = Math.floor(Date.now() / 1000) + deadline * 60;
-      let recipient = address!;
-      if (recipientAddress) { try { recipient = getAddress(recipientAddress); } catch { throw new Error("Invalid recipient address format."); } }
+      let recipient: string = address ?? "0x0000000000000000000000000000000000000000";
+      if (recipientAddress) {
+        try {
+          const normalizedAddress = getAddress(recipientAddress);
+          if (normalizedAddress === "0x0000000000000000000000000000000000000000") {
+            throw new Error("Recipient cannot be zero address");
+          }
+          recipient = normalizedAddress;
+        } catch (error) {
+          throw new Error("Invalid recipient address format");
+        }
+      }
       const executeWithRetry = async <T,>(fn: () => Promise<T>, maxRetries = 2): Promise<T> => {
         let last: any;
         for (let i = 0; i <= maxRetries; i++) {
@@ -395,6 +410,7 @@ export default function Swap() {
         const fromNative = isNativeToken(fromToken.address);
         const toNative = isNativeToken(toToken.address);
         const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+        if (!wrappedAddr) throw new Error("Wrapped token address not found");
         const path: string[] = [];
         for (let i = 0; i < bestQuote.route.length; i++) {
           const hop = bestQuote.route[i];
