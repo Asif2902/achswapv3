@@ -258,9 +258,16 @@ export default function Swap() {
       const minAmountOut = (bestQuote.outputAmount * (10000n - slippageBps)) / 10000n;
       const deadlineTimestamp = Math.floor(Date.now() / 1000) + deadline * 60;
       let recipient: string = address ?? "0x0000000000000000000000000000000000000000";
-      if (recipientAddress) { 
-        if (!/^0x[a-fA-F0-9]{40}$/.test(recipientAddress)) throw new Error("Invalid recipient address format.");
-        recipient = recipientAddress;
+      if (recipientAddress) {
+        try {
+          const normalizedAddress = getAddress(recipientAddress);
+          if (normalizedAddress === "0x0000000000000000000000000000000000000000") {
+            throw new Error("Recipient cannot be zero address");
+          }
+          recipient = normalizedAddress;
+        } catch (error) {
+          throw new Error("Invalid recipient address format");
+        }
       }
       const executeWithRetry = async <T,>(fn: () => Promise<T>, maxRetries = 2): Promise<T> => {
         let last: any;
