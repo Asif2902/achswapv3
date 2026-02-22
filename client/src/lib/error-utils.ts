@@ -53,7 +53,9 @@ export function parseError(error: unknown): ParsedError {
     rawError = error.message
   } else if (error && typeof error === "object") {
     const anyError = error as Record<string, unknown>
-    rawError = anyError.message as string ?? anyError.reason as string ?? JSON.stringify(error)
+    const msg = anyError.message
+    const reason = anyError.reason
+    rawError = String(msg ?? reason ?? JSON.stringify(error))
     
     if (anyError.code) {
       const codeStr = String(anyError.code)

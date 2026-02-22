@@ -132,9 +132,13 @@ export function RemoveLiquidityV2() {
       const pairsLength = await factory.allPairsLength();
       console.log("Total V2 pairs:", pairsLength.toString());
 
-      // Get all pair addresses first
+      // Cap the number of pairs to fetch to avoid too many RPC calls
+      const MAX_PAIRS = 50;
+      const pairsToFetch = Math.min(Number(pairsLength), MAX_PAIRS);
+
+      // Get pair addresses first (capped)
       const pairAddresses: string[] = [];
-      for (let i = 0; i < Number(pairsLength); i++) {
+      for (let i = 0; i < pairsToFetch; i++) {
         const pairAddr = await factory.allPairs(i);
         pairAddresses.push(pairAddr);
       }
@@ -524,11 +528,11 @@ export function RemoveLiquidityV2() {
                   className="w-full text-left rounded-2xl p-4 transition-all"
                   style={{
                     background: isSelected
-                      ? "rgba(99,102,241,0.1)"
+                      ? "rgba(59,130,246,0.1)"
                       : "rgba(255,255,255,0.025)",
                     border: `1px solid ${
                       isSelected
-                        ? "rgba(99,102,241,0.3)"
+                        ? "rgba(59,130,246,0.3)"
                         : "rgba(255,255,255,0.06)"
                     }`,
                   }}
@@ -678,7 +682,8 @@ export function RemoveLiquidityV2() {
                               percentage[0] === value
                                 ? {
                                     background:
-                                      "linear-gradient(135deg, rgba(99,102,241,0.8), rgba(139,92,246,0.8))",
+                                      "rgba(59, 130, 246, 0.8)",
+                                    border: "1px solid rgba(59, 130, 246, 0.5)",
                                   }
                                 : {
                                     background: "rgba(255,255,255,0.04)",
@@ -878,7 +883,7 @@ export function RemoveLiquidityV2() {
                 style={{
                   background:
                     importTokenA && importTokenB
-                      ? "linear-gradient(135deg, rgba(99,102,241,0.8), rgba(139,92,246,0.8))"
+                      ? "rgba(59, 130, 246, 0.8)"
                       : "rgba(255,255,255,0.08)",
                   color:
                     importTokenA && importTokenB
