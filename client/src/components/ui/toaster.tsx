@@ -1,4 +1,5 @@
 import { useToast } from "@/hooks/use-toast"
+import { cn } from "@/lib/utils"
 import {
   Toast,
   ToastClose,
@@ -9,10 +10,6 @@ import {
   ToastIcon,
   CopyButton,
 } from "@/components/ui/toast"
-
-function cn(...classes: (string | undefined | null | false)[]) {
-  return classes.filter(Boolean).join(" ")
-}
 
 export function Toaster() {
   const { toasts } = useToast()

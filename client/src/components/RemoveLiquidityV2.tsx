@@ -375,21 +375,31 @@ export function RemoveLiquidityV2() {
       const router = new Contract(contracts.v2.router, routerABI, signer);
       const deadline = Math.floor(Date.now() / 1000) + 600;
 
-      // Native token detection uses zero-address which is consistent with how positions are stored
-      const isToken0Native = selectedPosition.token0Address === ZERO_ADDRESS;
-      const isToken1Native = selectedPosition.token1Address === ZERO_ADDRESS;
+      // Native token detection uses wNative since pair.token0()/token1() return wrapped addresses
+      const isToken0Native = wNative && selectedPosition.token0Address.toLowerCase() === wNative.toLowerCase();
+      const isToken1Native = wNative && selectedPosition.token1Address.toLowerCase() === wNative.toLowerCase();
 
       let tx;
+      
+      // Calculate expected amounts and apply slippage protection
+      const SLIPPAGE_TOLERANCE = 0.01; // 1% default slippage
+      const expected0 = (liquidityToRemove * selectedPosition.amount0) / selectedPosition.liquidity;
+      const expected1 = (liquidityToRemove * selectedPosition.amount1) / selectedPosition.liquidity;
+      const amount0Min = (expected0 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000))) / 10000n;
+      const amount1Min = (expected1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000))) / 10000n;
+
       if (isToken0Native || isToken1Native) {
         // FIX 7: The non-native token address is used directly — no hardcoded wNative needed here
         const token = isToken0Native
           ? selectedPosition.token1Address
           : selectedPosition.token0Address;
+        const amountTokenMin = isToken0Native ? amount1Min : amount0Min;
+        const amountETHMin = isToken0Native ? amount0Min : amount1Min;
         tx = await router.removeLiquidityETH(
           token,
           liquidityToRemove,
-          0,
-          0,
+          amountTokenMin,
+          amountETHMin,
           address,
           deadline
         );
@@ -398,8 +408,8 @@ export function RemoveLiquidityV2() {
           selectedPosition.token0Address,
           selectedPosition.token1Address,
           liquidityToRemove,
-          0,
-          0,
+          amount0Min,
+          amount1Min,
           address,
           deadline
         );

@@ -136,13 +136,6 @@ function toast({ ...props }: Toast) {
     },
   })
 
-  if (props.duration !== 0) {
-    const duration = props.duration ?? TOAST_DEFAULT_DURATION
-    setTimeout(() => {
-      dismiss()
-    }, duration)
-  }
-
   return {
     id: id,
     dismiss,

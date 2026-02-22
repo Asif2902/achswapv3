@@ -4,7 +4,7 @@ export interface ParsedError {
 }
 
 const ERROR_MESSAGES: Record<string, string> = {
-  "insufficient ETH": "Insufficient USDC balance for this transaction",
+  "insufficient ETH": "Insufficient ETH balance for this transaction",
   "insufficient token balance": "Insufficient token balance",
   "insufficient liquidity": "Not enough liquidity in this pool",
   "insufficient amount": "Insufficient input amount",
@@ -73,12 +73,17 @@ export function parseError(error: unknown): ParsedError {
   }
 
   if (!rawError) {
-    rawError = JSON.stringify(error)
+    try {
+      const stringified = JSON.stringify(error)
+      rawError = stringified ?? "<unserializable error>"
+    } catch {
+      rawError = error?.toString() ?? Object.prototype.toString.call(error) ?? "<unserializable error>"
+    }
   }
 
   return {
     userMessage,
-    rawError: rawError.trim(),
+    rawError: String(rawError).trim(),
   }
 }
 
@@ -87,15 +92,26 @@ export function getErrorForToast(error: unknown): { title: string; description: 
   
   let title = "Transaction Failed"
   
-  if (parsed.rawError.toLowerCase().includes("reject") || parsed.rawError.toLowerCase().includes("user")) {
+  const lowerError = parsed.rawError.toLowerCase()
+  const userRejectionPatterns = [
+    "user rejected",
+    "user denied",
+    "user rejected the request",
+    "user denied transaction",
+    "rejected by user",
+    "request rejected",
+  ]
+  const isUserRejection = userRejectionPatterns.some((pattern) => lowerError.includes(pattern))
+  
+  if (isUserRejection) {
     title = "Transaction Rejected"
-  } else if (parsed.rawError.toLowerCase().includes("insufficient")) {
+  } else if (lowerError.includes("insufficient")) {
     title = "Insufficient Balance"
-  } else if (parsed.rawError.toLowerCase().includes("allowance")) {
+  } else if (lowerError.includes("allowance")) {
     title = "Allowance Required"
-  } else if (parsed.rawError.toLowerCase().includes("gas")) {
+  } else if (lowerError.includes("gas")) {
     title = "Gas Issue"
-  } else if (parsed.rawError.toLowerCase().includes("timeout")) {
+  } else if (lowerError.includes("timeout")) {
     title = "Request Timeout"
   }
 
