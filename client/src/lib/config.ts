@@ -1,5 +1,7 @@
 const alchemyKey = import.meta.env.VITE_ALCHEMY_KEY;
 
+console.log('Alchemy Key:', alchemyKey ? 'loaded' : 'MISSING');
+
 export const RPC_CONFIG = {
   arcTestnet: `https://arc-testnet.g.alchemy.com/v2/${alchemyKey}`,
   stableTestnet: 'https://rpc.testnet.stable.xyz/',
