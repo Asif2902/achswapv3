@@ -1,12 +1,12 @@
 const alchemyKey = import.meta.env.VITE_ALCHEMY_KEY;
 
 export const RPC_CONFIG = {
-  arcTestnet: alchemyKey 
-    ? `https://arc-testnet.g.alchemy.com/v2/${alchemyKey}`
-    : 'https://rpc.testnet.arc.network',
+  arcTestnet: `https://arc-testnet.g.alchemy.com/v2/${alchemyKey}`,
   stableTestnet: 'https://rpc.testnet.stable.xyz/',
 };
 
 export const getRpcUrl = (chainId: number): string => {
-  return chainId === 2201 ? RPC_CONFIG.stableTestnet : RPC_CONFIG.arcTestnet;
+  const url = chainId === 2201 ? RPC_CONFIG.stableTestnet : RPC_CONFIG.arcTestnet;
+  console.log('RPC URL:', url);
+  return url;
 };
