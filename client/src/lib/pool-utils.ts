@@ -2,6 +2,7 @@
 import { Contract, BrowserProvider } from "ethers";
 import { formatUnits } from "ethers";
 import type { Token } from "@shared/schema";
+import { getRpcUrl } from "./config";
 
 const FACTORY_ABI = [
   "function allPairsLength() external view returns (uint)",
@@ -51,9 +52,7 @@ export async function fetchAllPools(
   knownTokens: Token[]
 ): Promise<PoolData[]> {
   try {
-    const rpcUrl = chainId === 2201 
-      ? 'https://rpc.testnet.stable.xyz/' 
-      : 'https://rpc.testnet.arc.network';
+    const rpcUrl = getRpcUrl(chainId);
 
     const provider = new BrowserProvider({
       request: async ({ method, params }: any) => {

@@ -2,6 +2,7 @@ import { Contract, BrowserProvider, ZeroAddress } from "ethers";
 import { formatUnits } from "ethers";
 import type { Token } from "@shared/schema";
 import { V3_FACTORY_ABI, V3_POOL_ABI, FEE_TIER_LABELS } from "./abis/v3";
+import { getRpcUrl } from "./config";
 
 // ─── ABIs ────────────────────────────────────────────────────────────────────
 
@@ -120,10 +121,7 @@ async function safeTokenInfo(
 // ─── Provider ────────────────────────────────────────────────────────────────
 
 function makeProvider(chainId: number): BrowserProvider {
-  const rpcUrl =
-    chainId === 2201
-      ? "https://rpc.testnet.stable.xyz/"
-      : "https://rpc.testnet.arc.network";
+  const rpcUrl = getRpcUrl(chainId);
 
   return new BrowserProvider({
     request: async ({ method, params }: { method: string; params?: unknown[] }) => {
