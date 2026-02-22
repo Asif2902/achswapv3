@@ -2,7 +2,7 @@
 import { Contract, BrowserProvider } from "ethers";
 import { formatUnits } from "ethers";
 import type { Token } from "@shared/schema";
-import { getRpcUrl } from "./config";
+import { getRpcUrl, FALLBACK_RPC, fetchWithRetry } from "./config";
 
 const FACTORY_ABI = [
   "function allPairsLength() external view returns (uint)",
@@ -52,23 +52,46 @@ export async function fetchAllPools(
   knownTokens: Token[]
 ): Promise<PoolData[]> {
   try {
-    const rpcUrl = getRpcUrl(chainId);
+    const primaryRpcUrl = getRpcUrl(chainId);
+    const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
 
     const provider = new BrowserProvider({
       request: async ({ method, params }: any) => {
-        const response = await fetch(rpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method,
-            params,
-          }),
-        });
-        const data = await response.json();
-        if (data.error) throw new Error(data.error.message);
-        return data.result;
+        let url = primaryRpcUrl;
+        try {
+          const response = await fetchWithRetry(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              method,
+              params,
+            }),
+          }, 3);
+          const data = await response.json();
+          if (data.error) throw new Error(data.error.message);
+          return data.result;
+        } catch {
+          if (url !== fallbackRpcUrl) {
+            console.warn(`Primary RPC failed, trying fallback: ${fallbackRpcUrl}`);
+            url = fallbackRpcUrl;
+            const response = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                jsonrpc: '2.0',
+                id: 1,
+                method,
+                params,
+              }),
+            });
+            const data = await response.json();
+            if (data.error) throw new Error(data.error.message);
+            return data.result;
+          }
+          throw new Error('All RPC endpoints failed');
+        }
       },
     });
 
