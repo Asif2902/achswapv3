@@ -164,7 +164,6 @@ export async function fetchAllV3Pools(
   chainId: number,
   knownTokens: Token[],
 ): Promise<V3PoolData[]> {
-  console.log('[V3] Starting fetch, chainId:', chainId, 'factory:', factoryAddress, 'tokens:', knownTokens.length);
   const provider = makeProvider(chainId);
   const factory  = new Contract(factoryAddress, V3_FACTORY_ABI, provider);
 
