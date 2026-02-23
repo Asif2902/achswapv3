@@ -130,29 +130,24 @@ export function AddLiquidityV2() {
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` }); return exists; }
       const primaryRpcUrl = getRpcUrl(chainId);
       const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
-      let url = primaryRpcUrl;
-      let provider: BrowserProvider;
-      try {
-        provider = new BrowserProvider({
-          request: async ({ method, params }: any) => {
+      const provider = new BrowserProvider({
+        request: async ({ method, params }: any) => {
+          let url = primaryRpcUrl;
+          try {
             const r = await fetchWithRetry(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) }, 3);
             const d = await r.json();
             if (d.error) throw new Error(d.error.message);
             return d.result;
-          },
-        });
-      } catch {
-        console.warn('Primary RPC failed, trying fallback');
-        url = fallbackRpcUrl;
-        provider = new BrowserProvider({
-          request: async ({ method, params }: any) => {
+          } catch {
+            console.warn('Primary RPC failed, trying fallback');
+            url = fallbackRpcUrl;
             const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
             const d = await r.json();
             if (d.error) throw new Error(d.error.message);
             return d.result;
-          },
-        });
-      }
+          }
+        },
+      });
       const contract = new Contract(address, ERC20_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), 10000))]) as [string, string, bigint];
       if (!chainId) throw new Error("Chain ID not available");
