@@ -7,6 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Contract, BrowserProvider } from "ethers";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
+import { createAlchemyProvider } from "@/lib/config";
 import { NONFUNGIBLE_POSITION_MANAGER_ABI, V3_POOL_ABI, V3_FACTORY_ABI, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getTokensFromLiquidity } from "@/lib/v3-liquidity-math";
@@ -102,10 +103,10 @@ export function RemoveLiquidityV3() {
     "/img/logos/unknown-token.png";
 
   const loadPositions = async () => {
-    if (!address || !contracts || !window.ethereum) return;
+    if (!address || !contracts || !chainId) return;
     setIsLoading(true);
     try {
-      const provider = new BrowserProvider(window.ethereum);
+      const provider = createAlchemyProvider(chainId);
       const positionManager = new Contract(
         contracts.v3.nonfungiblePositionManager,
         NONFUNGIBLE_POSITION_MANAGER_ABI,

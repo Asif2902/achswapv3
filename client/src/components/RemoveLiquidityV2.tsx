@@ -10,6 +10,7 @@ import { getTokensByChainId, getWrappedAddress } from "@/data/tokens";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
+import { createAlchemyProvider } from "@/lib/config";
 import {
   ExternalLink,
   Trash2,
@@ -115,18 +116,18 @@ export function RemoveLiquidityV2() {
 
   // FIX 5 + 6: useCallback with correct deps; stale selectedPosition replaced by ref
   const loadPositions = useCallback(async () => {
-    if (!address || !contracts || !window.ethereum) {
+    if (!address || !contracts || !chainId) {
       console.log("loadPositions: missing requirements", {
         address: !!address,
         contracts: !!contracts,
-        ethereum: !!window.ethereum,
+        chainId: !!chainId,
       });
       return;
     }
     setIsLoading(true);
     try {
       console.log("Loading V2 positions for:", address);
-      const provider = new BrowserProvider(window.ethereum);
+      const provider = createAlchemyProvider(chainId);
       const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
 
       const pairsLength = await factory.allPairsLength();
@@ -223,7 +224,7 @@ export function RemoveLiquidityV2() {
     } finally {
       setIsLoading(false);
     }
-  }, [address, contracts]); // selectedPosition intentionally NOT here — use ref instead
+  }, [address, contracts, chainId]); // selectedPosition intentionally NOT here — use ref instead
 
   // FIX 6: loadPositions added to dep array
   useEffect(() => {
@@ -233,10 +234,10 @@ export function RemoveLiquidityV2() {
   }, [isConnected, address, loadPositions]);
 
   const handleImportPool = async () => {
-    if (!importTokenA || !importTokenB || !contracts || !window.ethereum || !chainId) return;
+    if (!importTokenA || !importTokenB || !contracts || !chainId) return;
 
     try {
-      const provider = new BrowserProvider(window.ethereum);
+      const provider = createAlchemyProvider(chainId);
       const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
 
       // FIX 7: Use resolveForFactory (wraps native -> wNative) instead of hardcoded address
