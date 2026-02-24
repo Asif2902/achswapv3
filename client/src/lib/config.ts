@@ -18,28 +18,33 @@ export const FALLBACK_RPC = 'https://rpc.testnet.arc.network';
 export function createAlchemyProvider(chainId: number): BrowserProvider {
   const rpcUrl = getRpcUrl(chainId);
   const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
+  const useFallback = rpcUrl !== fallbackRpcUrl;
 
   return new BrowserProvider({
     request: async ({ method, params }: { method: string; params?: unknown[] }) => {
-      let url = rpcUrl;
+      const requestBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
+      const requestOptions = {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: requestBody,
+      };
+
       try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-        });
-        const json = await res.json();
-        if (json.error) throw new Error(json.error.message ?? "RPC error");
-        return json.result;
-      } catch {
-        if (url !== fallbackRpcUrl) {
+        if (useFallback) {
+          const res = await fetch(rpcUrl, requestOptions);
+          const json = await res.json();
+          if (json.error) throw new Error(json.error.message ?? "RPC error");
+          return json.result;
+        } else {
+          const res = await fetchWithRetry(rpcUrl, requestOptions, 3);
+          const json = await res.json();
+          if (json.error) throw new Error(json.error.message ?? "RPC error");
+          return json.result;
+        }
+      } catch (err) {
+        if (useFallback) {
           console.warn(`Primary RPC failed, trying fallback: ${fallbackRpcUrl}`);
-          url = fallbackRpcUrl;
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
-          });
+          const res = await fetch(fallbackRpcUrl, requestOptions);
           const json = await res.json();
           if (json.error) throw new Error(json.error.message ?? "RPC error");
           return json.result;
