@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useChainId } from "wagmi";
@@ -6,7 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
-import { formatAmount, parseAmount } from "@/lib/decimal-utils";
+import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import {
@@ -115,6 +115,9 @@ export function AddLiquidityV3Advanced() {
   const [balanceB, setBalanceB] = useState<bigint | null>(null);
   const [amountBIsAuto, setAmountBIsAuto] = useState(false);
   const [autoCalcAmounts, setAutoCalcAmounts] = useState<{ amount0: bigint; amount1: bigint; forAmountA: string } | null>(null);
+
+  const maxAmountAWeiRef = useRef<bigint | null>(null);
+  const maxAmountBWeiRef = useRef<bigint | null>(null);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -334,16 +337,44 @@ export function AddLiquidityV3Advanced() {
       const tickLower = getNearestUsableTick(tickLowerRaw, ts);
       const tickUpper = getNearestUsableTick(tickUpperRaw, ts);
       if (tickLower >= tickUpper) { toast({ title: "Invalid tick range", description: `Ticks must differ by at least ${ts}`, variant: "destructive" }); return; }
+      
+      // Use max amount refs if set
+      const maxAmountA = maxAmountAWeiRef.current;
+      const maxAmountB = maxAmountBWeiRef.current;
+      const usedMaxA = maxAmountA !== null;
+      const usedMaxB = maxAmountB !== null;
+      
+      // Clear refs first
+      maxAmountAWeiRef.current = null;
+      maxAmountBWeiRef.current = null;
+      
       let amount0Desired: bigint, amount1Desired: bigint;
-      if (depositMode === "token0-only") { amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals); amount1Desired = 0n; }
-      else if (depositMode === "token1-only") { amount0Desired = 0n; amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals); }
+      if (depositMode === "token0-only") { 
+        amount0Desired = usedMaxA ? (isToken0A ? maxAmountA : 0n) : parseAmount(isToken0A ? amountA : amountB, token0.decimals); 
+        amount1Desired = 0n; 
+      }
+      else if (depositMode === "token1-only") { 
+        amount0Desired = 0n; 
+        amount1Desired = usedMaxB ? (isToken0A ? maxAmountB : maxAmountB) : parseAmount(isToken0A ? amountB : amountA, token1.decimals); 
+      }
       else {
         if (amountBIsAuto && autoCalcAmounts?.forAmountA === amountA && autoCalcAmounts) { amount0Desired = autoCalcAmounts.amount0; amount1Desired = autoCalcAmounts.amount1; }
         else if (currentSqrtPriceX96 && ticksValid) {
-          try { const i = parseAmount(amountA, isToken0A ? token0.decimals : token1.decimals); const { amount0, amount1 } = calculateAmountsForLiquidity(i, isToken0A, currentSqrtPriceX96, tickLower, tickUpper, token0.decimals, token1.decimals); amount0Desired = amount0; amount1Desired = amount1; }
-          catch { amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals); amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals); }
-        } else { amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals); amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals); }
+          try { 
+            const inputAmount = usedMaxA ? maxAmountA : parseAmount(amountA, isToken0A ? token0.decimals : token1.decimals); 
+            const { amount0, amount1 } = calculateAmountsForLiquidity(inputAmount, isToken0A, currentSqrtPriceX96, tickLower, tickUpper, token0.decimals, token1.decimals); 
+            amount0Desired = amount0; amount1Desired = amount1; 
+          }
+          catch { 
+            amount0Desired = usedMaxA ? (isToken0A ? maxAmountA : parseAmount(amountB, token1.decimals)) : parseAmount(isToken0A ? amountA : amountB, token0.decimals); 
+            amount1Desired = usedMaxB ? (isToken0A ? maxAmountB : maxAmountB) : parseAmount(isToken0A ? amountB : amountA, token1.decimals); 
+          }
+        } else { 
+          amount0Desired = usedMaxA ? (isToken0A ? maxAmountA : (usedMaxB ? maxAmountB : parseAmount(amountB, token1.decimals))) : parseAmount(isToken0A ? amountA : amountB, token0.decimals); 
+          amount1Desired = usedMaxB ? (isToken0A ? maxAmountB : maxAmountB) : parseAmount(isToken0A ? amountB : amountA, token1.decimals); 
+        }
       }
+      
       if (amount0Desired === 0n && amount1Desired === 0n) { toast({ title: "Amount error", description: "Could not compute valid amounts. Please enter manually.", variant: "destructive" }); return; }
       let nativeAmount = 0n;
       if (tokenAIsNative) nativeAmount = isToken0A ? amount0Desired : amount1Desired;
@@ -549,7 +580,16 @@ export function AddLiquidityV3Advanced() {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <span className="v3a-label">Token A{token0Symbol && tokenA ? ` · ${tokenA.symbol === token0Symbol ? "token0" : "token1"}` : ""}</span>
             {balanceA !== null && tokenA && (
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: "pointer" }} onClick={() => setAmountA(formatAmount(balanceA, tokenA.decimals))}>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: "pointer" }} onClick={() => {
+                if (depositMode === "token1-only") return;
+                const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
+                setAmountA(displayAmount);
+                let maxWei = balanceA;
+                if (tokenA.symbol === "USDC") {
+                  maxWei = (balanceA * 99n) / 100n;
+                }
+                maxAmountAWeiRef.current = maxWei;
+              }}>
                 Balance: <span style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600 }}>{formatBalance(balanceA, tokenA.decimals)}</span>
               </span>
             )}
@@ -561,7 +601,15 @@ export function AddLiquidityV3Advanced() {
                 {tokenA ? (<><img src={tokenA.logoURI} alt={tokenA.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenA.symbol}</span></>) : <span>Select token</span>}
               </button>
               {balanceA !== null && tokenA && depositMode !== "token1-only" && (
-                <button className="v3a-max-btn" onClick={() => setAmountA(formatAmount(balanceA, tokenA.decimals))}>MAX</button>
+                <button className="v3a-max-btn" onClick={() => {
+                  const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
+                  setAmountA(displayAmount);
+                  let maxWei = balanceA;
+                  if (tokenA.symbol === "USDC") {
+                    maxWei = (balanceA * 99n) / 100n;
+                  }
+                  maxAmountAWeiRef.current = maxWei;
+                }}>MAX</button>
               )}
             </div>
           </div>
@@ -583,7 +631,16 @@ export function AddLiquidityV3Advanced() {
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <span className="v3a-label">Token B{token1Symbol && tokenB ? ` · ${tokenB.symbol === token1Symbol ? "token1" : "token0"}` : ""}</span>
             {balanceB !== null && tokenB && (
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: depositMode !== "token0-only" ? "pointer" : "default" }} onClick={() => depositMode !== "token0-only" && setAmountB(formatAmount(balanceB, tokenB.decimals))}>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: depositMode !== "token0-only" ? "pointer" : "default" }} onClick={() => {
+                if (depositMode === "token0-only") return;
+                const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
+                setAmountB(displayAmount);
+                let maxWei = balanceB;
+                if (tokenB.symbol === "USDC") {
+                  maxWei = (balanceB * 99n) / 100n;
+                }
+                maxAmountBWeiRef.current = maxWei;
+              }}>
                 Balance: <span style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600 }}>{formatBalance(balanceB, tokenB.decimals)}</span>
               </span>
             )}
@@ -595,7 +652,15 @@ export function AddLiquidityV3Advanced() {
                 {tokenB ? (<><img src={tokenB.logoURI} alt={tokenB.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenB.symbol}</span></>) : <span>Select token</span>}
               </button>
               {balanceB !== null && tokenB && depositMode !== "token0-only" && (
-                <button className="v3a-max-btn" onClick={() => setAmountB(formatAmount(balanceB, tokenB.decimals))}>MAX</button>
+                <button className="v3a-max-btn" onClick={() => {
+                  const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
+                  setAmountB(displayAmount);
+                  let maxWei = balanceB;
+                  if (tokenB.symbol === "USDC") {
+                    maxWei = (balanceB * 99n) / 100n;
+                  }
+                  maxAmountBWeiRef.current = maxWei;
+                }}>MAX</button>
               )}
             </div>
           </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useChainId } from "wagmi";
@@ -6,7 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
-import { formatAmount, parseAmount } from "@/lib/decimal-utils";
+import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import {
@@ -71,6 +71,9 @@ export function AddLiquidityV3Basic() {
 
   const [balanceA, setBalanceA] = useState<bigint | null>(null);
   const [balanceB, setBalanceB] = useState<bigint | null>(null);
+
+  const maxAmountAWeiRef = useRef<bigint | null>(null);
+  const maxAmountBWeiRef = useRef<bigint | null>(null);
 
   const [poolAddress, setPoolAddress]         = useState<string | null>(null);
   const [poolExists, setPoolExists]           = useState(false);
@@ -216,11 +219,24 @@ export function AddLiquidityV3Basic() {
       const tokenBERC20 = getERC20Address(tokenB, chainId);
       const [token0, token1] = sortTokens({ ...tokenA, address: tokenAERC20 }, { ...tokenB, address: tokenBERC20 });
       const isToken0A = tokenAERC20.toLowerCase() === token0.address.toLowerCase();
-      const amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
-      const amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
+      
+      // Use max amount refs if set, otherwise parse from input
+      let amount0Desired: bigint;
+      let amount1Desired: bigint;
+      
+      if (maxAmountAWeiRef.current !== null && maxAmountBWeiRef.current !== null) {
+        amount0Desired = isToken0A ? maxAmountAWeiRef.current : maxAmountBWeiRef.current;
+        amount1Desired = isToken0A ? maxAmountBWeiRef.current : maxAmountAWeiRef.current;
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+      } else {
+        amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
+        amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
+      }
+      
       let nativeAmount = 0n;
-      if (tokenAIsNative) nativeAmount = parseAmount(amountA, tokenA.decimals);
-      else if (tokenBIsNative) nativeAmount = parseAmount(amountB, tokenB.decimals);
+      if (tokenAIsNative) nativeAmount = isToken0A ? amount0Desired : amount1Desired;
+      else if (tokenBIsNative) nativeAmount = isToken0A ? amount1Desired : amount0Desired;
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const existingPool = await factory.getPool(token0.address, token1.address, selectedFee);
       const ZERO = "0x0000000000000000000000000000000000000000";
@@ -402,7 +418,15 @@ export function AddLiquidityV3Basic() {
                 {tokenA ? (<><img src={tokenA.logoURI} alt={tokenA.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenA.symbol}</span></>) : <span>Select token</span>}
               </button>
               {isConnected && tokenA && balanceA !== null && (
-                <button className="v3b-max-btn" onClick={() => setAmountA(formatUnits(balanceA, tokenA.decimals))}>MAX</button>
+                <button className="v3b-max-btn" onClick={() => {
+                  const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
+                  setAmountA(displayAmount);
+                  let maxWei = balanceA;
+                  if (tokenA.symbol === "USDC") {
+                    maxWei = (balanceA * 99n) / 100n;
+                  }
+                  maxAmountAWeiRef.current = maxWei;
+                }}>MAX</button>
               )}
             </div>
           </div>
@@ -446,7 +470,15 @@ export function AddLiquidityV3Basic() {
                 {tokenB ? (<><img src={tokenB.logoURI} alt={tokenB.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenB.symbol}</span></>) : <span>Select token</span>}
               </button>
               {isConnected && tokenB && balanceB !== null && !(poolExists && currentPrice) && (
-                <button className="v3b-max-btn" onClick={() => setAmountB(formatUnits(balanceB, tokenB.decimals))}>MAX</button>
+                <button className="v3b-max-btn" onClick={() => {
+                  const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
+                  setAmountB(displayAmount);
+                  let maxWei = balanceB;
+                  if (tokenB.symbol === "USDC") {
+                    maxWei = (balanceB * 99n) / 100n;
+                  }
+                  maxAmountBWeiRef.current = maxWei;
+                }}>MAX</button>
               )}
             </div>
           </div>

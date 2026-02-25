@@ -12,7 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, JsonRpcProvider, getAddress } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
-import { formatAmount, parseAmount } from "@/lib/decimal-utils";
+import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getSmartRouteQuote, type SmartRoutingResult } from "@/lib/smart-routing";
 import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
@@ -71,6 +71,7 @@ export default function Swap() {
 
   const abortControllerRef = useRef<AbortController | null>(null);
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const maxAmountWeiRef = useRef<bigint | null>(null);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -202,7 +203,8 @@ export default function Swap() {
     setIsSwapping(true);
     try {
       const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
-      const amountBigInt = parseAmount(amount, wrappedToken.decimals);
+      const amountBigInt = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(amount, wrappedToken.decimals);
+      maxAmountWeiRef.current = null;
       const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
       toast({ title: "Wrapping…" });
       const g = await wc.deposit.estimateGas({ value: amountBigInt });
@@ -222,7 +224,8 @@ export default function Swap() {
     setIsSwapping(true);
     try {
       const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
-      const amountBigInt = parseAmount(amount, wrappedToken.decimals);
+      const amountBigInt = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(amount, wrappedToken.decimals);
+      maxAmountWeiRef.current = null;
       const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
       toast({ title: "Unwrapping…" });
       const g = await wc.withdraw.estimateGas(amountBigInt);
@@ -261,7 +264,10 @@ export default function Swap() {
       }
       const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
       const bestQuote = smartRoutingResult.bestQuote;
-      const amountIn = parseAmount(fromAmount, fromToken.decimals);
+      // Use max balance in wei if MAX button was clicked, otherwise parse from string
+      const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
+      // Clear max amount ref after use
+      maxAmountWeiRef.current = null;
       const slippageBps = BigInt(Math.floor(slippage * 100));
       const minAmountOut = (bestQuote.outputAmount * (10000n - slippageBps)) / 10000n;
       const deadlineTimestamp = Math.floor(Date.now() / 1000) + deadline * 60;
@@ -627,7 +633,16 @@ export default function Swap() {
                   {isConnected && fromToken && (
                     <span className="sw-bal">
                       Balance:{" "}
-                      <span className="sw-bal-val" onClick={() => fromBalance && setFromAmount(formatAmount(fromBalance.value, fromBalance.decimals))}>
+                      <span className="sw-bal-val" onClick={() => {
+                        if (!fromBalance) return;
+                        const displayAmount = getMaxAmount(fromBalance.value, fromBalance.decimals, fromToken.symbol);
+                        setFromAmount(displayAmount);
+                        let maxWei = fromBalance.value;
+                        if (fromToken.symbol === "USDC") {
+                          maxWei = (fromBalance.value * 99n) / 100n;
+                        }
+                        maxAmountWeiRef.current = maxWei;
+                      }}>
                         {fromBalFmt}
                       </span>
                     </span>
@@ -650,7 +665,16 @@ export default function Swap() {
                       ) : <span>Select</span>}
                     </button>
                     {isConnected && fromBalance && fromToken && (
-                      <button data-testid="button-max-from" className="sw-max-btn" onClick={() => setFromAmount(formatAmount(fromBalance.value, fromBalance.decimals))}>MAX</button>
+                      <button data-testid="button-max-from" className="sw-max-btn" onClick={() => {
+                        const displayAmount = getMaxAmount(fromBalance.value, fromBalance.decimals, fromToken.symbol);
+                        setFromAmount(displayAmount);
+                        // Store full precision balance for transaction
+                        let maxWei = fromBalance.value;
+                        if (fromToken.symbol === "USDC") {
+                          maxWei = (fromBalance.value * 99n) / 100n; // 1% gas buffer
+                        }
+                        maxAmountWeiRef.current = maxWei;
+                      }}>MAX</button>
                     )}
                   </div>
                 </div>

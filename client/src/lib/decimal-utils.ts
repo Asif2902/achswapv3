@@ -1,8 +1,38 @@
 import { formatUnits, parseUnits } from "ethers";
 
+const NATIVE_USDC_SYMBOL = "USDC";
+
 /**
- * Format a numeric value to a fixed decimal display string
- * Handles very large and very small numbers gracefully
+ * Get the max amount string for MAX button
+ * - Returns formatted display string (6 decimals for UI)
+ * - For native USDC, uses 99% of balance for gas buffer
+ * - Ensures precision is preserved when parsed back
+ */
+export function getMaxAmount(balanceWei: bigint, decimals: number, symbol: string): string {
+  if (balanceWei === 0n || balanceWei === undefined) return "0";
+
+  let maxBalance = balanceWei;
+
+  // For native USDC, keep 1% for gas buffer
+  if (symbol === NATIVE_USDC_SYMBOL) {
+    maxBalance = (balanceWei * 99n) / 100n;
+  }
+
+  // Format to 6 decimals for display, but ensure it can be parsed back correctly
+  const formatted = formatUnits(maxBalance, decimals);
+  const num = parseFloat(formatted);
+  
+  if (num === 0) return "0";
+  if (num > 0 && num < 0.000001) {
+    return num.toExponential(2);
+  }
+  
+  return parseFloat(num.toFixed(6)).toString();
+}
+
+/**
+ * Format a numeric value for DISPLAY only (6 decimal places)
+ * Does NOT preserve full precision - use for UI display only
  */
 export function formatAmount(value: string | number | bigint, decimals: number): string {
   try {

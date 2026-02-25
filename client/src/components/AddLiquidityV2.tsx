@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Plus, ExternalLink, RefreshCw, Info, Droplets, AlertTriangle } from "lucide-react";
@@ -8,7 +8,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
 import { defaultTokens, getTokensByChainId } from "@/data/tokens";
-import { formatAmount, parseAmount, calculateRatio } from "@/lib/decimal-utils";
+import { formatAmount, parseAmount, calculateRatio, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import { getRpcUrl, FALLBACK_RPC, fetchWithRetry } from "@/lib/config";
@@ -34,6 +34,9 @@ export function AddLiquidityV2() {
   const [reserveA, setReserveA] = useState<bigint>(0n);
   const [reserveB, setReserveB] = useState<bigint>(0n);
   const [isLoadingPair, setIsLoadingPair] = useState(false);
+
+  const maxAmountAWeiRef = useRef<bigint | null>(null);
+  const maxAmountBWeiRef = useRef<bigint | null>(null);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -189,8 +192,10 @@ export function AddLiquidityV2() {
     setIsAdding(true);
     try {
       if (!address || !window.ethereum) throw new Error("Please connect your wallet");
-      const amountADesired = parseAmount(amountA, tokenA.decimals);
-      const amountBDesired = parseAmount(amountB, tokenB.decimals);
+      const amountADesired = maxAmountAWeiRef.current !== null ? maxAmountAWeiRef.current : parseAmount(amountA, tokenA.decimals);
+      const amountBDesired = maxAmountBWeiRef.current !== null ? maxAmountBWeiRef.current : parseAmount(amountB, tokenB.decimals);
+      maxAmountAWeiRef.current = null;
+      maxAmountBWeiRef.current = null;
       if (balanceA && amountADesired > balanceA.value) throw new Error(`Insufficient ${tokenA.symbol} balance`);
       if (balanceB && amountBDesired > balanceB.value) throw new Error(`Insufficient ${tokenB.symbol} balance`);
       const provider = new BrowserProvider(window.ethereum);
@@ -474,7 +479,15 @@ export function AddLiquidityV2() {
                 )}
               </button>
               {isConnected && tokenA && balanceA && (
-                <button className="alv2-max-btn" onClick={() => setAmountA(balanceAFormatted)}>MAX</button>
+                <button className="alv2-max-btn" onClick={() => {
+                  const displayAmount = getMaxAmount(balanceA.value, balanceA.decimals, tokenA.symbol);
+                  setAmountA(displayAmount);
+                  let maxWei = balanceA.value;
+                  if (tokenA.symbol === "USDC") {
+                    maxWei = (balanceA.value * 99n) / 100n;
+                  }
+                  maxAmountAWeiRef.current = maxWei;
+                }}>MAX</button>
               )}
             </div>
           </div>
@@ -525,7 +538,15 @@ export function AddLiquidityV2() {
                 )}
               </button>
               {isConnected && tokenB && balanceB && !poolHasLiquidity && (
-                <button className="alv2-max-btn" onClick={() => setAmountB(balanceBFormatted)}>MAX</button>
+                <button className="alv2-max-btn" onClick={() => {
+                  const displayAmount = getMaxAmount(balanceB.value, balanceB.decimals, tokenB.symbol);
+                  setAmountB(displayAmount);
+                  let maxWei = balanceB.value;
+                  if (tokenB.symbol === "USDC") {
+                    maxWei = (balanceB.value * 99n) / 100n;
+                  }
+                  maxAmountBWeiRef.current = maxWei;
+                }}>MAX</button>
               )}
             </div>
           </div>
