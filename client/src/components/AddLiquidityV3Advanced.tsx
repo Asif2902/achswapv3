@@ -252,7 +252,7 @@ export function AddLiquidityV3Advanced() {
           const totalLiquidityUSD = price ? (isToken0A ? amount0USD + amount1USD * price : amount1USD + amount0USD * price) : amount0USD + amount1USD;
           
           if (totalLiquidityUSD > 0) {
-            const apr = calculateAPRFromVolume(volData.volumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);
+            const apr = calculateAPRFromVolume(volData.annualizedVolumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);
             setEstimatedAPR(apr);
           } else {
             setEstimatedAPR(null);
@@ -770,10 +770,10 @@ export function AddLiquidityV3Advanced() {
             {poolExists && (
               <div style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 11, padding: "10px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div>
-                  <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>Est. APR (7D)</span>
+                  <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>Est. APR</span>
                   {volumeData && (
                     <div style={{ fontSize: 9, color: "rgba(255,255,255,0.3)", marginTop: 2 }}>
-                      7D Vol: ${volumeData.volumeUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })} (15x)
+                      7D Vol: ${volumeData.weeklyVolumeUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                     </div>
                   )}
                 </div>

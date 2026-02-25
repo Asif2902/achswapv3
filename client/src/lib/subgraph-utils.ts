@@ -1,6 +1,7 @@
 import { SUBGRAPH_CONFIG } from "./config";
 
 const SEVEN_DAYS_AGO = 7;
+const VOLUME_ADJUSTMENT = 10;
 
 const POOL_VOLUME_QUERY = `
 query GetPoolVolume($poolId: ID!, $daysAgo: Int!) {
@@ -44,7 +45,8 @@ interface SubgraphPoolData {
 }
 
 export interface PoolVolumeData {
-  volumeUSD: number;
+  weeklyVolumeUSD: number;
+  annualizedVolumeUSD: number;
   liquidity: string;
   token0Decimals: number;
   token1Decimals: number;
@@ -83,13 +85,19 @@ export async function fetchPoolVolume(poolAddress: string): Promise<PoolVolumeDa
     const pool = result.data.pool;
     const dayDatas = result.data.poolDayDatas || [];
     
-    const totalVolumeUSD = dayDatas.reduce((sum, day) => sum + parseFloat(day.volumeUSD || "0"), 0);
-    const adjustedVolumeUSD = totalVolumeUSD * 15;
+    const weeklyVolumeUSD = dayDatas.reduce((sum, day) => sum + parseFloat(day.volumeUSD || "0"), 0);
+    const annualizedVolumeUSD = weeklyVolumeUSD * VOLUME_ADJUSTMENT * 52;
 
-    console.log("Pool volume data:", { pool: pool.id, dayCount: dayDatas.length, totalVolumeUSD, adjustedVolumeUSD });
+    console.log("Pool volume data:", { 
+      pool: pool.id, 
+      dayCount: dayDatas.length, 
+      weeklyVolumeUSD, 
+      annualizedVolumeUSD 
+    });
 
     return {
-      volumeUSD: adjustedVolumeUSD,
+      weeklyVolumeUSD,
+      annualizedVolumeUSD,
       liquidity: pool.liquidity,
       token0Decimals: parseInt(pool.token0.decimals),
       token1Decimals: parseInt(pool.token1.decimals),
@@ -103,17 +111,16 @@ export async function fetchPoolVolume(poolAddress: string): Promise<PoolVolumeDa
 }
 
 export function calculateAPRFromVolume(
-  volumeUSD: number,
+  annualizedVolumeUSD: number,
   liquidityUSD: number,
   fee: number,
   inRangeRatio: number
 ): number {
-  if (liquidityUSD <= 0 || volumeUSD <= 0) {
+  if (liquidityUSD <= 0 || annualizedVolumeUSD <= 0) {
     return 0;
   }
 
-  const annualizedVolume = volumeUSD * 52;
-  const feeRevenue = annualizedVolume * (fee / 10000) * inRangeRatio;
+  const feeRevenue = annualizedVolumeUSD * (fee / 10000) * inRangeRatio;
   const apr = (feeRevenue / liquidityUSD) * 100;
 
   return Math.min(apr, 99999);

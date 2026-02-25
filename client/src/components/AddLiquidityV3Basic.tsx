@@ -201,7 +201,7 @@ export function AddLiquidityV3Basic() {
         const totalLiquidityUSD = currentPrice ? (isToken0A ? amount0USD + amount1USD * currentPrice : amount1USD + amount0USD * currentPrice) : amount0USD + amount1USD;
         
         if (totalLiquidityUSD > 0) {
-          const apr = calculateAPRFromVolume(volData.volumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);
+          const apr = calculateAPRFromVolume(volData.annualizedVolumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);
           setEstimatedAPR(apr);
         } else {
           setEstimatedAPR(null);
@@ -583,7 +583,7 @@ export function AddLiquidityV3Basic() {
                 </div>
                 {volumeData && (
                   <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>
-                    7D Vol: ${volumeData.volumeUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })} (15x adj.)
+                    Est. 7D Vol: ${volumeData.weeklyVolumeUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })}
                   </div>
                 )}
               </div>
