@@ -9,6 +9,7 @@ import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tok
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
+import { fetchPairVolume, calculateAPRFromVolume, type PoolVolumeData } from "@/lib/subgraph-utils";
 import {
   NONFUNGIBLE_POSITION_MANAGER_ABI,
   V3_FACTORY_ABI,
@@ -85,6 +86,9 @@ export function AddLiquidityV3Basic() {
   const [token0Symbol, setToken0Symbol]       = useState<string>("");
   const [token1Symbol, setToken1Symbol]       = useState<string>("");
   const [poolHealth, setPoolHealth]           = useState<PoolHealthResult | null>(null);
+  const [volumeData, setVolumeData]           = useState<PoolVolumeData | null>(null);
+  const [estimatedAPR, setEstimatedAPR]       = useState<number | null>(null);
+  const [isLoadingAPR, setIsLoadingAPR]       = useState(false);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -177,7 +181,36 @@ export function AddLiquidityV3Basic() {
       const sqrtPriceX96: bigint = slot0[0]; const tick = Number(slot0[1]);
       setCurrentSqrtPriceX96(sqrtPriceX96); setCurrentTick(tick); setActiveLiquidity(liq);
       setCurrentPrice(sqrtPriceX96 === 0n ? null : sqrtPriceX96ToPrice(sqrtPriceX96, tok0.decimals, tok1.decimals));
-    } catch (e) { console.error("Pool state error:", e); setPoolExists(false); setCurrentPrice(null); setCurrentSqrtPriceX96(null); setCurrentTick(null); setActiveLiquidity(null); }
+      
+      // Fetch volume and calculate APR
+      setIsLoadingAPR(true);
+      const volData = await fetchPairVolume(addr);
+      setVolumeData(volData);
+      
+      const isToken0A = erc20A.toLowerCase() === tok0.address.toLowerCase();
+      
+      if (volData && tick !== null && liq > 0n) {
+        const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
+        const inRange = tick >= tickLower && tick <= tickUpper;
+        const inRangeRatio = inRange ? 1 : 0.5;
+        
+        const amountAWei = maxAmountAWeiRef.current || (amountA ? parseAmount(amountA, tokenA.decimals) : 0n);
+        const amountBWei = maxAmountBWeiRef.current || (amountB ? parseAmount(amountB, tokenB.decimals) : 0n);
+        const amount0USD = Number(formatUnits(isToken0A ? amountAWei : amountBWei, isToken0A ? tokenA.decimals : tokenB.decimals)) * (isToken0A ? volData.token0Price : volData.token1Price);
+        const amount1USD = Number(formatUnits(isToken0A ? amountBWei : amountAWei, isToken0A ? tokenB.decimals : tokenA.decimals)) * (isToken0A ? volData.token1Price : volData.token0Price);
+        const totalLiquidityUSD = amount0USD + amount1USD;
+        
+        if (totalLiquidityUSD > 0) {
+          const apr = calculateAPRFromVolume(volData.volumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);
+          setEstimatedAPR(apr);
+        } else {
+          setEstimatedAPR(null);
+        }
+      } else {
+        setEstimatedAPR(null);
+      }
+      setIsLoadingAPR(false);
+    } catch (e) { console.error("Pool state error:", e); setPoolExists(false); setCurrentPrice(null); setCurrentSqrtPriceX96(null); setCurrentTick(null); setActiveLiquidity(null); setVolumeData(null); setEstimatedAPR(null); }
     finally { setIsCheckingPool(false); }
   };
 
@@ -533,6 +566,28 @@ export function AddLiquidityV3Basic() {
                 </button>
               </div>
             </div>
+
+            {poolExists && (
+              <div className="v3b-stat-row" style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 8, padding: "10px 14px", marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                  <span style={{ fontSize: 12, color: "rgba(255,255,255,0.6)" }}>Est. APR (7D)</span>
+                  {isLoadingAPR ? (
+                    <RefreshCw style={{ width: 14, height: 14, color: "#6b7280" }} className="v3b-spin" />
+                  ) : estimatedAPR !== null ? (
+                    <span style={{ fontSize: 16, fontWeight: 800, color: estimatedAPR > 100 ? "#4ade80" : estimatedAPR > 10 ? "#22c55e" : "#86efac" }}>
+                      {estimatedAPR.toFixed(2)}%
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>—</span>
+                  )}
+                </div>
+                {volumeData && (
+                  <div style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>
+                    7D Vol: ${volumeData.volumeUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })} (15x adj.)
+                  </div>
+                )}
+              </div>
+            )}
 
             {poolExists && currentPrice && (
               <>

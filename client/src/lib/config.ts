@@ -1,6 +1,13 @@
 import { BrowserProvider } from "ethers";
 
 const alchemyKey = import.meta.env.VITE_ALCHEMY_KEY;
+const subgraphKey = import.meta.env.VITE_SUBGRAP_KEY;
+
+export const SUBGRAPH_CONFIG = {
+  arcSwapTVL: subgraphKey
+    ? `https://api.studio.thegraph.com/query/1742338/arcswaptvl/version/latest?subgraph_version=latest&api_key=${subgraphKey}`
+    : 'https://api.studio.thegraph.com/query/1742338/arcswaptvl/version/latest',
+};
 
 export const RPC_CONFIG = {
   arcTestnet: alchemyKey 

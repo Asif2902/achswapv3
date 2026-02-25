@@ -9,6 +9,7 @@ import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tok
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
+import { fetchPairVolume, calculateAPRFromVolume, type PoolVolumeData } from "@/lib/subgraph-utils";
 import {
   NONFUNGIBLE_POSITION_MANAGER_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS,
 } from "@/lib/abis/v3";
@@ -115,6 +116,9 @@ export function AddLiquidityV3Advanced() {
   const [balanceB, setBalanceB] = useState<bigint | null>(null);
   const [amountBIsAuto, setAmountBIsAuto] = useState(false);
   const [autoCalcAmounts, setAutoCalcAmounts] = useState<{ amount0: bigint; amount1: bigint; forAmountA: string } | null>(null);
+  const [volumeData, setVolumeData] = useState<PoolVolumeData | null>(null);
+  const [estimatedAPR, setEstimatedAPR] = useState<number | null>(null);
+  const [isLoadingAPR, setIsLoadingAPR] = useState(false);
 
   const maxAmountAWeiRef = useRef<bigint | null>(null);
   const maxAmountBWeiRef = useRef<bigint | null>(null);
@@ -226,6 +230,39 @@ export function AddLiquidityV3Advanced() {
       const sqrtPX96: bigint = slot0[0]; const tick = Number(slot0[1]);
       const price = sqrtPriceX96ToPrice(sqrtPX96, tok0.decimals, tok1.decimals);
       setCurrentSqrtPriceX96(sqrtPX96); setCurrentPrice(price); setCurrentTick(tick); setPoolLiquidity(liq);
+      
+      // Fetch volume and calculate APR
+      setIsLoadingAPR(true);
+      const volData = await fetchPairVolume(poolAddr);
+      setVolumeData(volData);
+      
+      if (volData && tick !== null && liq > 0n) {
+        const tl = minTick ? parseInt(minTick) : null;
+        const tu = maxTick ? parseInt(maxTick) : null;
+        const inRange = tl !== null && tu !== null && tick >= tl && tick <= tu;
+        const inRangeRatio = inRange ? 1 : 0.5;
+        
+        const amountAWei = maxAmountAWeiRef.current || (amountA ? parseAmount(amountA, tokenA.decimals) : 0n);
+        const amountBWei = maxAmountBWeiRef.current || (amountB ? parseAmount(amountB, tokenB.decimals) : 0n);
+        const s = getSortedTokens();
+        if (s) {
+          const { isToken0A } = s;
+          const amount0USD = Number(formatUnits(isToken0A ? amountAWei : amountBWei, isToken0A ? tokenA.decimals : tokenB.decimals)) * (isToken0A ? volData.token0Price : volData.token1Price);
+          const amount1USD = Number(formatUnits(isToken0A ? amountBWei : amountAWei, isToken0A ? tokenB.decimals : tokenA.decimals)) * (isToken0A ? volData.token1Price : volData.token0Price);
+          const totalLiquidityUSD = amount0USD + amount1USD;
+          
+          if (totalLiquidityUSD > 0) {
+            const apr = calculateAPRFromVolume(volData.volumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);
+            setEstimatedAPR(apr);
+          } else {
+            setEstimatedAPR(null);
+          }
+        }
+      } else {
+        setEstimatedAPR(null);
+      }
+      setIsLoadingAPR(false);
+      
       try {
         const [res0, res1] = await Promise.all([new Contract(tok0.address, ERC20_ABI, provider).balanceOf(poolAddr), new Contract(tok1.address, ERC20_ABI, provider).balanceOf(poolAddr)]);
         setPoolToken0Reserve(res0 as bigint); setPoolToken1Reserve(res1 as bigint);
@@ -726,6 +763,29 @@ export function AddLiquidityV3Advanced() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "rgba(255,255,255,0.03)", borderRadius: 11, border: "1px solid rgba(255,255,255,0.06)" }}>
                 <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>Current price · tick {currentTick}</span>
                 <span style={{ fontSize: 13, fontWeight: 700, color: "white", fontFamily: "monospace" }}>{currentPrice.toFixed(6)}</span>
+              </div>
+            )}
+
+            {/* APR Display */}
+            {poolExists && (
+              <div style={{ background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)", borderRadius: 11, padding: "10px 12px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>Est. APR (7D)</span>
+                  {volumeData && (
+                    <div style={{ fontSize: 9, color: "rgba(255,255,255,0.3)", marginTop: 2 }}>
+                      7D Vol: ${volumeData.volumeUSD.toLocaleString(undefined, { maximumFractionDigits: 0 })} (15x)
+                    </div>
+                  )}
+                </div>
+                {isLoadingAPR ? (
+                  <RefreshCw style={{ width: 14, height: 14, color: "#6b7280" }} className="v3a-spin" />
+                ) : estimatedAPR !== null ? (
+                  <span style={{ fontSize: 16, fontWeight: 800, color: estimatedAPR > 100 ? "#4ade80" : estimatedAPR > 10 ? "#22c55e" : "#86efac" }}>
+                    {estimatedAPR.toFixed(2)}%
+                  </span>
+                ) : (
+                  <span style={{ fontSize: 12, color: "rgba(255,255,255,0.3)" }}>—</span>
+                )}
               </div>
             )}
 
