@@ -6,6 +6,8 @@ import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import { Contract, BrowserProvider } from "ethers";
 import { getContractsForChain } from "@/lib/contracts";
+import { getErrorForToast } from "@/lib/error-utils";
+import { createAlchemyProvider } from "@/lib/config";
 import { NONFUNGIBLE_POSITION_MANAGER_ABI, V3_POOL_ABI, V3_FACTORY_ABI, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getTokensFromLiquidity } from "@/lib/v3-liquidity-math";
@@ -101,10 +103,10 @@ export function RemoveLiquidityV3() {
     "/img/logos/unknown-token.png";
 
   const loadPositions = async () => {
-    if (!address || !contracts || !window.ethereum) return;
+    if (!address || !contracts || !chainId) return;
     setIsLoading(true);
     try {
-      const provider = new BrowserProvider(window.ethereum);
+      const provider = createAlchemyProvider(chainId);
       const positionManager = new Contract(
         contracts.v3.nonfungiblePositionManager,
         NONFUNGIBLE_POSITION_MANAGER_ABI,
@@ -338,9 +340,11 @@ export function RemoveLiquidityV3() {
       });
     } catch (error: any) {
       console.error("Collect fees error:", error);
+      const errorInfo = getErrorForToast(error);
       toast({
-        title: "Failed to collect fees",
-        description: error.reason || error.message || "Transaction failed",
+        title: errorInfo.title,
+        description: errorInfo.description,
+        rawError: errorInfo.rawError,
         variant: "destructive",
       });
     } finally {
@@ -444,9 +448,11 @@ export function RemoveLiquidityV3() {
       setPercentage([50]);
     } catch (error: any) {
       console.error("Remove liquidity error:", error);
+      const errorInfo = getErrorForToast(error);
       toast({
-        title: "Failed to remove liquidity",
-        description: error.reason || error.message || "Transaction failed",
+        title: errorInfo.title,
+        description: errorInfo.description,
+        rawError: errorInfo.rawError,
         variant: "destructive",
       });
     } finally {

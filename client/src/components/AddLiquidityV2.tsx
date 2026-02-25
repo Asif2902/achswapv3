@@ -10,6 +10,8 @@ import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
 import { defaultTokens, getTokensByChainId } from "@/data/tokens";
 import { formatAmount, parseAmount, calculateRatio } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
+import { getErrorForToast } from "@/lib/error-utils";
+import { getRpcUrl, FALLBACK_RPC, fetchWithRetry } from "@/lib/config";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -126,8 +128,26 @@ export function AddLiquidityV2() {
       if (!address || address.length !== 42 || !address.startsWith('0x')) throw new Error("Invalid token address format");
       const exists = tokens.find(t => t.address.toLowerCase() === address.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` }); return exists; }
-      const rpcUrl = chainId === 2201 ? 'https://rpc.testnet.stable.xyz/' : 'https://rpc.testnet.arc.network';
-      const provider = new BrowserProvider({ request: async ({ method, params }: any) => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) }); const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result; } });
+      const primaryRpcUrl = getRpcUrl(chainId);
+      const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
+      const provider = new BrowserProvider({
+        request: async ({ method, params }: any) => {
+          let url = primaryRpcUrl;
+          try {
+            const r = await fetchWithRetry(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) }, 3);
+            const d = await r.json();
+            if (d.error) throw new Error(d.error.message);
+            return d.result;
+          } catch {
+            console.warn('Primary RPC failed, trying fallback');
+            url = fallbackRpcUrl;
+            const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
+            const d = await r.json();
+            if (d.error) throw new Error(d.error.message);
+            return d.result;
+          }
+        },
+      });
       const contract = new Contract(address, ERC20_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), 10000))]) as [string, string, bigint];
       if (!chainId) throw new Error("Chain ID not available");
@@ -139,7 +159,8 @@ export function AddLiquidityV2() {
       toast({ title: "Token imported", description: `${symbol} has been added to your token list` });
       return newToken;
     } catch (error: any) {
-      toast({ title: "Import failed", description: error.message || "Unable to fetch token data", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
       return null;
     }
   };
@@ -231,7 +252,8 @@ export function AddLiquidityV2() {
       toast({ title: "Liquidity added!", description: (<div className="flex items-center gap-2"><span>Successfully added to {tokenA.symbol}/{tokenB.symbol} pool</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(tx.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
     } catch (error: any) {
       console.error('Add liquidity error:', error);
-      toast({ title: "Failed to add liquidity", description: error.reason || error.message || "An error occurred", variant: "destructive" });
+      const errorInfo = getErrorForToast(error);
+      toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
     } finally { setIsAdding(false); }
   };
 

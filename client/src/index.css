@@ -150,6 +150,39 @@
       transform: translateX(0);
     }
   }
+  
+  /* Toast progress bar animation */
+  .animate-shrink {
+    width: 100%;
+    transform-origin: left;
+    animation-name: shrink;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+  
+  @keyframes shrink {
+    from {
+      transform: scaleX(1);
+    }
+    to {
+      transform: scaleX(0);
+    }
+  }
+  
+  /* Reduced motion */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+    
+    .animate-shrink {
+      animation: none !important;
+    }
+  }
 }
 
 /* LIGHT MODE */

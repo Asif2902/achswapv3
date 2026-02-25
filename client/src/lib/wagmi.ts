@@ -1,5 +1,6 @@
 import { getDefaultConfig } from '@rainbow-me/rainbowkit';
 import { defineChain } from 'viem';
+import { RPC_CONFIG } from './config';
 
 // Define ARC Testnet chain
 export const arcTestnet = defineChain({
@@ -12,10 +13,10 @@ export const arcTestnet = defineChain({
   },
   rpcUrls: {
     default: {
-      http: ['https://rpc.testnet.arc.network'],
+      http: [RPC_CONFIG.arcTestnet],
     },
     public: {
-      http: ['https://rpc.testnet.arc.network'],
+      http: [RPC_CONFIG.arcTestnet],
     },
   },
   blockExplorers: {

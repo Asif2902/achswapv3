@@ -1,16 +1,27 @@
-import { useState, useEffect } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
-import { ArrowDown, Minus, Wallet } from "lucide-react";
 import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
-import { defaultTokens, getTokensByChainId } from "@/data/tokens";
-import { formatAmount, parseAmount } from "@/lib/decimal-utils";
+import { getTokensByChainId, getWrappedAddress } from "@/data/tokens";
+import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
+import { getErrorForToast } from "@/lib/error-utils";
+import { createAlchemyProvider } from "@/lib/config";
+import {
+  ExternalLink,
+  Trash2,
+  Coins,
+  RefreshCw,
+  Wallet,
+  ChevronRight,
+  ArrowDown,
+  Plus,
+  Search,
+} from "lucide-react";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -18,7 +29,12 @@ const ERC20_ABI = [
   "function decimals() view returns (uint8)",
   "function balanceOf(address) view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
+];
+
+const FACTORY_ABI = [
+  "function allPairsLength() view returns (uint256)",
+  "function allPairs(uint256) view returns (address)",
+  "function getPair(address, address) view returns (address)",
 ];
 
 const PAIR_ABI = [
@@ -26,425 +42,881 @@ const PAIR_ABI = [
   "function token1() view returns (address)",
   "function getReserves() view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
   "function totalSupply() view returns (uint256)",
+  "function balanceOf(address) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
 ];
 
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+interface V2Position {
+  pairAddress: string;
+  token0Address: string;
+  token0Symbol: string;
+  token0Decimals: number;
+  token1Address: string;
+  token1Symbol: string;
+  token1Decimals: number;
+  liquidity: bigint;
+  amount0: bigint;
+  amount1: bigint;
+}
+
 export function RemoveLiquidityV2() {
-  const [percentage, setPercentage] = useState([25]);
+  const [positions, setPositions] = useState<V2Position[]>([]);
+  const [selectedPosition, setSelectedPosition] = useState<V2Position | null>(null);
+  const [percentage, setPercentage] = useState([50]);
+  const [isLoading, setIsLoading] = useState(false);
   const [isRemoving, setIsRemoving] = useState(false);
-  const [tokenA, setTokenA] = useState<Token | null>(null);
-  const [tokenB, setTokenB] = useState<Token | null>(null);
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importTokenA, setImportTokenA] = useState<Token | null>(null);
+  const [importTokenB, setImportTokenB] = useState<Token | null>(null);
   const [showTokenASelector, setShowTokenASelector] = useState(false);
   const [showTokenBSelector, setShowTokenBSelector] = useState(false);
   const [tokens, setTokens] = useState<Token[]>([]);
-  const [pairAddress, setPairAddress] = useState<string | null>(null);
-  const [lpBalance, setLpBalance] = useState<string>("0");
-  const [lpBalanceRaw, setLpBalanceRaw] = useState<bigint>(0n);
-  const [amountAToReceive, setAmountAToReceive] = useState<string>("0");
-  const [amountBToReceive, setAmountBToReceive] = useState<string>("0");
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
 
+  // FIX 1: Track imported positions in a ref so they survive loadPositions() overwrites
+  const importedPositionsRef = useRef<V2Position[]>([]);
+
+  // FIX 5: Track whether we've done the initial auto-select, avoids stale-closure bug
+  const hasAutoSelected = useRef(false);
+
   const contracts = chainId ? getContractsForChain(chainId) : null;
+  const knownTokens = getTokensByChainId(chainId);
 
-  useEffect(() => { loadTokens(); }, [chainId]);
-  useEffect(() => {
-    if (tokenA && tokenB && address && tokens.length > 0) fetchPairInfo();
-  }, [tokenA, tokenB, address, tokens]);
+  const getTokenLogo = (symbol: string): string =>
+    knownTokens.find((t) => t.symbol === symbol)?.logoURI ??
+    "/img/logos/unknown-token.png";
 
-  useEffect(() => {
-    const calculateAmountsToReceive = async () => {
-      if (!pairAddress || !tokenA || !tokenB || parseFloat(lpBalance) <= 0) {
-        setAmountAToReceive("0"); setAmountBToReceive("0"); return;
-      }
-      try {
-        if (!window.ethereum) return;
-        const provider = new BrowserProvider(window.ethereum);
-        const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
-        const [reserve0, reserve1] = await pairContract.getReserves();
-        const totalSupply = await pairContract.totalSupply();
-        const token0Address = await pairContract.token0();
-        const liquidityToRemove = lpBalanceRaw * BigInt(percentage[0]) / 100n;
-        const amount0 = liquidityToRemove * reserve0 / totalSupply;
-        const amount1 = liquidityToRemove * reserve1 / totalSupply;
-        const wrappedSymbol = chainId === 2201 ? 'wUSDT' : 'wUSDC';
-        const wrappedToken = tokens.find(t => t.symbol === wrappedSymbol);
-        const wrappedAddress = wrappedToken?.address || '';
-        const tokenAAddress = tokenA.address === "0x0000000000000000000000000000000000000000" ? wrappedAddress : tokenA.address;
-        const tokenBAddress = tokenB.address === "0x0000000000000000000000000000000000000000" ? wrappedAddress : tokenB.address;
-        const isTokenAToken0 = tokenAAddress.toLowerCase() === token0Address.toLowerCase();
-        if (isTokenAToken0) {
-          setAmountAToReceive(formatAmount(amount0, tokenA.decimals));
-          setAmountBToReceive(formatAmount(amount1, tokenB.decimals));
-        } else {
-          setAmountAToReceive(formatAmount(amount1, tokenA.decimals));
-          setAmountBToReceive(formatAmount(amount0, tokenB.decimals));
-        }
-      } catch (error) {
-        console.error('Failed to calculate amounts:', error);
-        setAmountAToReceive("0"); setAmountBToReceive("0");
-      }
-    };
-    calculateAmountsToReceive();
-  }, [pairAddress, tokenA, tokenB, lpBalanceRaw, percentage, tokens]);
+  // FIX 7: Get wrapped native address from your existing utility instead of hardcoding
+  const wNative = chainId ? getWrappedAddress(chainId, ZERO_ADDRESS) : null;
 
-  const loadTokens = async () => {
-    try {
-      if (!chainId) return;
-      const chainTokens = getTokensByChainId(chainId);
-      const imported = localStorage.getItem('importedTokens');
-      const importedTokens = imported ? JSON.parse(imported) : [];
-      const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
-      const processedDefaultTokens = chainTokens.map(token => ({ ...token, logoURI: token.logoURI || `/img/logos/unknown-token.png` }));
-      const processedImportedTokens = chainImportedTokens.map((token: Token) => ({ ...token, logoURI: token.logoURI || `/img/logos/unknown-token.png` }));
-      setTokens([...processedDefaultTokens, ...processedImportedTokens]);
-    } catch (error) { console.error('Failed to load tokens:', error); }
+  // Resolve the address to pass to the factory (native -> wrapped)
+  const resolveForFactory = (tokenAddress: string): string => {
+    if (tokenAddress === ZERO_ADDRESS && wNative) return wNative;
+    return tokenAddress;
   };
 
-  const handleImportToken = async (address: string): Promise<Token | null> => {
-    try {
-      if (!address || address.length !== 42 || !address.startsWith('0x')) throw new Error("Invalid token address format");
-      if (!window.ethereum) throw new Error("Please connect your wallet to import tokens");
-      const provider = new BrowserProvider(window.ethereum);
-      const contract = new Contract(address, ERC20_ABI, provider);
-      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), 10000));
-      const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), timeout]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
-      const newToken: Token = { address, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
-      const exists = tokens.find(t => t.address.toLowerCase() === address.toLowerCase());
-      if (exists) throw new Error("Token already in list");
-      const imported = localStorage.getItem('importedTokens');
-      const importedTokens = imported ? JSON.parse(imported) : [];
-      const alreadyImported = importedTokens.find((t: Token) => t.address.toLowerCase() === address.toLowerCase());
-      if (!alreadyImported) { importedTokens.push(newToken); localStorage.setItem('importedTokens', JSON.stringify(importedTokens)); }
-      setTokens(prev => [...prev, newToken]);
-      toast({ title: "Token imported", description: `${symbol} has been added to your token list` });
-      return newToken;
-    } catch (error: any) {
-      console.error('Token import error:', error);
-      toast({ title: "Import failed", description: error.message || "Failed to import token", variant: "destructive" });
-      return null;
+  // Load tokens
+  useEffect(() => {
+    if (!chainId) return;
+    const chainTokens = getTokensByChainId(chainId);
+    const imported = localStorage.getItem("importedTokens");
+    const importedTokens = imported ? JSON.parse(imported) : [];
+    const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
+    const processed = chainTokens.map((token) => ({
+      ...token,
+      logoURI: token.logoURI || "/img/logos/unknown-token.png",
+    }));
+    setTokens([...processed, ...chainImportedTokens]);
+  }, [chainId]);
+
+  // FIX 5 + 6: useCallback with correct deps; stale selectedPosition replaced by ref
+  const loadPositions = useCallback(async () => {
+    if (!address || !contracts || !chainId) {
+      console.log("loadPositions: missing requirements", {
+        address: !!address,
+        contracts: !!contracts,
+        chainId: !!chainId,
+      });
+      return;
     }
-  };
-
-  const fetchPairInfo = async () => {
+    setIsLoading(true);
     try {
-      if (!window.ethereum || !tokenA || !tokenB) return;
-      const provider = new BrowserProvider(window.ethereum);
-      if (!contracts) return;
-      const FACTORY_ABI = ["function getPair(address tokenA, address tokenB) view returns (address pair)"];
+      console.log("Loading V2 positions for:", address);
+      const provider = createAlchemyProvider(chainId);
       const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
-      const wrappedSymbol = chainId === 2201 ? 'wUSDT' : 'wUSDC';
-      const wrappedToken = tokens.find(t => t.symbol === wrappedSymbol);
-      const wusdcAddress = wrappedToken?.address;
-      if (!wusdcAddress) { setPairAddress(null); setLpBalance("0"); return; }
-      const isTokenANative = tokenA.address === "0x0000000000000000000000000000000000000000";
-      const isTokenBNative = tokenB.address === "0x0000000000000000000000000000000000000000";
-      const tokenAAddress = isTokenANative ? wusdcAddress : tokenA.address;
-      const tokenBAddress = isTokenBNative ? wusdcAddress : tokenB.address;
-      const pair = await factory.getPair(tokenAAddress, tokenBAddress);
-      if (pair === "0x0000000000000000000000000000000000000000") {
-        setPairAddress(null); setLpBalance("0");
-        toast({ title: "Pool not found", description: "No liquidity pool exists for this token pair", variant: "destructive" });
+
+      const pairsLength = await factory.allPairsLength();
+      console.log("Total V2 pairs:", pairsLength.toString());
+
+      // Cap the number of pairs to fetch to avoid too many RPC calls
+      const MAX_PAIRS = 50;
+      const pairsToFetch = Math.min(Number(pairsLength), MAX_PAIRS);
+
+      // Get pair addresses first (capped)
+      const pairAddresses: string[] = [];
+      for (let i = 0; i < pairsToFetch; i++) {
+        const pairAddr = await factory.allPairs(i);
+        pairAddresses.push(pairAddr);
+      }
+
+      console.log("Got all pair addresses:", pairAddresses.length);
+
+      // Check balances for all pairs in parallel
+      const pairContracts = pairAddresses.map(
+        (addr) => new Contract(addr, PAIR_ABI, provider)
+      );
+      const balances = await Promise.all(
+        pairContracts.map((pair) => pair.balanceOf(address))
+      );
+
+      // Filter pairs with balance
+      const positionsWithBalance = pairAddresses.filter((_, i) => balances[i] > 0n);
+      console.log("Pairs with balance:", positionsWithBalance.length);
+
+      const onChainPositions: V2Position[] = [];
+
+      for (const pairAddress of positionsWithBalance) {
+        const pair = new Contract(pairAddress, PAIR_ABI, provider);
+        const [token0Address, token1Address, reserves, totalSupply, liquidity] =
+          await Promise.all([
+            pair.token0(),
+            pair.token1(),
+            pair.getReserves(),
+            pair.totalSupply(),
+            pair.balanceOf(address),
+          ]);
+
+        const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
+        const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
+
+        const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
+          await Promise.all([
+            token0Contract.symbol(),
+            token0Contract.decimals(),
+            token1Contract.symbol(),
+            token1Contract.decimals(),
+          ]);
+
+        const amount0 = (liquidity * reserves.reserve0) / totalSupply;
+        const amount1 = (liquidity * reserves.reserve1) / totalSupply;
+
+        onChainPositions.push({
+          pairAddress,
+          token0Address,
+          token0Symbol,
+          token0Decimals: Number(token0Decimals),
+          token1Address,
+          token1Symbol,
+          token1Decimals: Number(token1Decimals),
+          liquidity,
+          amount0,
+          amount1,
+        });
+      }
+
+      // FIX 1: Merge on-chain positions with imported ones (deduplicated)
+      const merged = [
+        ...onChainPositions,
+        ...importedPositionsRef.current.filter(
+          (imp) =>
+            !onChainPositions.find(
+              (p) =>
+                p.pairAddress.toLowerCase() === imp.pairAddress.toLowerCase()
+            )
+        ),
+      ];
+
+      setPositions(merged);
+      console.log("Found V2 positions:", merged.length);
+
+      // FIX 5: Use ref to guard auto-select, no stale closure
+      if (merged.length > 0 && !hasAutoSelected.current) {
+        setSelectedPosition(merged[0]);
+        hasAutoSelected.current = true;
+      }
+    } catch (error) {
+      console.error("Failed to load V2 positions:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [address, contracts, chainId]); // selectedPosition intentionally NOT here — use ref instead
+
+  // FIX 6: loadPositions added to dep array
+  useEffect(() => {
+    if (isConnected && address) {
+      loadPositions();
+    }
+  }, [isConnected, address, loadPositions]);
+
+  const handleImportPool = async () => {
+    if (!importTokenA || !importTokenB || !contracts || !chainId) return;
+
+    try {
+      const provider = createAlchemyProvider(chainId);
+      const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
+
+      // FIX 7: Use resolveForFactory (wraps native -> wNative) instead of hardcoded address
+      const pairAddress = await factory.getPair(
+        resolveForFactory(importTokenA.address),
+        resolveForFactory(importTokenB.address)
+      );
+
+      if (pairAddress === ZERO_ADDRESS) {
+        toast({
+          title: "Pool not found",
+          description: "This pool does not exist",
+          variant: "destructive",
+        });
         return;
       }
-      setPairAddress(pair);
-      const pairContract = new Contract(pair, ERC20_ABI, provider);
-      const balance = await pairContract.balanceOf(address);
-      setLpBalanceRaw(balance);
-      setLpBalance(formatAmount(balance, 18));
+
+      const pair = new Contract(pairAddress, PAIR_ABI, provider);
+
+      const [token0Address, token1Address, reserves, totalSupply, balance] =
+        await Promise.all([
+          pair.token0(),
+          pair.token1(),
+          pair.getReserves(),
+          pair.totalSupply(),
+          pair.balanceOf(address),
+        ]);
+
+      if (balance === 0n) {
+        toast({
+          title: "No liquidity",
+          description: "You don't have LP tokens for this pool",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // FIX 3 + 4: Fetch token data from actual contracts, not from UI state
+      const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
+      const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
+
+      const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
+        await Promise.all([
+          token0Contract.symbol(),
+          token0Contract.decimals(),
+          token1Contract.symbol(),
+          token1Contract.decimals(),
+        ]);
+
+      const amount0 = (balance * reserves.reserve0) / totalSupply;
+      const amount1 = (balance * reserves.reserve1) / totalSupply;
+
+      // FIX 4: token1Address comes from pair.token1(), not inferred from UI state
+      const newPosition: V2Position = {
+        pairAddress,
+        token0Address,
+        token0Symbol,
+        token0Decimals: Number(token0Decimals),
+        token1Address,
+        token1Symbol,
+        token1Decimals: Number(token1Decimals),
+        liquidity: balance,
+        amount0,
+        amount1,
+      };
+
+      // FIX 1: Also push into the persistent ref so it survives future loadPositions() calls
+      importedPositionsRef.current = [
+        ...importedPositionsRef.current.filter(
+          (p) => p.pairAddress.toLowerCase() !== pairAddress.toLowerCase()
+        ),
+        newPosition,
+      ];
+
+      setPositions((prev) => {
+        const exists = prev.find(
+          (p) => p.pairAddress.toLowerCase() === pairAddress.toLowerCase()
+        );
+        if (exists) return prev;
+        return [...prev, newPosition];
+      });
+
+      setSelectedPosition(newPosition);
+      setShowImportModal(false);
+      setImportTokenA(null);
+      setImportTokenB(null);
+
+      toast({
+        title: "Pool imported",
+        description: `Added ${token0Symbol}/${token1Symbol} pool`,
+      });
     } catch (error) {
-      console.error('Failed to fetch pair info:', error);
-      toast({ title: "Error", description: "Failed to fetch pool information", variant: "destructive" });
+      console.error("Import failed:", error);
+      const errorInfo = getErrorForToast(error);
+      toast({
+        title: errorInfo.title,
+        description: errorInfo.description,
+        rawError: errorInfo.rawError,
+        variant: "destructive",
+      });
     }
   };
 
-  const handleRemoveLiquidity = async () => {
-    if (!tokenA || !tokenB || !pairAddress || parseFloat(lpBalance) <= 0) return;
+  const previewAmounts = selectedPosition
+    ? {
+        amount0: (selectedPosition.amount0 * BigInt(percentage[0])) / 100n,
+        amount1: (selectedPosition.amount1 * BigInt(percentage[0])) / 100n,
+      }
+    : null;
+
+  const handleRemove = async () => {
+    if (!selectedPosition || !address || !contracts || !window.ethereum) return;
+
     setIsRemoving(true);
     try {
-      if (!address || !window.ethereum) throw new Error("Please connect your wallet");
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      if (!contracts) throw new Error("Chain contracts not configured");
-      const ROUTER_ABI = [
-        "function removeLiquidity(address tokenA, address tokenB, uint liquidity, uint amountAMin, uint amountBMin, address to, uint deadline) external returns (uint amountA, uint amountB)",
-        "function removeLiquidityETH(address token, uint liquidity, uint amountTokenMin, uint amountETHMin, address to, uint deadline) external returns (uint amountToken, uint amountETH)"
+
+      const liquidityToRemove =
+        (selectedPosition.liquidity * BigInt(percentage[0])) / 100n;
+
+      // FIX 2: Approve LP tokens before calling removeLiquidity
+      toast({
+        title: "Approving LP token…",
+        description: "Please confirm in your wallet",
+      });
+      const pairContract = new Contract(selectedPosition.pairAddress, PAIR_ABI, signer);
+      const approveTx = await pairContract.approve(contracts.v2.router, liquidityToRemove);
+      await approveTx.wait();
+      toast({
+        title: "Approved",
+        description: "Now removing liquidity…",
+      });
+
+      const routerABI = [
+        "function removeLiquidity(address tokenA, address tokenB, uint256 liquidity, uint256 amountAMin, uint256 amountBMin, address to, uint256 deadline) returns (uint256 amountA, uint256 amountB)",
+        "function removeLiquidityETH(address token, uint256 liquidity, uint256 amountTokenMin, uint256 amountETHMin, address to, uint256 deadline) returns (uint256 amountToken, uint256 amountETH)",
       ];
-      const router = new Contract(contracts.v2.router, ROUTER_ABI, signer);
-      const pairContract = new Contract(pairAddress, ERC20_ABI, signer);
-      const liquidityToRemove = lpBalanceRaw * BigInt(percentage[0]) / 100n;
-      const allowance = await pairContract.allowance(address, contracts.v2.router);
-      if (allowance < liquidityToRemove) {
-        const approveGasEstimate = await pairContract.approve.estimateGas(contracts.v2.router, liquidityToRemove);
-        const approveGasLimit = (approveGasEstimate * 150n) / 100n;
-        const approveTx = await pairContract.approve(contracts.v2.router, liquidityToRemove, { gasLimit: approveGasLimit });
-        await approveTx.wait();
-      }
-      const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
-      const amountAMin = 0n; const amountBMin = 0n;
-      toast({ title: "Removing liquidity", description: `Removing ${percentage[0]}% of your liquidity` });
-      const isTokenANative = tokenA.address === "0x0000000000000000000000000000000000000000";
-      const isTokenBNative = tokenB.address === "0x0000000000000000000000000000000000000000";
-      const wrappedSymbol = chainId === 2201 ? 'wUSDT' : 'wUSDC';
-      const wrappedToken = tokens.find(t => t.symbol === wrappedSymbol);
-      const wrappedAddress = wrappedToken?.address;
-      if (!wrappedAddress) throw new Error(`${wrappedSymbol} token not found`);
-      const tokenAAddress = isTokenANative ? wrappedAddress : tokenA.address;
-      const tokenBAddress = isTokenBNative ? wrappedAddress : tokenB.address;
+
+      const router = new Contract(contracts.v2.router, routerABI, signer);
+      const deadline = Math.floor(Date.now() / 1000) + 600;
+
+      // Native token detection uses wNative since pair.token0()/token1() return wrapped addresses
+      const isToken0Native = wNative && selectedPosition.token0Address.toLowerCase() === wNative.toLowerCase();
+      const isToken1Native = wNative && selectedPosition.token1Address.toLowerCase() === wNative.toLowerCase();
+
       let tx;
-      if (isTokenANative || isTokenBNative) {
-        const token = isTokenANative ? tokenBAddress : tokenAAddress;
-        const gasEstimate = await router.removeLiquidityETH.estimateGas(token, liquidityToRemove, amountAMin, amountBMin, address, deadline);
-        const gasLimit = (gasEstimate * 150n) / 100n;
-        tx = await router.removeLiquidityETH(token, liquidityToRemove, amountAMin, amountBMin, address, deadline, { gasLimit });
+      
+      // Calculate expected amounts and apply slippage protection
+      const SLIPPAGE_TOLERANCE = 0.01; // 1% default slippage
+      const expected0 = (liquidityToRemove * selectedPosition.amount0) / selectedPosition.liquidity;
+      const expected1 = (liquidityToRemove * selectedPosition.amount1) / selectedPosition.liquidity;
+      const amount0Min = (expected0 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000))) / 10000n;
+      const amount1Min = (expected1 * BigInt(Math.floor((1 - SLIPPAGE_TOLERANCE) * 10000))) / 10000n;
+
+      if (isToken0Native || isToken1Native) {
+        // FIX 7: The non-native token address is used directly — no hardcoded wNative needed here
+        const token = isToken0Native
+          ? selectedPosition.token1Address
+          : selectedPosition.token0Address;
+        const amountTokenMin = isToken0Native ? amount1Min : amount0Min;
+        const amountETHMin = isToken0Native ? amount0Min : amount1Min;
+        tx = await router.removeLiquidityETH(
+          token,
+          liquidityToRemove,
+          amountTokenMin,
+          amountETHMin,
+          address,
+          deadline
+        );
       } else {
-        const gasEstimate = await router.removeLiquidity.estimateGas(tokenAAddress, tokenBAddress, liquidityToRemove, amountAMin, amountBMin, address, deadline);
-        const gasLimit = (gasEstimate * 150n) / 100n;
-        tx = await router.removeLiquidity(tokenAAddress, tokenBAddress, liquidityToRemove, amountAMin, amountBMin, address, deadline, { gasLimit });
+        tx = await router.removeLiquidity(
+          selectedPosition.token0Address,
+          selectedPosition.token1Address,
+          liquidityToRemove,
+          amount0Min,
+          amount1Min,
+          address,
+          deadline
+        );
       }
+
       await tx.wait();
-      toast({ title: "Liquidity removed!", description: `Successfully removed ${percentage[0]}% of your liquidity` });
-      setPercentage([25]);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      fetchPairInfo();
+
+      toast({
+        title: "Liquidity removed!",
+        description: `Removed ${percentage[0]}% of your V2 liquidity`,
+      });
+
+      setPercentage([50]);
+      await loadPositions();
     } catch (error: any) {
-      console.error('Remove liquidity error:', error);
-      toast({ title: "Failed to remove liquidity", description: error.reason || error.message || "An error occurred", variant: "destructive" });
+      console.error("Remove liquidity error:", error);
+      const errorInfo = getErrorForToast(error);
+      toast({
+        title: errorInfo.title,
+        description: errorInfo.description,
+        rawError: errorInfo.rawError,
+        variant: "destructive",
+      });
     } finally {
       setIsRemoving(false);
     }
   };
 
-  const hasPosition = pairAddress && parseFloat(lpBalance) > 0;
+  const fmt = (amount: bigint, decimals: number) => {
+    const val = formatAmount(amount, decimals);
+    return parseFloat(val).toFixed(4);
+  };
+
+  const fmtCompact = (amount: bigint, decimals: number) => {
+    const val = formatAmount(amount, decimals);
+    const n = parseFloat(val);
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(2)}K`;
+    return n.toFixed(2);
+  };
 
   return (
-    <div className="w-full max-w-md mx-auto px-3 py-4 sm:px-4 sm:py-8">
-      <Card className="border-border/40 shadow-xl backdrop-blur-sm bg-card/95 overflow-hidden">
-
-        {/* ── Header ── */}
-        <CardHeader className="px-4 pt-5 pb-4 sm:px-6 sm:pt-6">
-          <div className="flex items-center gap-2.5">
-            <div className="flex items-center justify-center w-8 h-8 rounded-xl bg-red-500/15 flex-shrink-0">
-              <Minus className="w-4 h-4 text-red-400" />
-            </div>
-            <div>
-              <CardTitle className="text-lg sm:text-xl font-bold leading-tight">
-                Remove Liquidity
-              </CardTitle>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Withdraw tokens from a V2 pool
-              </p>
-            </div>
+    <div className="w-full max-w-md mx-auto">
+      {/* ── Empty state + Import ── */}
+      {positions.length === 0 && !isLoading && (
+        <div className="flex flex-col items-center justify-center py-12 px-4 text-center">
+          <div
+            className="w-16 h-16 rounded-2xl flex items-center justify-center mb-4"
+            style={{
+              background: "rgba(255,255,255,0.04)",
+              border: "1px solid rgba(255,255,255,0.06)",
+            }}
+          >
+            <Wallet className="w-7 h-7 text-white/20" />
           </div>
-        </CardHeader>
+          <p className="text-sm font-medium text-white/60 mb-1">No V2 liquidity positions</p>
+          <p className="text-xs text-white/40 mb-6">Your V2 LP positions will appear here</p>
 
-        <CardContent className="px-4 pb-5 sm:px-6 sm:pb-6 space-y-4">
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all"
+            style={{
+              background: "rgba(99,102,241,0.12)",
+              border: "1px solid rgba(99,102,241,0.3)",
+              color: "#a5b4fc",
+            }}
+          >
+            <Plus className="w-4 h-4" />
+            Import Pool
+          </button>
+        </div>
+      )}
 
-          {/* ── Token Pair Selection ── */}
-          <div className="grid grid-cols-2 gap-2">
+      {/* ── Loading state ── */}
+      {isLoading && (
+        <div className="flex flex-col items-center justify-center py-12">
+          <RefreshCw className="w-6 h-6 text-white/40 animate-spin mb-3" />
+          <p className="text-xs text-white/40">Loading your positions...</p>
+        </div>
+      )}
+
+      {/* ── Positions list ── */}
+      {positions.length > 0 && (
+        <div className="space-y-3">
+          {/* Header with import button */}
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs font-semibold uppercase tracking-wider text-white/40">
+              Your V2 Pools ({positions.length})
+            </p>
             <button
-              data-testid="button-select-token-a"
-              onClick={() => setShowTokenASelector(true)}
-              className={`flex items-center gap-2 px-3 py-3 rounded-xl border transition-all text-left min-h-[52px] ${
-                tokenA
-                  ? "border-border/60 bg-muted/40 hover:bg-muted/60"
-                  : "border-dashed border-border/50 bg-muted/20 hover:bg-muted/40 hover:border-primary/40"
-              }`}
+              onClick={() => setShowImportModal(true)}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                color: "rgba(255,255,255,0.5)",
+              }}
             >
-              {tokenA ? (
-                <>
-                  <img
-                    src={tokenA.logoURI}
-                    alt={tokenA.symbol}
-                    className="w-7 h-7 rounded-full flex-shrink-0"
-                    onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
-                  />
-                  <div className="min-w-0">
-                    <p className="font-semibold text-sm leading-tight truncate">{tokenA.symbol}</p>
-                    <p className="text-[10px] text-muted-foreground leading-tight">Token A</p>
-                  </div>
-                </>
-              ) : (
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-muted-foreground">Select</p>
-                  <p className="text-[10px] text-muted-foreground">Token A</p>
-                </div>
-              )}
-            </button>
-
-            <button
-              data-testid="button-select-token-b"
-              onClick={() => setShowTokenBSelector(true)}
-              className={`flex items-center gap-2 px-3 py-3 rounded-xl border transition-all text-left min-h-[52px] ${
-                tokenB
-                  ? "border-border/60 bg-muted/40 hover:bg-muted/60"
-                  : "border-dashed border-border/50 bg-muted/20 hover:bg-muted/40 hover:border-primary/40"
-              }`}
-            >
-              {tokenB ? (
-                <>
-                  <img
-                    src={tokenB.logoURI}
-                    alt={tokenB.symbol}
-                    className="w-7 h-7 rounded-full flex-shrink-0"
-                    onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
-                  />
-                  <div className="min-w-0">
-                    <p className="font-semibold text-sm leading-tight truncate">{tokenB.symbol}</p>
-                    <p className="text-[10px] text-muted-foreground leading-tight">Token B</p>
-                  </div>
-                </>
-              ) : (
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-muted-foreground">Select</p>
-                  <p className="text-[10px] text-muted-foreground">Token B</p>
-                </div>
-              )}
+              <Plus className="w-3 h-3" />
+              Import
             </button>
           </div>
 
-          {/* ── Pool Position Info ── */}
-          {tokenA && tokenB && pairAddress && (
-            <>
-              {/* LP Balance pill */}
-              <div className="flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-muted/40 border border-border/40">
-                <span className="text-xs text-muted-foreground">Your LP tokens</span>
-                <span className="text-sm font-semibold tabular-nums">
-                  {parseFloat(lpBalance).toFixed(6)}
-                </span>
-              </div>
+          {positions.map((position) => {
+            const isSelected = selectedPosition?.pairAddress === position.pairAddress;
 
-              {/* ── Percentage Selector ── */}
-              <div className="rounded-xl border border-border/40 bg-muted/20 p-4 space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-muted-foreground">Remove amount</span>
-                  <span className="text-2xl font-bold text-primary tabular-nums">
-                    {percentage[0]}%
-                  </span>
-                </div>
-
-                <Slider
-                  data-testid="slider-remove-percentage"
-                  value={percentage}
-                  onValueChange={setPercentage}
-                  max={100}
-                  step={1}
-                  className="py-1"
-                />
-
-                {/* Quick % buttons */}
-                <div className="grid grid-cols-4 gap-1.5">
-                  {[25, 50, 75, 100].map((value) => (
-                    <button
-                      key={value}
-                      data-testid={`button-percentage-${value}`}
-                      onClick={() => setPercentage([value])}
-                      className={`py-2 rounded-lg text-xs font-semibold transition-all ${
-                        percentage[0] === value
-                          ? "bg-primary text-primary-foreground shadow-sm"
-                          : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground"
-                      }`}
-                    >
-                      {value === 100 ? "MAX" : `${value}%`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* ── Arrow divider ── */}
-              <div className="flex justify-center">
-                <div className="flex items-center justify-center w-8 h-8 rounded-full bg-muted/60 border border-border/40">
-                  <ArrowDown className="h-4 w-4 text-muted-foreground" />
-                </div>
-              </div>
-
-              {/* ── You Will Receive ── */}
-              <div className="rounded-xl border border-border/40 bg-muted/20 overflow-hidden">
-                <p className="px-4 pt-3 pb-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                  You will receive
-                </p>
-                <div className="divide-y divide-border/30">
-                  {[
-                    { token: tokenA, amount: amountAToReceive },
-                    { token: tokenB, amount: amountBToReceive },
-                  ].map(({ token, amount }) => (
-                    <div key={token.symbol} className="flex items-center justify-between px-4 py-3">
-                      <div className="flex items-center gap-2.5">
+            return (
+              <div key={position.pairAddress}>
+                {/* Position card */}
+                <button
+                  onClick={() => setSelectedPosition(position)}
+                  className="w-full text-left rounded-2xl p-4 transition-all"
+                  style={{
+                    background: isSelected
+                      ? "rgba(59,130,246,0.1)"
+                      : "rgba(255,255,255,0.025)",
+                    border: `1px solid ${
+                      isSelected
+                        ? "rgba(59,130,246,0.3)"
+                        : "rgba(255,255,255,0.06)"
+                    }`,
+                  }}
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="flex -space-x-2">
                         <img
-                          src={token.logoURI}
-                          alt={token.symbol}
-                          className="w-7 h-7 rounded-full"
-                          onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
+                          src={getTokenLogo(position.token0Symbol)}
+                          alt={position.token0Symbol}
+                          className="w-8 h-8 rounded-full border-2 border-[#0f1117] object-cover"
+                          onError={(e) => {
+                            e.currentTarget.src = "/img/logos/unknown-token.png";
+                          }}
                         />
-                        <span className="font-semibold text-sm">{token.symbol}</span>
+                        <img
+                          src={getTokenLogo(position.token1Symbol)}
+                          alt={position.token1Symbol}
+                          className="w-8 h-8 rounded-full border-2 border-[#0f1117] object-cover"
+                          onError={(e) => {
+                            e.currentTarget.src = "/img/logos/unknown-token.png";
+                          }}
+                        />
                       </div>
-                      <span className="font-semibold text-sm tabular-nums">
-                        {parseFloat(amount).toFixed(6)}
-                      </span>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-bold text-white">
+                            {position.token0Symbol}/{position.token1Symbol}
+                          </span>
+                          <span
+                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full"
+                            style={{
+                              background: "rgba(99,102,241,0.15)",
+                              color: "#a5b4fc",
+                              border: "1px solid rgba(99,102,241,0.25)",
+                            }}
+                          >
+                            V2
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-white/40 mt-0.5">
+                          {fmtCompact(position.liquidity, 18)} LP
+                        </p>
+                      </div>
                     </div>
-                  ))}
-                </div>
+                    <ChevronRight
+                      className={`w-4 h-4 text-white/30 transition-transform duration-200 ${
+                        isSelected ? "rotate-90" : ""
+                      }`}
+                    />
+                  </div>
+                </button>
+
+                {/* Expanded detail */}
+                {isSelected && (
+                  <div
+                    className="mt-2 rounded-2xl overflow-hidden"
+                    style={{
+                      background: "rgba(255,255,255,0.02)",
+                      border: "1px solid rgba(255,255,255,0.06)",
+                    }}
+                  >
+                    {/* Liquidity value */}
+                    <div
+                      className="px-4 py-3"
+                      style={{ background: "rgba(255,255,255,0.02)" }}
+                    >
+                      <div className="flex items-center gap-1.5 mb-2.5">
+                        <Coins className="w-3 h-3 text-indigo-400/70" />
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-white/50">
+                          Liquidity Value
+                        </span>
+                      </div>
+                      <div className="flex gap-6">
+                        <div className="flex items-center gap-2">
+                          <img
+                            src={getTokenLogo(position.token0Symbol)}
+                            alt={position.token0Symbol}
+                            className="w-5 h-5 rounded-full flex-shrink-0"
+                            onError={(e) => {
+                              e.currentTarget.src = "/img/logos/unknown-token.png";
+                            }}
+                          />
+                          <div>
+                            <p className="text-sm font-semibold text-white tabular-nums">
+                              {fmt(position.amount0, position.token0Decimals)}
+                            </p>
+                            <p className="text-[11px] text-white/40">
+                              {position.token0Symbol}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <img
+                            src={getTokenLogo(position.token1Symbol)}
+                            alt={position.token1Symbol}
+                            className="w-5 h-5 rounded-full flex-shrink-0"
+                            onError={(e) => {
+                              e.currentTarget.src = "/img/logos/unknown-token.png";
+                            }}
+                          />
+                          <div>
+                            <p className="text-sm font-semibold text-white tabular-nums">
+                              {fmt(position.amount1, position.token1Decimals)}
+                            </p>
+                            <p className="text-[11px] text-white/40">
+                              {position.token1Symbol}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Percentage selector */}
+                    <div
+                      className="px-4 py-3"
+                      style={{ background: "rgba(255,255,255,0.02)" }}
+                    >
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="text-sm font-medium text-white/60">
+                          Remove amount
+                        </span>
+                        <span className="text-2xl font-bold text-indigo-400 tabular-nums">
+                          {percentage[0]}%
+                        </span>
+                      </div>
+
+                      <Slider
+                        value={percentage}
+                        onValueChange={setPercentage}
+                        max={100}
+                        step={1}
+                        className="py-1"
+                      />
+
+                      <div className="grid grid-cols-4 gap-1.5 mt-3">
+                        {[25, 50, 75, 100].map((value) => (
+                          <button
+                            key={value}
+                            onClick={() => setPercentage([value])}
+                            className={`py-2.5 rounded-xl text-xs font-semibold transition-all min-h-[44px] flex items-center justify-center touch-manipulation ${
+                              percentage[0] === value
+                                ? "text-white shadow-sm"
+                                : "text-white/40 hover:text-white/70 hover:bg-white/[0.05]"
+                            }`}
+                            style={
+                              percentage[0] === value
+                                ? {
+                                    background:
+                                      "rgba(59, 130, 246, 0.8)",
+                                    border: "1px solid rgba(59, 130, 246, 0.5)",
+                                  }
+                                : {
+                                    background: "rgba(255,255,255,0.04)",
+                                    border: "1px solid rgba(255,255,255,0.08)",
+                                  }
+                            }
+                          >
+                            {value === 100 ? "MAX" : `${value}%`}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Preview */}
+                    {previewAmounts &&
+                      (previewAmounts.amount0 > 0n || previewAmounts.amount1 > 0n) && (
+                        <div
+                          className="px-4 py-3"
+                          style={{ background: "rgba(255,255,255,0.02)" }}
+                        >
+                          <div className="flex items-center gap-1.5 mb-2.5">
+                            <ArrowDown className="w-3 h-3 text-indigo-400/70" />
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-white/50">
+                              You will receive
+                            </span>
+                          </div>
+                          <div className="flex gap-6">
+                            <div className="flex items-center gap-2">
+                              <img
+                                src={getTokenLogo(position.token0Symbol)}
+                                alt={position.token0Symbol}
+                                className="w-5 h-5 rounded-full flex-shrink-0"
+                                onError={(e) => {
+                                  e.currentTarget.src = "/img/logos/unknown-token.png";
+                                }}
+                              />
+                              <div>
+                                <p className="text-sm font-semibold text-white tabular-nums">
+                                  {fmtCompact(
+                                    previewAmounts.amount0,
+                                    position.token0Decimals
+                                  )}
+                                </p>
+                                <p className="text-[11px] text-white/40">
+                                  {position.token0Symbol}
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <img
+                                src={getTokenLogo(position.token1Symbol)}
+                                alt={position.token1Symbol}
+                                className="w-5 h-5 rounded-full flex-shrink-0"
+                                onError={(e) => {
+                                  e.currentTarget.src = "/img/logos/unknown-token.png";
+                                }}
+                              />
+                              <div>
+                                <p className="text-sm font-semibold text-white tabular-nums">
+                                  {fmtCompact(
+                                    previewAmounts.amount1,
+                                    position.token1Decimals
+                                  )}
+                                </p>
+                                <p className="text-[11px] text-white/40">
+                                  {position.token1Symbol}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                    {/* Remove button */}
+                    <div className="p-4">
+                      <button
+                        onClick={handleRemove}
+                        disabled={isRemoving || percentage[0] === 0}
+                        className="w-full py-3.5 rounded-xl text-sm font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        style={{
+                          background: "linear-gradient(135deg, #ef4444, #dc2626)",
+                          color: "white",
+                          boxShadow: "0 4px 14px rgba(239,68,68,0.3)",
+                        }}
+                      >
+                        {isRemoving ? (
+                          <span className="flex items-center justify-center gap-2">
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            Removing...
+                          </span>
+                        ) : (
+                          `Remove ${percentage[0]}%`
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
-            </>
-          )}
+            );
+          })}
+        </div>
+      )}
 
-          {/* ── Empty state when no pair ── */}
-          {tokenA && tokenB && !pairAddress && (
-            <div className="text-center py-4 text-sm text-muted-foreground">
-              No liquidity pool found for this pair
+      {/* ── Import Modal ── */}
+      {showImportModal && (
+        <>
+          <div
+            className="fixed inset-0 z-50"
+            style={{
+              background: "rgba(0,0,0,0.72)",
+              backdropFilter: "blur(8px)",
+            }}
+            onClick={() => setShowImportModal(false)}
+          />
+          <div className="fixed z-50 left-4 right-4 top-1/2 -translate-y-1/2 sm:left-auto sm:right-auto sm:top-auto sm:bottom-0 sm:left-1/2 sm:-translate-x-1/2 sm:translate-y-0 sm:w-full sm:max-w-md">
+            <div
+              className="rounded-2xl p-5"
+              style={{
+                background: "linear-gradient(160deg, #0f1117 0%, #0c0e13 100%)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                boxShadow: "0 -4px 48px rgba(0,0,0,0.7)",
+              }}
+            >
+              <div className="flex items-center justify-between mb-5">
+                <div>
+                  <h3 className="text-base font-bold text-white">Import V2 Pool</h3>
+                  <p className="text-[11px] text-white/40 mt-0.5">
+                    Select token pair to view your position
+                  </p>
+                </div>
+                <button
+                  onClick={() => setShowImportModal(false)}
+                  className="w-8 h-8 rounded-xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/8 transition-all"
+                >
+                  ×
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                <button
+                  onClick={() => setShowTokenASelector(true)}
+                  className="w-full flex items-center gap-3 p-3 rounded-xl border transition-all"
+                  style={{
+                    background: importTokenA
+                      ? "rgba(255,255,255,0.04)"
+                      : "rgba(255,255,255,0.02)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                  }}
+                >
+                  {importTokenA ? (
+                    <>
+                      <img
+                        src={importTokenA.logoURI}
+                        alt={importTokenA.symbol}
+                        className="w-7 h-7 rounded-full"
+                      />
+                      <span className="font-semibold text-white">
+                        {importTokenA.symbol}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-sm text-white/40">Select token A</span>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => setShowTokenBSelector(true)}
+                  className="w-full flex items-center gap-3 p-3 rounded-xl border transition-all"
+                  style={{
+                    background: importTokenB
+                      ? "rgba(255,255,255,0.04)"
+                      : "rgba(255,255,255,0.02)",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                  }}
+                >
+                  {importTokenB ? (
+                    <>
+                      <img
+                        src={importTokenB.logoURI}
+                        alt={importTokenB.symbol}
+                        className="w-7 h-7 rounded-full"
+                      />
+                      <span className="font-semibold text-white">
+                        {importTokenB.symbol}
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-sm text-white/40">Select token B</span>
+                  )}
+                </button>
+              </div>
+
+              <button
+                onClick={handleImportPool}
+                disabled={!importTokenA || !importTokenB}
+                className="w-full mt-4 py-3.5 rounded-xl text-sm font-bold transition-all disabled:opacity-50"
+                style={{
+                  background:
+                    importTokenA && importTokenB
+                      ? "rgba(59, 130, 246, 0.8)"
+                      : "rgba(255,255,255,0.08)",
+                  color:
+                    importTokenA && importTokenB
+                      ? "white"
+                      : "rgba(255,255,255,0.3)",
+                }}
+              >
+                Load Pool
+              </button>
             </div>
-          )}
+          </div>
+        </>
+      )}
 
-          {/* ── Action Button ── */}
-          {isConnected ? (
-            <Button
-              data-testid="button-remove-liquidity"
-              onClick={handleRemoveLiquidity}
-              disabled={!tokenA || !tokenB || !pairAddress || parseFloat(lpBalance) <= 0 || isRemoving}
-              className="w-full h-12 text-base font-semibold bg-gradient-to-r from-red-500 to-rose-600 hover:from-red-500/90 hover:to-rose-600/90 shadow-lg disabled:opacity-40 disabled:cursor-not-allowed transition-all text-white"
-            >
-              {isRemoving ? (
-                <span className="flex items-center gap-2">
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Removing…
-                </span>
-              ) : (
-                "Remove Liquidity"
-              )}
-            </Button>
-          ) : (
-            <Button
-              data-testid="button-connect-wallet"
-              disabled
-              variant="outline"
-              className="w-full h-12 text-base font-semibold gap-2"
-            >
-              <Wallet className="w-4 h-4" />
-              Connect Wallet
-            </Button>
-          )}
-
-          <p className="text-center text-xs text-muted-foreground leading-relaxed">
-            Removing liquidity returns your tokens and any earned fees
-          </p>
-        </CardContent>
-      </Card>
-
+      {/* Token Selectors */}
       <TokenSelector
         open={showTokenASelector}
         onClose={() => setShowTokenASelector(false)}
-        onSelect={(token) => { setTokenA(token); setShowTokenASelector(false); }}
+        onSelect={(token) => {
+          setImportTokenA(token);
+          setShowTokenASelector(false);
+        }}
         tokens={tokens}
-        onImport={handleImportToken}
       />
       <TokenSelector
         open={showTokenBSelector}
         onClose={() => setShowTokenBSelector(false)}
-        onSelect={(token) => { setTokenB(token); setShowTokenBSelector(false); }}
+        onSelect={(token) => {
+          setImportTokenB(token);
+          setShowTokenBSelector(false);
+        }}
         tokens={tokens}
-        onImport={handleImportToken}
       />
     </div>
   );

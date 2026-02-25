@@ -7,6 +7,7 @@ import { ArrowDownUp } from "lucide-react";
 import { useAccount, useBalance } from "wagmi";
 import { formatUnits, parseUnits } from "ethers";
 import { useToast } from "@/hooks/use-toast";
+import { getErrorForToast } from "@/lib/error-utils";
 import type { Token } from "@shared/schema";
 
 interface WrapUnwrapModalProps {
@@ -54,9 +55,11 @@ export function WrapUnwrapModal({
         description: `Wrapped ${wrapAmount} USDC to wUSDC`,
       });
     } catch (error: any) {
+      const errorInfo = getErrorForToast(error);
       toast({
-        title: "Error",
-        description: error.message || "Failed to wrap tokens",
+        title: errorInfo.title,
+        description: errorInfo.description,
+        rawError: errorInfo.rawError,
         variant: "destructive",
       });
     } finally {
@@ -76,9 +79,11 @@ export function WrapUnwrapModal({
         description: `Unwrapped ${unwrapAmount} wUSDC to USDC`,
       });
     } catch (error: any) {
+      const errorInfo = getErrorForToast(error);
       toast({
-        title: "Error",
-        description: error.message || "Failed to unwrap tokens",
+        title: errorInfo.title,
+        description: errorInfo.description,
+        rawError: errorInfo.rawError,
         variant: "destructive",
       });
     } finally {
