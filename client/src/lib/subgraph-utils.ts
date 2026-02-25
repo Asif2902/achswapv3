@@ -2,6 +2,9 @@ import { SUBGRAPH_CONFIG } from "./config";
 
 const SEVEN_DAYS_AGO = 7;
 const VOLUME_ADJUSTMENT = 10;
+const CACHE_DURATION = 5 * 60 * 1000;
+
+const volumeCache = new Map<string, { data: PoolVolumeData; timestamp: number }>();
 
 const POOL_VOLUME_QUERY = `
 query GetPoolVolume($poolId: ID!, $daysAgo: Int!) {
@@ -51,7 +54,24 @@ export interface PoolVolumeData {
   token1Symbol: string;
 }
 
+function getCachedVolume(poolAddress: string): PoolVolumeData | null {
+  const cached = volumeCache.get(poolAddress.toLowerCase());
+  if (cached && Date.now() - cached.timestamp < CACHE_DURATION) {
+    console.log("Using cached volume for:", poolAddress);
+    return cached.data;
+  }
+  volumeCache.delete(poolAddress.toLowerCase());
+  return null;
+}
+
+function setCachedVolume(poolAddress: string, data: PoolVolumeData): void {
+  volumeCache.set(poolAddress.toLowerCase(), { data, timestamp: Date.now() });
+}
+
 export async function fetchPoolVolume(poolAddress: string): Promise<PoolVolumeData | null> {
+  const cached = getCachedVolume(poolAddress);
+  if (cached) return cached;
+
   try {
     const response = await fetch(SUBGRAPH_CONFIG.arcSwapTVL, {
       method: "POST",
@@ -85,14 +105,7 @@ export async function fetchPoolVolume(poolAddress: string): Promise<PoolVolumeDa
     const weeklyVolumeUSD = dayDatas.reduce((sum, day) => sum + parseFloat(day.volumeUSD || "0"), 0);
     const annualizedVolumeUSD = weeklyVolumeUSD * VOLUME_ADJUSTMENT * 52;
 
-    console.log("Pool volume data:", { 
-      pool: pool.id, 
-      dayCount: dayDatas.length, 
-      weeklyVolumeUSD, 
-      annualizedVolumeUSD 
-    });
-
-    return {
+    const volumeData: PoolVolumeData = {
       weeklyVolumeUSD,
       annualizedVolumeUSD,
       token0Decimals: parseInt(pool.token0.decimals),
@@ -100,10 +113,20 @@ export async function fetchPoolVolume(poolAddress: string): Promise<PoolVolumeDa
       token0Symbol: pool.token0.symbol,
       token1Symbol: pool.token1.symbol
     };
+
+    setCachedVolume(poolAddress, volumeData);
+    
+    console.log("Fetched fresh volume:", { pool: pool.id, weeklyVolumeUSD, annualizedVolumeUSD });
+
+    return volumeData;
   } catch (error) {
     console.error("Error fetching pool volume:", error);
     return null;
   }
+}
+
+export function clearVolumeCache(): void {
+  volumeCache.clear();
 }
 
 export interface PositionParams {
@@ -127,7 +150,6 @@ export function calculateAPR(params: PositionParams, annualizedVolumeUSD: number
   const positionValueUSD = (token0Amount * token0Price) + (token1Amount * token1Price);
   if (positionValueUSD < 0.01) return 0;
 
-  const userRangeWidth = tickUpper - tickLower;
   const feeDecimal = fee / 10000;
   
   const inRange = currentTick >= tickLower && currentTick <= tickUpper;
