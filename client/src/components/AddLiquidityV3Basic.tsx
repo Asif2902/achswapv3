@@ -9,7 +9,7 @@ import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tok
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
-import { fetchPairVolume, calculateAPRFromVolume, type PoolVolumeData } from "@/lib/subgraph-utils";
+import { fetchPoolVolume, calculateAPRFromVolume, type PoolVolumeData } from "@/lib/subgraph-utils";
 import {
   NONFUNGIBLE_POSITION_MANAGER_ABI,
   V3_FACTORY_ABI,
@@ -184,7 +184,7 @@ export function AddLiquidityV3Basic() {
       
       // Fetch volume and calculate APR
       setIsLoadingAPR(true);
-      const volData = await fetchPairVolume(addr);
+      const volData = await fetchPoolVolume(addr);
       setVolumeData(volData);
       
       const isToken0A = erc20A.toLowerCase() === tok0.address.toLowerCase();
@@ -196,9 +196,9 @@ export function AddLiquidityV3Basic() {
         
         const amountAWei = maxAmountAWeiRef.current || (amountA ? parseAmount(amountA, tokenA.decimals) : 0n);
         const amountBWei = maxAmountBWeiRef.current || (amountB ? parseAmount(amountB, tokenB.decimals) : 0n);
-        const amount0USD = Number(formatUnits(isToken0A ? amountAWei : amountBWei, isToken0A ? tokenA.decimals : tokenB.decimals)) * (isToken0A ? volData.token0Price : volData.token1Price);
-        const amount1USD = Number(formatUnits(isToken0A ? amountBWei : amountAWei, isToken0A ? tokenB.decimals : tokenA.decimals)) * (isToken0A ? volData.token1Price : volData.token0Price);
-        const totalLiquidityUSD = amount0USD + amount1USD;
+        const amount0USD = Number(formatUnits(isToken0A ? amountAWei : amountBWei, isToken0A ? tokenA.decimals : tokenB.decimals));
+        const amount1USD = Number(formatUnits(isToken0A ? amountBWei : amountAWei, isToken0A ? tokenB.decimals : tokenA.decimals));
+        const totalLiquidityUSD = currentPrice ? (isToken0A ? amount0USD + amount1USD * currentPrice : amount1USD + amount0USD * currentPrice) : amount0USD + amount1USD;
         
         if (totalLiquidityUSD > 0) {
           const apr = calculateAPRFromVolume(volData.volumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);

@@ -9,7 +9,7 @@ import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tok
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
-import { fetchPairVolume, calculateAPRFromVolume, type PoolVolumeData } from "@/lib/subgraph-utils";
+import { fetchPoolVolume, calculateAPRFromVolume, type PoolVolumeData } from "@/lib/subgraph-utils";
 import {
   NONFUNGIBLE_POSITION_MANAGER_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS,
 } from "@/lib/abis/v3";
@@ -233,7 +233,7 @@ export function AddLiquidityV3Advanced() {
       
       // Fetch volume and calculate APR
       setIsLoadingAPR(true);
-      const volData = await fetchPairVolume(poolAddr);
+      const volData = await fetchPoolVolume(poolAddr);
       setVolumeData(volData);
       
       if (volData && tick !== null && liq > 0n) {
@@ -247,9 +247,9 @@ export function AddLiquidityV3Advanced() {
         const s = getSortedTokens();
         if (s) {
           const { isToken0A } = s;
-          const amount0USD = Number(formatUnits(isToken0A ? amountAWei : amountBWei, isToken0A ? tokenA.decimals : tokenB.decimals)) * (isToken0A ? volData.token0Price : volData.token1Price);
-          const amount1USD = Number(formatUnits(isToken0A ? amountBWei : amountAWei, isToken0A ? tokenB.decimals : tokenA.decimals)) * (isToken0A ? volData.token1Price : volData.token0Price);
-          const totalLiquidityUSD = amount0USD + amount1USD;
+          const amount0USD = Number(formatUnits(isToken0A ? amountAWei : amountBWei, isToken0A ? tokenA.decimals : tokenB.decimals));
+          const amount1USD = Number(formatUnits(isToken0A ? amountBWei : amountAWei, isToken0A ? tokenB.decimals : tokenA.decimals));
+          const totalLiquidityUSD = price ? (isToken0A ? amount0USD + amount1USD * price : amount1USD + amount0USD * price) : amount0USD + amount1USD;
           
           if (totalLiquidityUSD > 0) {
             const apr = calculateAPRFromVolume(volData.volumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);
