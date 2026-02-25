@@ -9,7 +9,7 @@ import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tok
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
-import { fetchPoolVolume, calculateAPRFromVolume, type PoolVolumeData } from "@/lib/subgraph-utils";
+import { fetchPoolVolume, calculateAPR, type PoolVolumeData } from "@/lib/subgraph-utils";
 import {
   NONFUNGIBLE_POSITION_MANAGER_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS,
 } from "@/lib/abis/v3";
@@ -239,24 +239,32 @@ export function AddLiquidityV3Advanced() {
       if (volData && tick !== null && liq > 0n) {
         const tl = minTick ? parseInt(minTick) : null;
         const tu = maxTick ? parseInt(maxTick) : null;
-        const inRange = tl !== null && tu !== null && tick >= tl && tick <= tu;
-        const inRangeRatio = inRange ? 1 : 0.5;
         
         const amountAWei = maxAmountAWeiRef.current || (amountA ? parseAmount(amountA, tokenA.decimals) : 0n);
         const amountBWei = maxAmountBWeiRef.current || (amountB ? parseAmount(amountB, tokenB.decimals) : 0n);
         const s = getSortedTokens();
-        if (s) {
+        if (s && tl !== null && tu !== null) {
           const { isToken0A } = s;
-          const amount0USD = Number(formatUnits(isToken0A ? amountAWei : amountBWei, isToken0A ? tokenA.decimals : tokenB.decimals));
-          const amount1USD = Number(formatUnits(isToken0A ? amountBWei : amountAWei, isToken0A ? tokenB.decimals : tokenA.decimals));
-          const totalLiquidityUSD = price ? (isToken0A ? amount0USD + amount1USD * price : amount1USD + amount0USD * price) : amount0USD + amount1USD;
+          const amount0 = Number(formatUnits(isToken0A ? amountAWei : amountBWei, isToken0A ? tokenA.decimals : tokenB.decimals));
+          const amount1 = Number(formatUnits(isToken0A ? amountBWei : amountAWei, isToken0A ? tokenB.decimals : tokenA.decimals));
           
-          if (totalLiquidityUSD > 0) {
-            const apr = calculateAPRFromVolume(volData.annualizedVolumeUSD, totalLiquidityUSD, selectedFee, inRangeRatio);
-            setEstimatedAPR(apr);
-          } else {
-            setEstimatedAPR(null);
-          }
+          const token0Price = price || 1;
+          const token1Price = price ? 1 / price : 1;
+          
+          const apr = calculateAPR({
+            token0Amount: isToken0A ? amount0 : amount1,
+            token1Amount: isToken0A ? amount1 : amount0,
+            token0Price,
+            token1Price,
+            tickLower: tl,
+            tickUpper: tu,
+            currentTick: tick,
+            fee: selectedFee
+          }, volData.annualizedVolumeUSD);
+          
+          setEstimatedAPR(apr);
+        } else {
+          setEstimatedAPR(null);
         }
       } else {
         setEstimatedAPR(null);

@@ -16,7 +16,6 @@ query GetPoolVolume($poolId: ID!, $daysAgo: Int!) {
       decimals
     }
     volumeUSD
-    liquidity
   }
   poolDayDatas(
     first: $daysAgo
@@ -36,7 +35,6 @@ interface SubgraphPoolData {
     token0: { symbol: string; decimals: string };
     token1: { symbol: string; decimals: string };
     volumeUSD: string;
-    liquidity: string;
   } | null;
   poolDayDatas: Array<{
     date: number;
@@ -47,7 +45,6 @@ interface SubgraphPoolData {
 export interface PoolVolumeData {
   weeklyVolumeUSD: number;
   annualizedVolumeUSD: number;
-  liquidity: string;
   token0Decimals: number;
   token1Decimals: number;
   token0Symbol: string;
@@ -98,7 +95,6 @@ export async function fetchPoolVolume(poolAddress: string): Promise<PoolVolumeDa
     return {
       weeklyVolumeUSD,
       annualizedVolumeUSD,
-      liquidity: pool.liquidity,
       token0Decimals: parseInt(pool.token0.decimals),
       token1Decimals: parseInt(pool.token1.decimals),
       token0Symbol: pool.token0.symbol,
@@ -110,18 +106,35 @@ export async function fetchPoolVolume(poolAddress: string): Promise<PoolVolumeDa
   }
 }
 
-export function calculateAPRFromVolume(
-  annualizedVolumeUSD: number,
-  liquidityUSD: number,
-  fee: number,
-  inRangeRatio: number
-): number {
-  if (liquidityUSD <= 0 || annualizedVolumeUSD <= 0) {
-    return 0;
-  }
+export interface PositionParams {
+  token0Amount: number;
+  token1Amount: number;
+  token0Price: number;
+  token1Price: number;
+  tickLower: number;
+  tickUpper: number;
+  currentTick: number;
+  fee: number;
+}
 
-  const feeRevenue = annualizedVolumeUSD * (fee / 10000) * inRangeRatio;
-  const apr = (feeRevenue / liquidityUSD) * 100;
+export function calculateAPR(params: PositionParams, annualizedVolumeUSD: number): number {
+  const { token0Amount, token1Amount, token0Price, token1Price, tickLower, tickUpper, currentTick, fee } = params;
+  
+  if (token0Amount <= 0 && token1Amount <= 0) return 0;
+  if (annualizedVolumeUSD <= 0) return 0;
+  
+  const positionValueUSD = (token0Amount * token0Price) + (token1Amount * token1Price);
+  if (positionValueUSD <= 0) return 0;
+
+  const fullRangeWidth = 2 * 60 * 60;
+  const userRangeWidth = Math.abs(tickUpper - tickLower);
+  const rangeRatio = userRangeWidth / fullRangeWidth;
+  
+  const inRange = currentTick >= tickLower && currentTick <= tickUpper;
+  const activeRatio = inRange ? 1 : 0;
+  
+  const expectedFees = annualizedVolumeUSD * (fee / 10000) * rangeRatio * activeRatio;
+  const apr = (expectedFees / positionValueUSD) * 100;
 
   return Math.min(apr, 99999);
 }
