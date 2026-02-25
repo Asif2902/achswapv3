@@ -122,19 +122,21 @@ export function calculateAPR(params: PositionParams, annualizedVolumeUSD: number
   
   if (token0Amount <= 0 && token1Amount <= 0) return 0;
   if (annualizedVolumeUSD <= 0) return 0;
+  if (tickUpper <= tickLower) return 0;
   
   const positionValueUSD = (token0Amount * token0Price) + (token1Amount * token1Price);
-  if (positionValueUSD <= 0) return 0;
+  if (positionValueUSD < 0.01) return 0;
 
-  const fullRangeWidth = 2 * 60 * 60;
-  const userRangeWidth = Math.abs(tickUpper - tickLower);
-  const rangeRatio = userRangeWidth / fullRangeWidth;
+  const userRangeWidth = tickUpper - tickLower;
+  const feeDecimal = fee / 10000;
   
   const inRange = currentTick >= tickLower && currentTick <= tickUpper;
-  const activeRatio = inRange ? 1 : 0;
+  if (!inRange) return 0;
   
-  const expectedFees = annualizedVolumeUSD * (fee / 10000) * rangeRatio * activeRatio;
-  const apr = (expectedFees / positionValueUSD) * 100;
+  const expectedAnnualFees = annualizedVolumeUSD * feeDecimal;
+  const apr = (expectedAnnualFees / positionValueUSD) * 100;
 
-  return Math.min(apr, 99999);
+  if (!isFinite(apr) || isNaN(apr)) return 0;
+  
+  return Math.max(0, Math.min(apr, 500));
 }
