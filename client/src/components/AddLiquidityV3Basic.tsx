@@ -25,7 +25,8 @@ import {
 } from "@/lib/v3-utils";
 import { PoolHealthChecker } from "@/components/PoolHealthChecker";
 import type { PoolHealthResult } from "@/components/PoolHealthChecker";
-import { Shield, ExternalLink, Plus, RefreshCw, Info, Zap, AlertTriangle } from "lucide-react";
+import { getPoolStats, type PoolStats } from "@/lib/pool-apr-utils";
+import { Shield, ExternalLink, Plus, RefreshCw, Info, Zap, AlertTriangle, TrendingUp } from "lucide-react";
 
 const ERC20_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -85,6 +86,9 @@ export function AddLiquidityV3Basic() {
   const [token0Symbol, setToken0Symbol]       = useState<string>("");
   const [token1Symbol, setToken1Symbol]       = useState<string>("");
   const [poolHealth, setPoolHealth]           = useState<PoolHealthResult | null>(null);
+  const [poolStats, setPoolStats]             = useState<PoolStats | null>(null);
+  const [isLoadingApr, setIsLoadingApr]      = useState(false);
+  const [aprError, setAprError]              = useState<string | null>(null);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -182,6 +186,31 @@ export function AddLiquidityV3Basic() {
   };
 
   useEffect(() => { fetchPoolState(); }, [tokenA, tokenB, selectedFee, contracts, chainId]);
+
+  // ── Fetch APR data ───────────────────────────────────────────────────────────
+  const fetchPoolAPR = async (addr: string) => {
+    setIsLoadingApr(true);
+    setAprError(null);
+    try {
+      const stats = await getPoolStats(addr);
+      setPoolStats(stats);
+    } catch (err) {
+      console.warn("Failed to fetch pool APR:", err);
+      setAprError(err instanceof Error ? err.message : "Failed to fetch APR");
+      setPoolStats(null);
+    } finally {
+      setIsLoadingApr(false);
+    }
+  };
+
+  useEffect(() => {
+    if (poolAddress) {
+      fetchPoolAPR(poolAddress);
+    } else {
+      setPoolStats(null);
+      setAprError(null);
+    }
+  }, [poolAddress]);
 
   // ── Expected price ratio ───────────────────────────────────────────────────
   const expectedPriceRatio = useMemo(() => {
@@ -550,6 +579,40 @@ export function AddLiquidityV3Basic() {
                   <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)" }}>Slippage</span>
                   <span style={{ fontSize: 12, fontWeight: 600, color: "#4ade80" }}>2%</span>
                 </div>
+                {poolStats && (
+                  <>
+                    <div className="v3b-stat-row" style={{ background: "rgba(34,197,94,0.05)" }}>
+                      <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", gap: 4 }}>
+                        <TrendingUp style={{ width: 12, height: 12 }} /> Est. APR
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "#4ade80", fontVariantNumeric: "tabular-nums" }}>
+                        {poolStats.aprActive > 0 ? poolStats.aprActive.toFixed(2) : "0.00"}%
+                      </span>
+                    </div>
+                    <div className="v3b-stat-row">
+                      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>7d Volume</span>
+                      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontVariantNumeric: "tabular-nums" }}>
+                        ${poolStats.volume7dUSD >= 1_000_000 ? `${(poolStats.volume7dUSD / 1_000_000).toFixed(2)}M` : poolStats.volume7dUSD >= 1_000 ? `${(poolStats.volume7dUSD / 1_000).toFixed(2)}K` : poolStats.volume7dUSD.toFixed(2)}
+                      </span>
+                    </div>
+                    <div className="v3b-stat-row">
+                      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>7d Fees</span>
+                      <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)", fontVariantNumeric: "tabular-nums" }}>
+                        ${poolStats.fees7dUSD >= 1_000 ? `${(poolStats.fees7dUSD / 1_000).toFixed(2)}K` : poolStats.fees7dUSD.toFixed(2)}
+                      </span>
+                    </div>
+                  </>
+                )}
+                {isLoadingApr && (
+                  <div className="v3b-stat-row">
+                    <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>Loading APR...</span>
+                  </div>
+                )}
+                {aprError && !poolStats && (
+                  <div className="v3b-stat-row">
+                    <span style={{ fontSize: 11, color: "rgba(248,113,113,0.6)" }}>APR unavailable</span>
+                  </div>
+                )}
               </>
             )}
 

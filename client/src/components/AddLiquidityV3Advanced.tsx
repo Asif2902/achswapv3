@@ -22,6 +22,7 @@ import {
   Info, Settings, BarChart3, Layers, Target, Activity, Plus, RefreshCw,
 } from "lucide-react";
 import { PriceRangeChart } from "./PriceRangeChart";
+import { getPoolStats, type PoolStats } from "@/lib/pool-apr-utils";
 
 const ERC20_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
@@ -115,6 +116,9 @@ export function AddLiquidityV3Advanced() {
   const [balanceB, setBalanceB] = useState<bigint | null>(null);
   const [amountBIsAuto, setAmountBIsAuto] = useState(false);
   const [autoCalcAmounts, setAutoCalcAmounts] = useState<{ amount0: bigint; amount1: bigint; forAmountA: string } | null>(null);
+  const [poolStats, setPoolStats] = useState<PoolStats | null>(null);
+  const [isLoadingApr, setIsLoadingApr] = useState(false);
+  const [aprError, setAprError] = useState<string | null>(null);
 
   const maxAmountAWeiRef = useRef<bigint | null>(null);
   const maxAmountBWeiRef = useRef<bigint | null>(null);
@@ -236,6 +240,31 @@ export function AddLiquidityV3Advanced() {
   };
 
   useEffect(() => { fetchPoolState(); }, [tokenA, tokenB, selectedFee, contracts, chainId]);
+
+  // ── Fetch APR data ───────────────────────────────────────────────────────────
+  const fetchPoolAPR = async (addr: string) => {
+    setIsLoadingApr(true);
+    setAprError(null);
+    try {
+      const stats = await getPoolStats(addr);
+      setPoolStats(stats);
+    } catch (err) {
+      console.warn("Failed to fetch pool APR:", err);
+      setAprError(err instanceof Error ? err.message : "Failed to fetch APR");
+      setPoolStats(null);
+    } finally {
+      setIsLoadingApr(false);
+    }
+  };
+
+  useEffect(() => {
+    if (poolAddress) {
+      fetchPoolAPR(poolAddress);
+    } else {
+      setPoolStats(null);
+      setAprError(null);
+    }
+  }, [poolAddress]);
 
   // ── Auto-calc amountB ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -726,6 +755,26 @@ export function AddLiquidityV3Advanced() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "rgba(255,255,255,0.03)", borderRadius: 11, border: "1px solid rgba(255,255,255,0.06)" }}>
                 <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>Current price · tick {currentTick}</span>
                 <span style={{ fontSize: 13, fontWeight: 700, color: "white", fontFamily: "monospace" }}>{currentPrice.toFixed(6)}</span>
+              </div>
+            )}
+
+            {/* APR Display */}
+            {poolStats && poolExists && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "rgba(34,197,94,0.08)", borderRadius: 11, border: "1px solid rgba(34,197,94,0.2)" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", textTransform: "uppercase" }}>Est. APR</span>
+                  <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>7d: ${poolStats.fees7dUSD >= 1_000 ? `${(poolStats.fees7dUSD / 1_000).toFixed(1)}K` : poolStats.fees7dUSD.toFixed(0)} fees</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+                  <span style={{ fontSize: 15, fontWeight: 700, color: poolStats.aprActive > 0 ? "#4ade80" : "rgba(255,255,255,0.5)" }}>
+                    {poolStats.aprActive > 0 ? poolStats.aprActive.toFixed(2) : "0.00"}%
+                  </span>
+                </div>
+              </div>
+            )}
+            {isLoadingApr && poolExists && (
+              <div style={{ padding: "8px 12px", background: "rgba(255,255,255,0.03)", borderRadius: 11, border: "1px solid rgba(255,255,255,0.06)" }}>
+                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>Loading APR data...</span>
               </div>
             )}
 
