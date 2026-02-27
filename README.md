@@ -42,12 +42,19 @@ Create a `.env` file in the root directory:
 
 ```env
 VITE_WALLETCONNECT_PROJECT_ID=your_project_id_here
+VITE_ALCHEMY_KEY=your_alchemy_key_here
 ```
 
 > **Get your WalletConnect Project ID:**
 > 1. Visit [WalletConnect Cloud](https://cloud.walletconnect.com/)
 > 2. Create a free account and project
 > 3. Copy your Project ID
+>
+> **Get your Alchemy Key (optional):**
+> 1. Visit [Alchemy](https://www.alchemy.com/)
+> 2. Create a free account and a new app on ARC Testnet
+> 3. Copy your API Key
+> - If not provided, public RPC will be used as fallback
 
 #### 4. Run Development Server
 
@@ -139,12 +146,14 @@ client/
       TransactionHistory.tsx
       V3ContractStatus.tsx
       WrapUnwrapModal.tsx
+      PoolHealthChecker.tsx    # V3 pool health diagnostics
       Header.tsx
     pages/              # Main application pages
       Swap.tsx
       AddLiquidity.tsx
       RemoveLiquidity.tsx
       Pools.tsx
+      not-found.tsx
     lib/                # Utility libraries
       abis/
         v3.ts          # V3 contract ABIs
@@ -154,15 +163,20 @@ client/
       v3-pool-utils.ts  # V3 pool utilities
       v3-liquidity-math.ts
       pool-utils.ts     # V2 pool utilities
+      pool-apr-utils.ts # APR calculation utilities
       smart-routing.ts  # Smart routing logic
       quote-cache.ts    # Quote caching
       dex-settings.ts   # DEX settings management
       decimal-utils.ts  # Decimal handling
       ticklens-utils.ts # Tick lens utilities
-      contract-verification.ts
+      config.ts         # RPC configuration with Alchemy support
+      error-utils.ts    # Error handling utilities
+      queryClient.ts    # React Query client
     data/
       tokens.ts         # Token definitions
     hooks/              # Custom React hooks
+      use-toast.ts      # Toast notification hook
+      use-mobile.tsx    # Mobile detection hook
 ```
 
 ---
@@ -182,6 +196,10 @@ client/
 | Routing | wouter 3.3.5 |
 | State Management | Zustand 5.0.11 |
 | Charts | Recharts 2.15.2 |
+| Data Fetching | TanStack React Query 5.90.10 |
+| Animations | Framer Motion 11.13.1 |
+| Date Handling | date-fns 3.6.0 |
+| Form Validation | react-hook-form + Zod |
 
 ---
 
@@ -200,6 +218,7 @@ Concentrated liquidity allows LPs to select price ranges:
 - **Basic Mode**: Preset fee tiers (0.05%, 0.3%, 1%) with suggested price ranges
 - **Advanced Mode**: Custom tick selection with full control
 - **Price Range Chart**: Visual representation of liquidity distribution
+- **Pool Health Checker**: Real-time pool health diagnostics with auto-fix suggestions
 
 ### V2 to V3 Migration
 
@@ -213,8 +232,28 @@ Migrate existing V2 LP positions to V3:
 Browse all available pools:
 - V2 and V3 pool listings
 - TVL (Total Value Locked) display
+- **APR Calculation**: Estimated yearly returns for V3 positions
 - Search by token name or address
 - Pool reserves and fee information
+
+---
+
+## Recent Updates
+
+### v1.1.0 - Pool Health & APR
+
+- **Pool Health Checker**: New component that validates V3 pools for common issues (uninitialized pools, extreme prices, price mismatches, no active liquidity)
+- **APR Display**: Added estimated APR calculation for V3 LP positions with volume-based estimation when TVL is low
+- **Auto-fix Capabilities**: Pool health issues that can be auto-fixed show an "Auto Fix" button
+
+### v1.0.x - Stability & Performance
+
+- **Alchemy RPC Integration**: Added Alchemy private RPC support for improved reliability
+- **Fallback RPC**: Automatic fallback to public RPC when primary fails
+- **Retry Logic**: Added retry logic with exponential backoff for RPC calls
+- **Error Handling**: Improved error handling across all transactions
+- **Precision Fixes**: Fixed precision issues with MAX button and token amounts
+- **Race Condition Fixes**: Resolved race conditions in quote fetching and pool data
 
 ---
 
@@ -244,6 +283,22 @@ Add tokens to `client/src/data/tokens.ts`:
   verified: true,
   chainId: 5042002
 }
+```
+
+If adding a wrapped token pair, also update `wrappedTokenMap` and `unwrappedTokenMap`:
+
+```typescript
+export const wrappedTokenMap: Record<number, Record<string, string>> = {
+  5042002: {
+    "0x.native.address": "0x.wrapped.address",
+  },
+};
+
+export const unwrappedTokenMap: Record<number, Record<string, string>> = {
+  5042002: {
+    "0x.wrapped.address": "0x.native.address",
+  },
+};
 ```
 
 ### Adding New Chains
