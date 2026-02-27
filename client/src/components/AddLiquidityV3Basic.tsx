@@ -89,6 +89,7 @@ export function AddLiquidityV3Basic() {
   const [poolStats, setPoolStats]             = useState<PoolStats | null>(null);
   const [isLoadingApr, setIsLoadingApr]      = useState(false);
   const [aprError, setAprError]              = useState<string | null>(null);
+  const [rpcTvlUSD, setRpcTvlUSD]            = useState<number>(0);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -173,15 +174,31 @@ export function AddLiquidityV3Basic() {
       const ZERO = "0x0000000000000000000000000000000000000000";
       if (!addr || addr === ZERO) {
         setPoolAddress(null); setPoolExists(false); setCurrentPrice(null);
-        setCurrentSqrtPriceX96(null); setCurrentTick(null); setActiveLiquidity(null); return;
+        setCurrentSqrtPriceX96(null); setCurrentTick(null); setActiveLiquidity(null);
+        setRpcTvlUSD(0); return;
       }
       setPoolAddress(addr); setPoolExists(true);
       const pool = new Contract(addr, V3_POOL_ABI, provider);
-      const [slot0, liq] = await Promise.all([pool.slot0(), pool.liquidity()]);
+      const [slot0, liq, bal0, bal1] = await Promise.all([
+        pool.slot0(),
+        pool.liquidity(),
+        new Contract(tok0.address, ERC20_ABI, provider).balanceOf(addr),
+        new Contract(tok1.address, ERC20_ABI, provider).balanceOf(addr)
+      ]);
       const sqrtPriceX96: bigint = slot0[0]; const tick = Number(slot0[1]);
       setCurrentSqrtPriceX96(sqrtPriceX96); setCurrentTick(tick); setActiveLiquidity(liq);
       setCurrentPrice(sqrtPriceX96 === 0n ? null : sqrtPriceX96ToPrice(sqrtPriceX96, tok0.decimals, tok1.decimals));
-    } catch (e) { console.error("Pool state error:", e); setPoolExists(false); setCurrentPrice(null); setCurrentSqrtPriceX96(null); setCurrentTick(null); setActiveLiquidity(null); }
+      
+      // Calculate TVL from token balances (wUSDC = $1)
+      const bal0Num = parseFloat(formatUnits(bal0, tok0.decimals));
+      const bal1Num = parseFloat(formatUnits(bal1, tok1.decimals));
+      const wusdcIdx = tok0.symbol.toLowerCase() === 'wusdc' ? 0 : (tok1.symbol.toLowerCase() === 'wusdc' ? 1 : -1);
+      let tvl = 0;
+      if (wusdcIdx === 0) tvl = bal0Num + bal1Num; // tok0 is wUSDC
+      else if (wusdcIdx === 1) tvl = bal1Num + bal0Num; // tok1 is wUSDC  
+      else tvl = bal0Num + bal1Num; // Assume both in USD terms
+      setRpcTvlUSD(tvl);
+    } catch (e) { console.error("Pool state error:", e); setPoolExists(false); setCurrentPrice(null); setCurrentSqrtPriceX96(null); setCurrentTick(null); setActiveLiquidity(null); setRpcTvlUSD(0); }
     finally { setIsCheckingPool(false); }
   };
 
@@ -192,7 +209,7 @@ export function AddLiquidityV3Basic() {
     setIsLoadingApr(true);
     setAprError(null);
     try {
-      const stats = await getPoolStats(addr, true);
+      const stats = await getPoolStats(addr, true, rpcTvlUSD);
       console.log("[APR] Pool stats:", stats);
       setPoolStats(stats);
     } catch (err) {
@@ -212,6 +229,13 @@ export function AddLiquidityV3Basic() {
       setAprError(null);
     }
   }, [poolAddress]);
+
+  // Refetch APR when RPC TVL is available
+  useEffect(() => {
+    if (poolAddress && rpcTvlUSD > 0) {
+      fetchPoolAPR(poolAddress);
+    }
+  }, [rpcTvlUSD]);
 
   // ── Expected price ratio ───────────────────────────────────────────────────
   const expectedPriceRatio = useMemo(() => {

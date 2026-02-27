@@ -105,6 +105,7 @@ export function AddLiquidityV3Advanced() {
   const [poolLiquidity, setPoolLiquidity] = useState<bigint>(0n);
   const [poolToken0Reserve, setPoolToken0Reserve] = useState<bigint | null>(null);
   const [poolToken1Reserve, setPoolToken1Reserve] = useState<bigint | null>(null);
+  const [rpcTvlUSD, setRpcTvlUSD] = useState<number>(0);
   const [poolAddress, setPoolAddress] = useState<string | null>(null);
   const [token0Symbol, setToken0Symbol] = useState("");
   const [token1Symbol, setToken1Symbol] = useState("");
@@ -230,10 +231,20 @@ export function AddLiquidityV3Advanced() {
       const sqrtPX96: bigint = slot0[0]; const tick = Number(slot0[1]);
       const price = sqrtPriceX96ToPrice(sqrtPX96, tok0.decimals, tok1.decimals);
       setCurrentSqrtPriceX96(sqrtPX96); setCurrentPrice(price); setCurrentTick(tick); setPoolLiquidity(liq);
-      try {
+try {
         const [res0, res1] = await Promise.all([new Contract(tok0.address, ERC20_ABI, provider).balanceOf(poolAddr), new Contract(tok1.address, ERC20_ABI, provider).balanceOf(poolAddr)]);
         setPoolToken0Reserve(res0 as bigint); setPoolToken1Reserve(res1 as bigint);
-      } catch { setPoolToken0Reserve(null); setPoolToken1Reserve(null); }
+        
+        // Calculate TVL from token balances (wUSDC = $1)
+        const bal0Num = parseFloat(formatUnits(res0 as bigint, tok0.decimals));
+        const bal1Num = parseFloat(formatUnits(res1 as bigint, tok1.decimals));
+        const wusdcIdx = tok0.symbol.toLowerCase() === 'wusdc' ? 0 : (tok1.symbol.toLowerCase() === 'wusdc' ? 1 : -1);
+        let tvl = 0;
+        if (wusdcIdx === 0) tvl = bal0Num + bal1Num;
+        else if (wusdcIdx === 1) tvl = bal1Num + bal0Num;
+        else tvl = bal0Num + bal1Num;
+        setRpcTvlUSD(tvl);
+      } catch { setPoolToken0Reserve(null); setPoolToken1Reserve(null); setRpcTvlUSD(0); }
       if (!minPrice && !maxPrice) applyRangePresetValues("wide", price, tick, tok0 as any, tok1 as any);
     } catch (err) { console.error("Pool check error:", err); setPoolExists(false); setPoolToken0Reserve(null); setPoolToken1Reserve(null); }
     finally { setIsCheckingPool(false); }
@@ -246,7 +257,7 @@ export function AddLiquidityV3Advanced() {
     setIsLoadingApr(true);
     setAprError(null);
     try {
-      const stats = await getPoolStats(addr);
+      const stats = await getPoolStats(addr, false, rpcTvlUSD);
       setPoolStats(stats);
     } catch (err) {
       console.warn("Failed to fetch pool APR:", err);
@@ -265,6 +276,13 @@ export function AddLiquidityV3Advanced() {
       setAprError(null);
     }
   }, [poolAddress]);
+
+  // Refetch APR when RPC TVL is available
+  useEffect(() => {
+    if (poolAddress && rpcTvlUSD > 0) {
+      fetchPoolAPR(poolAddress);
+    }
+  }, [rpcTvlUSD]);
 
   // ── Auto-calc amountB ──────────────────────────────────────────────────────
   useEffect(() => {
