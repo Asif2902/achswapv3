@@ -305,8 +305,8 @@ export async function getTopPoolsByAPR(
   const TOP_POOLS_QUERY = `
     query TopPools($n: Int!) {
       pools(
-        first: $n
-        orderBy: totalValueLockedUSD
+        first: $n,
+        orderBy: totalValueLockedUSD,
         orderDirection: desc
       ) {
         id

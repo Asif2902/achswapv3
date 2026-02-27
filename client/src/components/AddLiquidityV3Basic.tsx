@@ -192,10 +192,11 @@ export function AddLiquidityV3Basic() {
     setIsLoadingApr(true);
     setAprError(null);
     try {
-      const stats = await getPoolStats(addr);
+      const stats = await getPoolStats(addr, true);
+      console.log("[APR] Pool stats:", stats);
       setPoolStats(stats);
     } catch (err) {
-      console.warn("Failed to fetch pool APR:", err);
+      console.error("[APR] Failed to fetch pool APR:", err);
       setAprError(err instanceof Error ? err.message : "Failed to fetch APR");
       setPoolStats(null);
     } finally {
