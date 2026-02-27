@@ -155,8 +155,7 @@ function getActiveTVLUSD(
 
 export async function getPoolStats(
   poolId: string,
-  debug = false,
-  rpcTvlUSD?: number
+  debug = false
 ): Promise<PoolStats> {
   const normalizedPoolId = poolId.toLowerCase();
 
@@ -236,20 +235,21 @@ export async function getPoolStats(
 
   const avgDailyFees = daysWithData > 0 ? fees7dUSD / daysWithData : 0;
 
-  const subgraphTvlUSD = parseFloat(pool.totalValueLockedUSD);
+  const tvlUSD = parseFloat(pool.totalValueLockedUSD);
   const activeTVL = getActiveTVLUSD(pool, debug);
 
-  // Use RPC TVL if provided, otherwise fall back to subgraph TVL, then estimate from volume
+  // Calculate APR
+  // When TVL data is unavailable (0), estimate from volume using fee tier
   const feeTierNum = typeof pool.feeTier === 'string' ? parseInt(pool.feeTier) : pool.feeTier;
   const feeTier = feeTierNum / 1_000_000; // e.g., 3000 -> 0.003
   const estimatedTVLFromVolume = volume7dUSD * 30 * feeTier; // Monthly volume proxy for TVL
 
-  // Priority: RPC > Subgraph > Estimated
-  const tvlUSD = rpcTvlUSD ?? (subgraphTvlUSD >= 1 ? subgraphTvlUSD : estimatedTVLFromVolume);
-  const useActiveTVL = activeTVL >= 1 ? activeTVL : tvlUSD;
+  // Use actual TVL if available, otherwise estimate from volume
+  const useTVL = tvlUSD >= 1 ? tvlUSD : estimatedTVLFromVolume;
+  const useActiveTVL = activeTVL >= 1 ? activeTVL : estimatedTVLFromVolume;
 
-  const aprConservative = tvlUSD >= 1
-    ? (avgDailyFees / tvlUSD) * 365 * 100
+  const aprConservative = useTVL >= 1
+    ? (avgDailyFees / useTVL) * 365 * 100
     : 0;
 
   const aprActive = useActiveTVL >= 1
