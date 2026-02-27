@@ -584,7 +584,7 @@ export function AddLiquidityV3Basic() {
                   <>
                     <div className="v3b-stat-row" style={{ background: "rgba(34,197,94,0.05)" }}>
                       <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", gap: 4 }}>
-                        <TrendingUp style={{ width: 12, height: 12 }} /> Est. APR
+                        <TrendingUp style={{ width: 12, height: 12 }} /> Est. APR (1y)
                       </span>
                       <span style={{ fontSize: 13, fontWeight: 700, color: poolStats.aprActive > 0 ? "#4ade80" : "rgba(255,255,255,0.4)", fontVariantNumeric: "tabular-nums" }}>
                         {poolStats.aprActive > 0 ? `${poolStats.aprActive.toFixed(2)}%` : "N/A"}
