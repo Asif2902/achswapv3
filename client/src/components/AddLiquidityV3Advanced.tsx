@@ -119,6 +119,7 @@ export function AddLiquidityV3Advanced() {
   const [poolStats, setPoolStats] = useState<PoolStats | null>(null);
   const [isLoadingApr, setIsLoadingApr] = useState(false);
   const [aprError, setAprError] = useState<string | null>(null);
+  const aprRequestRef = useRef<number>(0);
 
   const maxAmountAWeiRef = useRef<bigint | null>(null);
   const maxAmountBWeiRef = useRef<bigint | null>(null);
@@ -243,16 +244,20 @@ export function AddLiquidityV3Advanced() {
 
   // ── Fetch APR data ───────────────────────────────────────────────────────────
   const fetchPoolAPR = async (addr: string) => {
+    const requestId = ++aprRequestRef.current;
     setIsLoadingApr(true);
     setAprError(null);
     try {
       const stats = await getPoolStats(addr);
+      if (requestId !== aprRequestRef.current) return; // Ignore stale response
       setPoolStats(stats);
     } catch (err) {
+      if (requestId !== aprRequestRef.current) return; // Ignore stale response
       console.warn("Failed to fetch pool APR:", err);
       setAprError(err instanceof Error ? err.message : "Failed to fetch APR");
       setPoolStats(null);
     } finally {
+      if (requestId !== aprRequestRef.current) return; // Ignore stale response
       setIsLoadingApr(false);
     }
   };

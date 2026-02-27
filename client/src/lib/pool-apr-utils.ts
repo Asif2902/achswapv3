@@ -91,8 +91,8 @@ async function subgraphFetch<T>(query: string, variables: Record<string, unknown
 
   const json = await response.json();
   
-  if (json.errors) {
-    throw new Error(`Subgraph error: ${json.errors[0].message}`);
+  if (json.errors?.length > 0) {
+    throw new Error(`Subgraph error: ${json.errors?.[0]?.message ?? JSON.stringify(json.errors)}`);
   }
 
   return json.data;
@@ -116,7 +116,8 @@ function getActiveTVLUSD(
 
   if (liquidityBI === 0n || sqrtPriceBI === 0n) return 0;
 
-  const sqrtP = Number(sqrtPriceBI) / Number(Q96);
+  // Use BigInt division to preserve fractional precision
+  const sqrtP = Number(sqrtPriceBI / Q96) + Number(sqrtPriceBI % Q96) / Number(Q96);
   const dec0  = parseInt(pool.token0.decimals);
   const dec1  = parseInt(pool.token1.decimals);
 
