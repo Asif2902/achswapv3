@@ -237,18 +237,25 @@ export async function getPoolStats(
   const tvlUSD = parseFloat(pool.totalValueLockedUSD);
   const activeTVL = getActiveTVLUSD(pool, debug);
 
-  // Use TVL for APR calculation - if TVL is 0, APR will be 0
-  // This is expected when subgraph hasn't indexed positions yet
-  const aprConservative = tvlUSD >= 1
-    ? (avgDailyFees / tvlUSD) * 365 * 100
+  // Calculate APR
+  // When TVL data is unavailable (0), estimate from volume using fee tier
+  const feeTier = pool.feeTier / 1_000_000; // e.g., 3000 -> 0.003
+  const estimatedTVLFromVolume = volume7dUSD * 30 * feeTier; // Monthly volume proxy for TVL
+
+  // Use actual TVL if available, otherwise estimate from volume
+  const useTVL = tvlUSD >= 1 ? tvlUSD : estimatedTVLFromVolume;
+  const useActiveTVL = activeTVL >= 1 ? activeTVL : estimatedTVLFromVolume;
+
+  const aprConservative = useTVL >= 1
+    ? (avgDailyFees / useTVL) * 365 * 100
     : 0;
 
-  const aprActive = activeTVL >= 1
-    ? (avgDailyFees / activeTVL) * 365 * 100
+  const aprActive = useActiveTVL >= 1
+    ? (avgDailyFees / useActiveTVL) * 365 * 100
     : 0;
 
-  const dailyFeeRate = activeTVL >= 1
-    ? avgDailyFees / activeTVL
+  const dailyFeeRate = useActiveTVL >= 1
+    ? avgDailyFees / useActiveTVL
     : 0;
 
   if (debug) {
