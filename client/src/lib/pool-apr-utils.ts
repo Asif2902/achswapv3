@@ -3,10 +3,9 @@ const WUSDC_ADDRESS = "0xde5db9049a8dd344dc1b7bbb098f9da60930a6da";
 const Q96           = 2n ** 96n;
 
 // VOLUME_CORRECTION = 10
-// The subgraph indexes volume at 1/10th actual value due to a decimal precision
-// issue in the indexer. Multiply all volumeUSD / volumeToken0 / volumeToken1
-// fields by 10 immediately after reading from the subgraph.
-// Do NOT apply this to feesUSD until separately confirmed.
+// The subgraph indexes volume AND fees at 1/10th actual value due to a decimal
+// precision issue in the indexer. Multiply BOTH volumeUSD and feesUSD by 10
+// immediately after reading from the subgraph.
 const VOLUME_CORRECTION = 10;
 
 export interface PoolStats {
@@ -69,6 +68,7 @@ interface TopPoolsResponse {
 function getApiKey(): string {
   const API_KEY = import.meta.env.VITE_SUBGRAPH_KEY;
   if (!API_KEY) {
+    console.error("VITE_SUBGRAPH_KEY is not set. Please add VITE_SUBGRAPH_KEY to your .env file");
     throw new Error("Missing VITE_SUBGRAPH_KEY environment variable");
   }
   return API_KEY;
@@ -229,24 +229,21 @@ export async function getPoolStats(
   }
   const volume7dUSD = rawVolume7dUSD * VOLUME_CORRECTION;
 
-  const fees7dUSD = days.reduce((s, d) => s + parseFloat(d.feesUSD), 0);
+  const rawFees7dUSD = days.reduce((s, d) => s + parseFloat(d.feesUSD), 0);
+  const fees7dUSD = rawFees7dUSD * VOLUME_CORRECTION;
   const txCount7d = days.reduce((s, d) => s + parseInt(d.txCount), 0);
 
-  // TODO: if feesUSD is confirmed to also be 10x low, multiply avgDailyFees by VOLUME_CORRECTION here
   const avgDailyFees = daysWithData > 0 ? fees7dUSD / daysWithData : 0;
 
   const tvlUSD = parseFloat(pool.totalValueLockedUSD);
   const activeTVL = getActiveTVLUSD(pool, debug);
 
-  // aprConservative — uses ALL locked capital including out-of-range positions.
-  // Out-of-range positions earn zero fees, so this understates active LP returns.
-  // Safe for pool list cards as a conservative baseline.
+  // Use TVL for APR calculation - if TVL is 0, APR will be 0
+  // This is expected when subgraph hasn't indexed positions yet
   const aprConservative = tvlUSD >= 1
     ? (avgDailyFees / tvlUSD) * 365 * 100
     : 0;
 
-  // aprActive — uses pool.liquidity-derived TVL (in-range capital only).
-  // This is what an LP whose range contains the current price actually earns.
   const aprActive = activeTVL >= 1
     ? (avgDailyFees / activeTVL) * 365 * 100
     : 0;
@@ -257,9 +254,14 @@ export async function getPoolStats(
 
   if (debug) {
     console.debug({
+      poolId: normalizedPoolId,
       rawVolume: rawVolume7dUSD,
-      volume7dUSD,
+      correctedVolume: volume7dUSD,
+      rawFees: rawFees7dUSD,
+      correctedFees: fees7dUSD,
       avgDailyFees,
+      tvlUSD,
+      activeTVL,
       aprConservative,
       aprActive,
     });

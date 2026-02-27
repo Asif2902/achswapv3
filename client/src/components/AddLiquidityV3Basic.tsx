@@ -585,8 +585,8 @@ export function AddLiquidityV3Basic() {
                       <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", gap: 4 }}>
                         <TrendingUp style={{ width: 12, height: 12 }} /> Est. APR
                       </span>
-                      <span style={{ fontSize: 13, fontWeight: 700, color: "#4ade80", fontVariantNumeric: "tabular-nums" }}>
-                        {poolStats.aprActive > 0 ? poolStats.aprActive.toFixed(2) : "0.00"}%
+                      <span style={{ fontSize: 13, fontWeight: 700, color: poolStats.aprActive > 0 ? "#4ade80" : "rgba(255,255,255,0.4)", fontVariantNumeric: "tabular-nums" }}>
+                        {poolStats.aprActive > 0 ? `${poolStats.aprActive.toFixed(2)}%` : "N/A"}
                       </span>
                     </div>
                     <div className="v3b-stat-row">
@@ -601,6 +601,11 @@ export function AddLiquidityV3Basic() {
                         ${poolStats.fees7dUSD >= 1_000 ? `${(poolStats.fees7dUSD / 1_000).toFixed(2)}K` : poolStats.fees7dUSD.toFixed(2)}
                       </span>
                     </div>
+                    {poolStats.aprActive === 0 && poolStats.daysWithData > 0 && (
+                      <div className="v3b-stat-row">
+                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)" }}>Daily: ${(poolStats.fees7dUSD / poolStats.daysWithData).toFixed(2)}</span>
+                      </div>
+                    )}
                   </>
                 )}
                 {isLoadingApr && (
@@ -610,7 +615,7 @@ export function AddLiquidityV3Basic() {
                 )}
                 {aprError && !poolStats && (
                   <div className="v3b-stat-row">
-                    <span style={{ fontSize: 11, color: "rgba(248,113,113,0.6)" }}>APR unavailable</span>
+                    <span style={{ fontSize: 10, color: "rgba(248,113,113,0.6)" }}>{aprError.includes("VITE_SUBGRAPH_KEY") ? "Set VITE_SUBGRAPH_KEY in .env" : "APR unavailable"}</span>
                   </div>
                 )}
               </>

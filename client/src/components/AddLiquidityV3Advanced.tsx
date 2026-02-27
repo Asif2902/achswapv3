@@ -763,11 +763,11 @@ export function AddLiquidityV3Advanced() {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 12px", background: "rgba(34,197,94,0.08)", borderRadius: 11, border: "1px solid rgba(34,197,94,0.2)" }}>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                   <span style={{ fontSize: 10, color: "rgba(255,255,255,0.35)", textTransform: "uppercase" }}>Est. APR</span>
-                  <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>7d: ${poolStats.fees7dUSD >= 1_000 ? `${(poolStats.fees7dUSD / 1_000).toFixed(1)}K` : poolStats.fees7dUSD.toFixed(0)} fees</span>
+                  <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>7d: ${poolStats.fees7dUSD >= 1_000 ? `${(poolStats.fees7dUSD / 1_000).toFixed(1)}K` : poolStats.fees7dUSD.toFixed(0)} fees{poolStats.aprActive === 0 && poolStats.daysWithData > 0 && ` ($${(poolStats.fees7dUSD / poolStats.daysWithData).toFixed(2)}/day)`}</span>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
-                  <span style={{ fontSize: 15, fontWeight: 700, color: poolStats.aprActive > 0 ? "#4ade80" : "rgba(255,255,255,0.5)" }}>
-                    {poolStats.aprActive > 0 ? poolStats.aprActive.toFixed(2) : "0.00"}%
+                  <span style={{ fontSize: 15, fontWeight: 700, color: poolStats.aprActive > 0 ? "#4ade80" : "rgba(255,255,255,0.4)" }}>
+                    {poolStats.aprActive > 0 ? `${poolStats.aprActive.toFixed(2)}%` : "N/A"}
                   </span>
                 </div>
               </div>
