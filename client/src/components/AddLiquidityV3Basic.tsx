@@ -615,7 +615,7 @@ export function AddLiquidityV3Basic() {
                 )}
                 {aprError && !poolStats && (
                   <div className="v3b-stat-row">
-                    <span style={{ fontSize: 10, color: "rgba(248,113,113,0.6)" }}>{aprError.includes("VITE_SUBGRAPH_KEY") ? "Set VITE_SUBGRAPH_KEY in .env" : "APR unavailable"}</span>
+                    <span style={{ fontSize: 10, color: "rgba(248,113,113,0.6)" }}>APR unavailable</span>
                   </div>
                 )}
               </>

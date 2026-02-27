@@ -68,7 +68,6 @@ interface TopPoolsResponse {
 function getApiKey(): string {
   const API_KEY = import.meta.env.VITE_SUBGRAPH_KEY;
   if (!API_KEY) {
-    console.error("VITE_SUBGRAPH_KEY is not set. Please add VITE_SUBGRAPH_KEY to your .env file");
     throw new Error("Missing VITE_SUBGRAPH_KEY environment variable");
   }
   return API_KEY;
