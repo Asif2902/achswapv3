@@ -193,7 +193,8 @@ export async function getPoolStats(
   }
 
   const pool = metaData.pool;
-  const date7dAgo = Math.floor(Date.now() / 1000) - 7 * 86400;
+  // Subgraph uses days since epoch (e.g., 20511), not Unix timestamp
+  const date7dAgo = Math.floor(Date.now() / 86400000) - 7;
 
   const DAYDATA_QUERY = `
     query Pool7DayData($poolId: String!, $date7dAgo: Int!) {
@@ -239,7 +240,8 @@ export async function getPoolStats(
 
   // Calculate APR
   // When TVL data is unavailable (0), estimate from volume using fee tier
-  const feeTier = pool.feeTier / 1_000_000; // e.g., 3000 -> 0.003
+  const feeTierNum = typeof pool.feeTier === 'string' ? parseInt(pool.feeTier) : pool.feeTier;
+  const feeTier = feeTierNum / 1_000_000; // e.g., 3000 -> 0.003
   const estimatedTVLFromVolume = volume7dUSD * 30 * feeTier; // Monthly volume proxy for TVL
 
   // Use actual TVL if available, otherwise estimate from volume
