@@ -2,10 +2,12 @@ import { useState } from "react";
 import { RemoveLiquidityV2 } from "@/components/RemoveLiquidityV2";
 import { RemoveLiquidityV3 } from "@/components/RemoveLiquidityV3";
 import { Droplets, Zap } from "lucide-react";
+import { useRequireArcChain } from "@/hooks/useRequireArcChain";
 
 type Proto = "v2" | "v3";
 
 export default function RemoveLiquidity() {
+  useRequireArcChain();
   const [proto, setProto] = useState<Proto>("v2");
 
   return (

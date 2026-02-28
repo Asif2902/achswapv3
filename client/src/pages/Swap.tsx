@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
   ArrowDownUp, AlertTriangle, ExternalLink, ChevronDown, Bell, Zap, Settings,
 } from "lucide-react";
+import { useRequireArcChain } from "@/hooks/useRequireArcChain";
 import { TokenSelector } from "@/components/TokenSelector";
 import { SwapSettings } from "@/components/SwapSettings";
 import { TransactionHistory } from "@/components/TransactionHistory";
@@ -76,43 +77,8 @@ export default function Swap() {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
-  const [isSwitchingChain, setIsSwitchingChain] = useState(false);
 
-  const ARC_CHAIN_ID = 5042002;
-  const isWrongChain = isConnected && chainId !== ARC_CHAIN_ID;
-
-  const handleSwitchToArc = useCallback(async () => {
-    if (!window.ethereum) return;
-    setIsSwitchingChain(true);
-    try {
-      await window.ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: "0x" + ARC_CHAIN_ID.toString(16) }],
-      });
-    } catch (switchError: any) {
-      // 4902 = chain not added yet
-      if (switchError.code === 4902) {
-        try {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: "0x" + ARC_CHAIN_ID.toString(16),
-              chainName: "ARC Testnet",
-              nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-              rpcUrls: ["https://rpc.testnet.arc.network"],
-              blockExplorerUrls: ["https://testnet.arcscan.app"],
-            }],
-          });
-        } catch {
-          toast({ title: "Failed to add ARC Testnet", description: "Please add the network manually in your wallet.", variant: "destructive" });
-        }
-      } else {
-        toast({ title: "Failed to switch network", description: "Please switch to ARC Testnet manually.", variant: "destructive" });
-      }
-    } finally {
-      setIsSwitchingChain(false);
-    }
-  }, [toast]);
+  useRequireArcChain();
 
   let contracts: ReturnType<typeof getContractsForChain> | null = null;
   try { contracts = chainId ? getContractsForChain(chainId) : null; } catch { /* wrong chain */ }
@@ -634,16 +600,6 @@ export default function Swap() {
         .sw-spin { animation:sw-spin 1s linear infinite; display:inline-block; width:18px; height:18px; border:2.5px solid rgba(255,255,255,0.2); border-top-color:white; border-radius:50%; }
 
         @media (max-width:400px) { .sw-body{padding:12px;} .sw-box{padding:12px 14px;} .sw-hdr{padding:13px 16px;} }
-
-        /* chain switch banner */
-        .sw-wrong-chain { display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:40px 24px; }
-        .sw-wrong-chain-icon { width:64px; height:64px; border-radius:50%; background:rgba(251,191,36,0.12); border:2px solid rgba(251,191,36,0.25); display:flex; align-items:center; justify-content:center; margin-bottom:20px; }
-        .sw-wrong-chain h2 { font-size:20px; font-weight:800; color:white; margin:0 0 8px; letter-spacing:-0.01em; }
-        .sw-wrong-chain p { font-size:13px; color:rgba(255,255,255,0.4); margin:0 0 24px; line-height:1.6; max-width:320px; }
-        .sw-switch-btn { display:flex; align-items:center; justify-content:center; gap:10px; width:100%; max-width:280px; height:48px; border-radius:14px; border:none; font-size:15px; font-weight:700; cursor:pointer; transition:all 0.22s; background:linear-gradient(135deg,#6366f1,#3b82f6); color:white; box-shadow:0 4px 20px rgba(99,102,241,0.35); }
-        .sw-switch-btn:hover:not(:disabled) { background:linear-gradient(135deg,#4f46e5,#2563eb); box-shadow:0 6px 28px rgba(99,102,241,0.5); transform:translateY(-1px); }
-        .sw-switch-btn:disabled { opacity:0.6; cursor:not-allowed; }
-        .sw-switch-chain-logo { width:22px; height:22px; border-radius:50%; border:1px solid rgba(255,255,255,0.2); }
       `}</style>
 
       <div className="sw-wrap">
@@ -654,32 +610,6 @@ export default function Swap() {
             <p>Best rate · Smart routing · V2 &amp; V3</p>
           </div>
 
-          {/* Wrong chain overlay */}
-          {isWrongChain ? (
-            <div className="sw-shell">
-              <div className="sw-wrong-chain">
-                <div className="sw-wrong-chain-icon">
-                  <AlertTriangle style={{ width: 28, height: 28, color: "#fbbf24" }} />
-                </div>
-                <h2>Wrong Network</h2>
-                <p>Swap is only available on ARC Testnet. Please switch your wallet to continue trading.</p>
-                <button
-                  className="sw-switch-btn"
-                  onClick={handleSwitchToArc}
-                  disabled={isSwitchingChain}
-                >
-                  {isSwitchingChain ? (
-                    <><span className="sw-spin" /> Switching...</>
-                  ) : (
-                    <>
-                      <img src="/img/logos/arc-network.png" alt="ARC" className="sw-switch-chain-logo" />
-                      Switch to ARC Testnet
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          ) : (
           <div className="sw-shell">
 
             {/* Header */}
@@ -879,7 +809,6 @@ export default function Swap() {
               )}
             </div>
           </div>
-          )}
         </div>
       </div>
 

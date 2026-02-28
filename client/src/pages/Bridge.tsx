@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
   ArrowDownUp, ExternalLink, ChevronDown, AlertTriangle, Clock, Check,
-  Loader2, Search, ArrowRight, Zap, Shield, Globe, RotateCcw,
+  Loader2, Search, ArrowRight, Zap, Shield, Globe, RotateCcw, Bell, X,
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
@@ -20,7 +20,9 @@ import {
 import {
   savePendingTransfer,
   updateTransferStatus,
+  getPendingTransfers,
   getResumableTransfers,
+  removeTransfer,
   type PendingBridgeTransfer,
 } from "@/lib/bridge-transfers";
 
@@ -329,12 +331,27 @@ export default function Bridge() {
   const [pendingTransfers, setPendingTransfers] = useState<PendingBridgeTransfer[]>([]);
   const currentTransferIdRef = useRef<string | null>(null);
 
+  // Notification bell state
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [allTransfers, setAllTransfers] = useState<PendingBridgeTransfer[]>([]);
+  const notifRef = useRef<HTMLDivElement>(null);
+  const notifBtnRef = useRef<HTMLButtonElement>(null);
+
+  const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
+
   // ── Load resumable transfers ───────────────────────────────────────────────
   const refreshPendingTransfers = useCallback(() => {
     if (address) {
       setPendingTransfers(getResumableTransfers(address));
+      // Load ALL transfers for notification dropdown
+      setAllTransfers(
+        getPendingTransfers().filter(
+          t => t.userAddress.toLowerCase() === address.toLowerCase()
+        )
+      );
     } else {
       setPendingTransfers([]);
+      setAllTransfers([]);
     }
   }, [address]);
 
@@ -347,7 +364,23 @@ export default function Bridge() {
     return () => window.removeEventListener("bridge-transfers-updated", handler);
   }, [refreshPendingTransfers]);
 
-  // Listen for resume events from Header notification bell
+  // Close notification dropdown on outside click
+  useEffect(() => {
+    if (!notifOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        notifRef.current && !notifRef.current.contains(target) &&
+        notifBtnRef.current && !notifBtnRef.current.contains(target)
+      ) {
+        setNotifOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [notifOpen]);
+
+  // Listen for resume events
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<PendingBridgeTransfer>).detail;
@@ -358,6 +391,24 @@ export default function Bridge() {
     window.addEventListener("bridge-resume-transfer", handler);
     return () => window.removeEventListener("bridge-resume-transfer", handler);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const resumableCount = address ? getResumableTransfers(address).length : 0;
+
+  const handleDismiss = (id: string) => {
+    removeTransfer(id);
+    refreshPendingTransfers();
+  };
+
+  const getStatusInfo = (status: PendingBridgeTransfer["status"]) => {
+    switch (status) {
+      case "attesting": return { label: "Waiting for attestation", color: "#f59e0b", Icon: Clock };
+      case "ready_to_mint": return { label: "Ready to mint", color: "#4ade80", Icon: Check };
+      case "minting": return { label: "Minting...", color: "#818cf8", Icon: RotateCcw };
+      case "complete": return { label: "Complete", color: "#4ade80", Icon: Check };
+      case "failed": return { label: "Failed", color: "#f87171", Icon: AlertTriangle };
+      default: return { label: status, color: "#818cf8", Icon: Clock };
+    }
+  };
 
   // ── Fetch USDC balance on source chain ──────────────────────────────────────
   const fetchBalance = useCallback(async () => {
@@ -681,7 +732,6 @@ export default function Bridge() {
   }
 
   // ── Derived ────────────────────────────────────────────────────────────────
-  const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
   const canBridge = isConnected && amount && parseFloat(amount) > 0 && !isTransferring;
   const estimatedTime = (useFastTransfer && sourceChain.supportsFastTransfer) ? "~8-20 seconds" : "~15-19 minutes";
 
@@ -759,6 +809,35 @@ export default function Bridge() {
         .br-usdc-icon { width:22px; height:22px; border-radius:50%; background:linear-gradient(135deg,#2775ca,#3b8dd4); display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:900; color:white; flex-shrink:0; border:1px solid rgba(39,117,202,0.3); }
 
         @media (max-width:400px) { .br-body{padding:12px;} .br-box{padding:12px 14px;} .br-hdr{padding:13px 16px;} }
+
+        /* notification bell */
+        .br-hdr-right { display:flex; align-items:center; gap:8px; }
+        .br-notif-btn { position:relative; width:34px; height:34px; border-radius:10px; border:1px solid rgba(255,255,255,0.08); background:rgba(255,255,255,0.04); color:rgba(255,255,255,0.45); display:flex; align-items:center; justify-content:center; cursor:pointer; transition:all 0.2s; }
+        .br-notif-btn:hover { background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.85); border-color:rgba(255,255,255,0.16); }
+        .br-notif-badge { position:absolute; top:-4px; right:-4px; min-width:16px; height:16px; padding:0 4px; border-radius:8px; background:#f59e0b; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:800; color:white; animation:pulse 2s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+        .br-notif-dropdown { position:absolute; right:0; top:100%; margin-top:8px; width:340px; max-width:calc(100vw - 32px); background:rgba(15,18,30,0.97); border:1px solid rgba(255,255,255,0.08); border-radius:16px; overflow:hidden; max-height:70vh; box-shadow:0 16px 48px rgba(0,0,0,0.5); z-index:60; }
+        .br-notif-header { padding:12px 16px; border-bottom:1px solid rgba(255,255,255,0.06); display:flex; align-items:center; justify-content:space-between; }
+        .br-notif-header-title { font-size:14px; font-weight:700; color:white; }
+        .br-notif-close { width:24px; height:24px; border-radius:6px; background:rgba(255,255,255,0.06); border:none; color:rgba(255,255,255,0.5); cursor:pointer; display:flex; align-items:center; justify-content:center; transition:all 0.2s; }
+        .br-notif-close:hover { background:rgba(255,255,255,0.12); color:rgba(255,255,255,0.8); }
+        .br-notif-list { overflow-y:auto; max-height:50vh; }
+        .br-notif-empty { padding:32px 16px; text-align:center; color:rgba(255,255,255,0.3); font-size:13px; }
+        .br-notif-item { padding:12px 16px; border-bottom:1px solid rgba(255,255,255,0.04); display:flex; flex-direction:column; gap:8px; }
+        .br-notif-route { display:flex; align-items:center; justify-content:space-between; }
+        .br-notif-chains { display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; color:white; }
+        .br-notif-chain-dot { width:18px; height:18px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:8px; font-weight:800; flex-shrink:0; }
+        .br-notif-amount { font-size:13px; font-weight:700; color:white; }
+        .br-notif-status-row { display:flex; align-items:center; justify-content:space-between; }
+        .br-notif-status { display:flex; align-items:center; gap:6px; }
+        .br-notif-age { font-size:10px; color:rgba(255,255,255,0.25); }
+        .br-notif-actions { display:flex; align-items:center; gap:6px; }
+        .br-notif-resume { font-size:10px; font-weight:700; color:#4ade80; padding:2px 8px; border-radius:6px; background:rgba(74,222,128,0.1); border:1px solid rgba(74,222,128,0.25); cursor:pointer; display:flex; align-items:center; gap:4px; transition:all 0.2s; }
+        .br-notif-resume:hover { background:rgba(74,222,128,0.2); border-color:rgba(74,222,128,0.4); }
+        .br-notif-dismiss { font-size:10px; color:rgba(255,255,255,0.3); padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); cursor:pointer; transition:all 0.2s; }
+        .br-notif-dismiss:hover { background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.5); }
+        .br-notif-link { color:#818cf8; display:flex; transition:color 0.2s; }
+        .br-notif-link:hover { color:#a5b4fc; }
       `}</style>
 
       <div className="br-wrap">
@@ -777,9 +856,112 @@ export default function Bridge() {
                 <span className="br-hdr-dot" />
                 <span className="br-hdr-title">Bridge</span>
               </div>
-              <div className="br-powered">
-                <Shield style={{ width: 12, height: 12 }} />
-                <span>Powered by Circle CCTP</span>
+              <div className="br-hdr-right">
+                <div className="br-powered">
+                  <Shield style={{ width: 12, height: 12 }} />
+                  <span>Powered by Circle CCTP</span>
+                </div>
+                <div style={{ position: "relative" }}>
+                  <button
+                    ref={notifBtnRef}
+                    className="br-notif-btn"
+                    onClick={() => setNotifOpen(!notifOpen)}
+                    title="Bridge transfers"
+                  >
+                    <Bell style={{ width: 15, height: 15 }} />
+                    {resumableCount > 0 && (
+                      <span className="br-notif-badge">{resumableCount}</span>
+                    )}
+                  </button>
+                  {notifOpen && (
+                    <div ref={notifRef} className="br-notif-dropdown">
+                      <div className="br-notif-header">
+                        <span>Bridge Transfers</span>
+                        <button className="br-notif-close" onClick={() => setNotifOpen(false)}>
+                          <X style={{ width: 14, height: 14 }} />
+                        </button>
+                      </div>
+                      {allTransfers.length === 0 ? (
+                        <div className="br-notif-empty">No transfers yet</div>
+                      ) : (
+                        <div className="br-notif-list">
+                          {allTransfers.map(tx => {
+                            const srcChain = getChainByDomain(tx.sourceDomain);
+                            const dstChain = getChainByDomain(tx.destDomain);
+                            const { label, color, Icon } = getStatusInfo(tx.status);
+                            const age = Date.now() - tx.timestamp;
+                            const ageStr = age < 60000 ? "<1m ago"
+                              : age < 3600000 ? `${Math.floor(age / 60000)}m ago`
+                              : age < 86400000 ? `${Math.floor(age / 3600000)}h ago`
+                              : `${Math.floor(age / 86400000)}d ago`;
+                            const canResume = tx.status === "attesting" || tx.status === "ready_to_mint";
+                            const canDismiss = tx.status === "complete" || tx.status === "failed";
+
+                            return (
+                              <div key={tx.id} className="br-notif-item">
+                                <div className="br-notif-route">
+                                  <div className="br-notif-chains">
+                                    <span
+                                      className="br-notif-chain-dot"
+                                      style={{ background: `linear-gradient(135deg, ${srcChain?.color || "#666"}66, ${srcChain?.color || "#666"})` }}
+                                    >
+                                      {srcChain?.shortName.charAt(0) || "?"}
+                                    </span>
+                                    {srcChain?.shortName || "?"}
+                                    <ArrowRight style={{ width: 10, height: 10, color: "#818cf8" }} />
+                                    <span
+                                      className="br-notif-chain-dot"
+                                      style={{ background: `linear-gradient(135deg, ${dstChain?.color || "#666"}66, ${dstChain?.color || "#666"})` }}
+                                    >
+                                      {dstChain?.shortName.charAt(0) || "?"}
+                                    </span>
+                                    {dstChain?.shortName || "?"}
+                                  </div>
+                                  <span className="br-notif-amount">{tx.amount} USDC</span>
+                                </div>
+                                <div className="br-notif-status-row">
+                                  <span className="br-notif-status" style={{ color }}>
+                                    <Icon style={{ width: 10, height: 10 }} />
+                                    {label}
+                                  </span>
+                                  <span className="br-notif-age">{ageStr}</span>
+                                </div>
+                                <div className="br-notif-actions">
+                                  {canResume && (
+                                    <button
+                                      className="br-notif-resume"
+                                      onClick={() => { setNotifOpen(false); resumeTransfer(tx); }}
+                                      disabled={isTransferring}
+                                    >
+                                      <RotateCcw style={{ width: 10, height: 10 }} />
+                                      Resume
+                                    </button>
+                                  )}
+                                  {canDismiss && (
+                                    <button className="br-notif-dismiss" onClick={() => handleDismiss(tx.id)}>
+                                      Dismiss
+                                    </button>
+                                  )}
+                                  {tx.burnTxHash && srcChain && (
+                                    <a
+                                      className="br-notif-link"
+                                      href={`${srcChain.explorerUrl}/tx/${tx.burnTxHash}`}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                    >
+                                      <ExternalLink style={{ width: 10, height: 10 }} />
+                                      Tx
+                                    </a>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 

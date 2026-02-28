@@ -4,12 +4,14 @@ import { AddLiquidityV3Basic } from "@/components/AddLiquidityV3Basic";
 import { AddLiquidityV3Advanced } from "@/components/AddLiquidityV3Advanced";
 import { MigrateV2ToV3 } from "@/components/MigrateV2ToV3";
 import { Droplets, Layers, Zap, ArrowRight } from "lucide-react";
+import { useRequireArcChain } from "@/hooks/useRequireArcChain";
 
 type V2Tab = "add" | "migrate";
 type V3Tab = "basic" | "advanced";
 type Proto = "v2" | "v3";
 
 export default function AddLiquidity() {
+  useRequireArcChain();
   const [proto, setProto] = useState<Proto>("v2");
   const [v2Tab, setV2Tab] = useState<V2Tab>("add");
   const [v3Tab, setV3Tab] = useState<V3Tab>("basic");
