@@ -329,7 +329,6 @@ export default function Bridge() {
   // Transfer state
   const [transfer, setTransfer] = useState<TransferState>(INITIAL_STATE);
   const abortRef = useRef(false);
-  const [pendingTransfers, setPendingTransfers] = useState<PendingBridgeTransfer[]>([]);
   const currentTransferIdRef = useRef<string | null>(null);
 
   // Notification panel state (full-screen modal like TransactionHistory)
@@ -343,15 +342,12 @@ export default function Bridge() {
   // ── Load resumable transfers ───────────────────────────────────────────────
   const refreshPendingTransfers = useCallback(() => {
     if (address) {
-      setPendingTransfers(getResumableTransfers(address));
-      // Load ALL transfers for notification dropdown
       setAllTransfers(
         getPendingTransfers().filter(
           t => t.userAddress.toLowerCase() === address.toLowerCase()
         )
       );
     } else {
-      setPendingTransfers([]);
       setAllTransfers([]);
     }
   }, [address]);
@@ -1138,106 +1134,6 @@ export default function Bridge() {
             </div>
           </div>
 
-          {/* Pending Transfers */}
-          {pendingTransfers.length > 0 && (
-            <div style={{
-              marginTop: 16,
-              background: "rgba(255,255,255,0.03)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              borderRadius: 20,
-              overflow: "hidden",
-            }}>
-              <div style={{
-                padding: "12px 18px",
-                borderBottom: "1px solid rgba(255,255,255,0.06)",
-                display: "flex", alignItems: "center", gap: 8,
-              }}>
-                <Clock style={{ width: 14, height: 14, color: "#f59e0b" }} />
-                <span style={{ fontSize: 13, fontWeight: 700, color: "white" }}>
-                  Pending Transfers ({pendingTransfers.length})
-                </span>
-              </div>
-              {pendingTransfers.map(tx => {
-                const srcChain = getChainByDomain(tx.sourceDomain);
-                const dstChain = getChainByDomain(tx.destDomain);
-                const age = Date.now() - tx.timestamp;
-                const ageStr = age < 60000 ? "<1m ago"
-                  : age < 3600000 ? `${Math.floor(age / 60000)}m ago`
-                  : age < 86400000 ? `${Math.floor(age / 3600000)}h ago`
-                  : `${Math.floor(age / 86400000)}d ago`;
-
-                return (
-                  <div
-                    key={tx.id}
-                    style={{
-                      padding: "12px 18px",
-                      borderBottom: "1px solid rgba(255,255,255,0.04)",
-                      display: "flex", alignItems: "center", justifyContent: "space-between",
-                      gap: 10,
-                    }}
-                  >
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "white", marginBottom: 4 }}>
-                        <span style={{
-                          width: 16, height: 16, borderRadius: "50%",
-                          background: `linear-gradient(135deg, ${srcChain?.color || "#666"}44, ${srcChain?.color || "#666"}88)`,
-                          display: "inline-flex", alignItems: "center", justifyContent: "center",
-                          fontSize: 7, fontWeight: 800, color: srcChain?.color || "#666", flexShrink: 0,
-                          overflow: "hidden",
-                        }}>
-                          {srcChain?.logo ? (
-                            <img src={srcChain.logo} alt={srcChain.shortName} style={{ width: 16, height: 16, borderRadius: "50%" }} />
-                          ) : (srcChain?.shortName.charAt(0) || "?")}
-                        </span>
-                        {srcChain?.shortName || "?"}
-                        <ArrowRight style={{ width: 10, height: 10, color: "#818cf8" }} />
-                        <span style={{
-                          width: 16, height: 16, borderRadius: "50%",
-                          background: `linear-gradient(135deg, ${dstChain?.color || "#666"}44, ${dstChain?.color || "#666"}88)`,
-                          display: "inline-flex", alignItems: "center", justifyContent: "center",
-                          fontSize: 7, fontWeight: 800, color: dstChain?.color || "#666", flexShrink: 0,
-                          overflow: "hidden",
-                        }}>
-                          {dstChain?.logo ? (
-                            <img src={dstChain.logo} alt={dstChain.shortName} style={{ width: 16, height: 16, borderRadius: "50%" }} />
-                          ) : (dstChain?.shortName.charAt(0) || "?")}
-                        </span>
-                        {dstChain?.shortName || "?"}
-                        <span style={{ marginLeft: 4, fontWeight: 700 }}>{tx.amount} USDC</span>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <span style={{
-                          fontSize: 10, fontWeight: 600,
-                          color: tx.status === "ready_to_mint" ? "#4ade80" : "#f59e0b",
-                        }}>
-                          {tx.status === "ready_to_mint" ? "Ready to mint" : "Waiting for attestation"}
-                        </span>
-                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)" }}>{ageStr}</span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => resumeTransfer(tx)}
-                      disabled={isTransferring}
-                      style={{
-                        fontSize: 11, fontWeight: 700, color: "#4ade80",
-                        padding: "6px 12px", borderRadius: 10,
-                        background: "rgba(74,222,128,0.1)",
-                        border: "1px solid rgba(74,222,128,0.25)",
-                        cursor: isTransferring ? "not-allowed" : "pointer",
-                        opacity: isTransferring ? 0.5 : 1,
-                        display: "flex", alignItems: "center", gap: 5,
-                        transition: "all 0.2s",
-                        flexShrink: 0,
-                      }}
-                    >
-                      <RotateCcw style={{ width: 12, height: 12 }} />
-                      Resume
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-          )}
         </div>
       </div>
 

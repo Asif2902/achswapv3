@@ -78,7 +78,7 @@ export default function Swap() {
   const chainId = useChainId();
   const { toast } = useToast();
 
-  useRequireArcChain();
+  const { isWrongChain, isSwitching, switchToArc } = useRequireArcChain();
 
   let contracts: ReturnType<typeof getContractsForChain> | null = null;
   try { contracts = chainId ? getContractsForChain(chainId) : null; } catch { /* wrong chain */ }
@@ -600,6 +600,14 @@ export default function Swap() {
         .sw-spin { animation:sw-spin 1s linear infinite; display:inline-block; width:18px; height:18px; border:2.5px solid rgba(255,255,255,0.2); border-top-color:white; border-radius:50%; }
 
         @media (max-width:400px) { .sw-body{padding:12px;} .sw-box{padding:12px 14px;} .sw-hdr{padding:13px 16px;} }
+
+        .sw-chain-banner { display:flex; align-items:center; gap:10px; padding:12px 16px; margin-bottom:12px; border-radius:16px; background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.25); }
+        .sw-chain-banner-icon { flex-shrink:0; color:#f59e0b; }
+        .sw-chain-banner-text { flex:1; font-size:13px; color:rgba(255,255,255,0.7); line-height:1.4; }
+        .sw-chain-banner-text strong { color:#fbbf24; font-weight:700; }
+        .sw-chain-banner-btn { flex-shrink:0; padding:7px 14px; border-radius:10px; border:none; background:linear-gradient(135deg,#6366f1,#3b82f6); color:white; font-size:12px; font-weight:700; cursor:pointer; transition:all 0.2s; white-space:nowrap; }
+        .sw-chain-banner-btn:hover { background:linear-gradient(135deg,#4f46e5,#2563eb); transform:translateY(-1px); box-shadow:0 4px 16px rgba(99,102,241,0.4); }
+        .sw-chain-banner-btn:disabled { opacity:0.6; cursor:not-allowed; transform:none; box-shadow:none; }
       `}</style>
 
       <div className="sw-wrap">
@@ -609,6 +617,18 @@ export default function Swap() {
             <h1>Swap Tokens</h1>
             <p>Best rate · Smart routing · V2 &amp; V3</p>
           </div>
+
+          {isWrongChain && (
+            <div className="sw-chain-banner">
+              <AlertTriangle className="sw-chain-banner-icon" style={{ width: 18, height: 18 }} />
+              <span className="sw-chain-banner-text">
+                You're on the <strong>wrong network</strong>. Switch to <strong>Arc Testnet</strong> to swap.
+              </span>
+              <button className="sw-chain-banner-btn" onClick={switchToArc} disabled={isSwitching}>
+                {isSwitching ? "Switching..." : "Switch"}
+              </button>
+            </div>
+          )}
 
           <div className="sw-shell">
 

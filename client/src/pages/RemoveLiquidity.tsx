@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { RemoveLiquidityV2 } from "@/components/RemoveLiquidityV2";
 import { RemoveLiquidityV3 } from "@/components/RemoveLiquidityV3";
-import { Droplets, Zap } from "lucide-react";
+import { Droplets, Zap, AlertTriangle } from "lucide-react";
 import { useRequireArcChain } from "@/hooks/useRequireArcChain";
 
 type Proto = "v2" | "v3";
 
 export default function RemoveLiquidity() {
-  useRequireArcChain();
+  const { isWrongChain, isSwitching, switchToArc } = useRequireArcChain();
   const [proto, setProto] = useState<Proto>("v2");
 
   return (
@@ -18,6 +18,22 @@ export default function RemoveLiquidity() {
           <h1 className="text-2xl font-extrabold text-white mb-1.5 tracking-tight">Remove Liquidity</h1>
           <p className="text-xs text-white/35 m-0">Withdraw your liquidity from pools</p>
         </div>
+
+        {isWrongChain && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", marginBottom: 12, borderRadius: 16, background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.25)" }}>
+            <AlertTriangle style={{ width: 18, height: 18, flexShrink: 0, color: "#f59e0b" }} />
+            <span style={{ flex: 1, fontSize: 13, color: "rgba(255,255,255,0.7)", lineHeight: 1.4 }}>
+              You're on the <strong style={{ color: "#fbbf24", fontWeight: 700 }}>wrong network</strong>. Switch to <strong style={{ color: "#fbbf24", fontWeight: 700 }}>Arc Testnet</strong> to remove liquidity.
+            </span>
+            <button
+              onClick={switchToArc}
+              disabled={isSwitching}
+              style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 10, border: "none", background: "linear-gradient(135deg,#6366f1,#3b82f6)", color: "white", fontSize: 12, fontWeight: 700, cursor: isSwitching ? "not-allowed" : "pointer", opacity: isSwitching ? 0.6 : 1, whiteSpace: "nowrap" }}
+            >
+              {isSwitching ? "Switching..." : "Switch"}
+            </button>
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-2 mb-4">
           <button
