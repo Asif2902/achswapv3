@@ -38,6 +38,10 @@ export function Header() {
               <span className="relative z-10">Pools</span>
               <span className="absolute inset-0 bg-primary/10 rounded-lg scale-0 group-hover:scale-100 transition-transform duration-300"></span>
             </Link>
+            <Link href="/bridge" data-testid="link-bridge" className="px-4 py-2 text-sm font-medium text-foreground hover:bg-accent/80 hover:text-accent-foreground rounded-lg transition-all duration-300 hover:scale-105 relative group">
+              <span className="relative z-10">Bridge</span>
+              <span className="absolute inset-0 bg-primary/10 rounded-lg scale-0 group-hover:scale-100 transition-transform duration-300"></span>
+            </Link>
           </nav>
         </div>
 
@@ -81,6 +85,9 @@ export function Header() {
           </Link>
           <Link href="/pools" data-testid="link-pools-mobile" className="px-3 py-2 text-xs font-medium text-foreground hover:bg-accent hover:text-accent-foreground rounded-lg transition-colors whitespace-nowrap">
             Pools
+          </Link>
+          <Link href="/bridge" data-testid="link-bridge-mobile" className="px-3 py-2 text-xs font-medium text-foreground hover:bg-accent hover:text-accent-foreground rounded-lg transition-colors whitespace-nowrap">
+            Bridge
           </Link>
         </div>
       </nav>
