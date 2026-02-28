@@ -3,15 +3,13 @@ import { AddLiquidityV2 } from "@/components/AddLiquidityV2";
 import { AddLiquidityV3Basic } from "@/components/AddLiquidityV3Basic";
 import { AddLiquidityV3Advanced } from "@/components/AddLiquidityV3Advanced";
 import { MigrateV2ToV3 } from "@/components/MigrateV2ToV3";
-import { Droplets, Layers, Zap, ArrowRight, AlertTriangle } from "lucide-react";
-import { useRequireArcChain } from "@/hooks/useRequireArcChain";
+import { Droplets, Layers, Zap, ArrowRight } from "lucide-react";
 
 type V2Tab = "add" | "migrate";
 type V3Tab = "basic" | "advanced";
 type Proto = "v2" | "v3";
 
 export default function AddLiquidity() {
-  const { isWrongChain, isSwitching, switchToArc } = useRequireArcChain();
   const [proto, setProto] = useState<Proto>("v2");
   const [v2Tab, setV2Tab] = useState<V2Tab>("add");
   const [v3Tab, setV3Tab] = useState<V3Tab>("basic");
@@ -142,13 +140,6 @@ export default function AddLiquidity() {
           .alp-content { padding: 14px; }
           .alp-proto-btn { padding: 12px 8px; }
         }
-        .alp-chain-banner { display:flex; align-items:center; gap:10px; padding:12px 16px; margin-bottom:12px; border-radius:16px; background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.25); }
-        .alp-chain-banner-icon { flex-shrink:0; color:#f59e0b; }
-        .alp-chain-banner-text { flex:1; font-size:13px; color:rgba(255,255,255,0.7); line-height:1.4; }
-        .alp-chain-banner-text strong { color:#fbbf24; font-weight:700; }
-        .alp-chain-banner-btn { flex-shrink:0; padding:7px 14px; border-radius:10px; border:none; background:linear-gradient(135deg,#6366f1,#3b82f6); color:white; font-size:12px; font-weight:700; cursor:pointer; transition:all 0.2s; white-space:nowrap; }
-        .alp-chain-banner-btn:hover { background:linear-gradient(135deg,#4f46e5,#2563eb); transform:translateY(-1px); box-shadow:0 4px 16px rgba(99,102,241,0.4); }
-        .alp-chain-banner-btn:disabled { opacity:0.6; cursor:not-allowed; transform:none; box-shadow:none; }
       `}</style>
 
       <div className="alp-root">
@@ -159,18 +150,6 @@ export default function AddLiquidity() {
             <h1>Add Liquidity</h1>
             <p>Provide liquidity and earn trading fees</p>
           </div>
-
-          {isWrongChain && (
-            <div className="alp-chain-banner">
-              <AlertTriangle className="alp-chain-banner-icon" style={{ width: 18, height: 18 }} />
-              <span className="alp-chain-banner-text">
-                You're on the <strong>wrong network</strong>. Switch to <strong>Arc Testnet</strong> to add liquidity.
-              </span>
-              <button className="alp-chain-banner-btn" onClick={switchToArc} disabled={isSwitching}>
-                {isSwitching ? "Switching..." : "Switch"}
-              </button>
-            </div>
-          )}
 
           {/* Protocol toggle */}
           <div className="alp-proto-tabs">

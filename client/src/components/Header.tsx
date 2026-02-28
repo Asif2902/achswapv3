@@ -1,21 +1,18 @@
 import { useState, useEffect, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { useChainId } from "wagmi";
 import {
   ArrowLeftRight, Droplets, MinusCircle, LayoutGrid, Globe,
+  AlertTriangle,
 } from "lucide-react";
 
 export function Header() {
-  const chainId = useChainId();
   const [location] = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
 
-  const chainDisplayInfo = chainId === 2201 
-    ? { name: "Stable Testnet", logo: "/img/logos/stable-network.png" }
-    : { name: "ARC Testnet", logo: "/img/logos/arc-network.png" };
+  const isBridgePage = location.startsWith("/bridge");
 
   // Close mobile menu on route change
   useEffect(() => {
@@ -99,29 +96,126 @@ export function Header() {
         </div>
 
         <div className="flex items-center gap-2 md:gap-3 fade-in">
-          <button
-            onClick={() => (document.querySelector('[data-testid="connect-wallet-button"] button') as HTMLButtonElement)?.click()}
-            className="flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-2 bg-muted/50 rounded-lg border border-primary/30 hover:border-primary/60 hover:bg-muted/70 transition-all duration-300 cursor-pointer group"
-            title="Click to switch network"
-          >
-            <img 
-              src={chainDisplayInfo.logo} 
-              alt={chainDisplayInfo.name} 
-              className="h-4 w-4 md:h-5 md:w-5 rounded-full" 
-              onError={(e) => console.error('Failed to load network logo:', e)} 
-            />
-            <span className="hidden sm:inline text-xs md:text-sm font-medium text-white whitespace-nowrap">
-              {chainDisplayInfo.name}
-            </span>
-            <span className="h-1.5 w-1.5 md:h-2 md:w-2 bg-green-500 rounded-full animate-pulse"></span>
-          </button>
+          <ConnectButton.Custom>
+            {({
+              account,
+              chain,
+              openAccountModal,
+              openChainModal,
+              openConnectModal,
+              mounted,
+            }) => {
+              const ready = mounted;
+              const connected = ready && account && chain;
 
-          <div data-testid="connect-wallet-button">
-            <ConnectButton
-              showBalance={false}
-              chainStatus="none"
-            />
-          </div>
+              return (
+                <div
+                  {...(!ready && {
+                    "aria-hidden": true,
+                    style: {
+                      opacity: 0,
+                      pointerEvents: "none" as const,
+                      userSelect: "none" as const,
+                    },
+                  })}
+                  style={{ display: "flex", alignItems: "center", gap: 8 }}
+                >
+                  {(() => {
+                    if (!connected) {
+                      return (
+                        <button
+                          onClick={openConnectModal}
+                          className="px-4 py-2 text-sm font-semibold rounded-lg bg-gradient-to-r from-primary to-blue-500 text-white hover:opacity-90 transition-all duration-200 shadow-md hover:shadow-lg"
+                        >
+                          Connect Wallet
+                        </button>
+                      );
+                    }
+
+                    // Wrong chain — only show on non-bridge pages
+                    if (chain.unsupported && !isBridgePage) {
+                      return (
+                        <>
+                          <button
+                            onClick={openChainModal}
+                            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold transition-all duration-200"
+                            style={{
+                              background: "rgba(239,68,68,0.15)",
+                              border: "1px solid rgba(239,68,68,0.4)",
+                              color: "#fca5a5",
+                            }}
+                          >
+                            <AlertTriangle className="w-4 h-4" style={{ color: "#ef4444" }} />
+                            <span className="hidden sm:inline">Wrong Network</span>
+                            <span className="sm:hidden">Wrong</span>
+                          </button>
+                          <button
+                            onClick={openAccountModal}
+                            className="flex items-center gap-1.5 px-2 md:px-3 py-2 bg-muted/50 rounded-lg border border-border/40 hover:border-primary/60 hover:bg-muted/70 transition-all duration-200 text-sm font-medium text-white"
+                          >
+                            {account.displayName}
+                          </button>
+                        </>
+                      );
+                    }
+
+                    // Correct chain (or any chain on Bridge page)
+                    return (
+                      <>
+                        {/* Chain button — show Arc on non-bridge pages, hide on bridge */}
+                        {!isBridgePage && (
+                          <button
+                            onClick={openChainModal}
+                            className="flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-2 bg-muted/50 rounded-lg border border-primary/30 hover:border-primary/60 hover:bg-muted/70 transition-all duration-300 cursor-pointer group"
+                            title="Switch network"
+                          >
+                            {chain.hasIcon && (
+                              <div
+                                style={{
+                                  width: 20,
+                                  height: 20,
+                                  borderRadius: "50%",
+                                  overflow: "hidden",
+                                  background: chain.iconBackground,
+                                }}
+                              >
+                                {chain.iconUrl && (
+                                  <img
+                                    alt={chain.name ?? "Chain"}
+                                    src={chain.iconUrl}
+                                    style={{ width: 20, height: 20 }}
+                                  />
+                                )}
+                              </div>
+                            )}
+                            {!chain.hasIcon && (
+                              <img
+                                src="/img/logos/arc-network.png"
+                                alt="ARC Testnet"
+                                className="h-4 w-4 md:h-5 md:w-5 rounded-full"
+                              />
+                            )}
+                            <span className="hidden sm:inline text-xs md:text-sm font-medium text-white whitespace-nowrap">
+                              {chain.name}
+                            </span>
+                            <span className="h-1.5 w-1.5 md:h-2 md:w-2 bg-green-500 rounded-full animate-pulse"></span>
+                          </button>
+                        )}
+
+                        {/* Account button */}
+                        <button
+                          onClick={openAccountModal}
+                          className="flex items-center gap-1.5 px-2 md:px-3 py-2 bg-muted/50 rounded-lg border border-border/40 hover:border-primary/60 hover:bg-muted/70 transition-all duration-200 text-sm font-medium text-white"
+                        >
+                          {account.displayName}
+                        </button>
+                      </>
+                    );
+                  })()}
+                </div>
+              );
+            }}
+          </ConnectButton.Custom>
 
           {/* Mobile hamburger button */}
           <button
