@@ -562,6 +562,16 @@ export default function Bridge() {
       }
     }
 
+    // Wait for chain switch to stabilize
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Verify the chain actually switched
+    const verifyProvider = new BrowserProvider(window.ethereum);
+    const verifiedChainId = await verifyProvider.getNetwork().then(n => Number(n.chainId));
+    if (verifiedChainId !== dstChain.chainId) {
+      throw new Error(`Chain switch to ${dstChain.name} did not complete. Please try again.`);
+    }
+
     const destProvider = new BrowserProvider(window.ethereum);
     const destSigner = await destProvider.getSigner();
 
@@ -602,15 +612,14 @@ export default function Bridge() {
     setTransfer({ ...INITIAL_STATE, step: "approving" });
 
     try {
-      const provider = new BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
       const decimals = sourceChain.usdcDecimals; // always 6 for CCTP operations
       const amountWei = BigInt(Math.floor(parseFloat(amount) * 10 ** decimals));
       const maxFee = BigInt(Math.floor(parseFloat(amount) * 0.0005 * 10 ** decimals)); // 0.05% max fee
       const minFinalityThreshold = (useFastTransfer && sourceChain.supportsFastTransfer) ? 1000 : 2000;
 
       // ── Check connected network & prompt switch ─────────────────────────
-      const currentChainId = await provider.getNetwork().then(n => Number(n.chainId));
+      const preProvider = new BrowserProvider(window.ethereum);
+      const currentChainId = await preProvider.getNetwork().then(n => Number(n.chainId));
       if (currentChainId !== sourceChain.chainId) {
         try {
           await window.ethereum.request({
@@ -634,7 +643,21 @@ export default function Bridge() {
             throw new Error(`Please switch to ${sourceChain.name} to continue`);
           }
         }
+
+        // Wait for chain switch to stabilize before creating provider/signer
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Verify the chain actually switched
+        const verifyProvider = new BrowserProvider(window.ethereum);
+        const newChainId = await verifyProvider.getNetwork().then(n => Number(n.chainId));
+        if (newChainId !== sourceChain.chainId) {
+          throw new Error(`Chain switch to ${sourceChain.name} did not complete. Please try again.`);
+        }
       }
+
+      // ── Create fresh provider/signer AFTER chain switch ─────────────────
+      const provider = new BrowserProvider(window.ethereum);
+      const signer = await provider.getSigner();
 
       // ── Step 1: Approve USDC ────────────────────────────────────────────
       toast({ title: "Approving USDC...", description: `On ${sourceChain.name}` });
@@ -1160,8 +1183,11 @@ export default function Bridge() {
                           background: `linear-gradient(135deg, ${srcChain?.color || "#666"}44, ${srcChain?.color || "#666"}88)`,
                           display: "inline-flex", alignItems: "center", justifyContent: "center",
                           fontSize: 7, fontWeight: 800, color: srcChain?.color || "#666", flexShrink: 0,
+                          overflow: "hidden",
                         }}>
-                          {srcChain?.shortName.charAt(0) || "?"}
+                          {srcChain?.logo ? (
+                            <img src={srcChain.logo} alt={srcChain.shortName} style={{ width: 16, height: 16, borderRadius: "50%" }} />
+                          ) : (srcChain?.shortName.charAt(0) || "?")}
                         </span>
                         {srcChain?.shortName || "?"}
                         <ArrowRight style={{ width: 10, height: 10, color: "#818cf8" }} />
@@ -1170,8 +1196,11 @@ export default function Bridge() {
                           background: `linear-gradient(135deg, ${dstChain?.color || "#666"}44, ${dstChain?.color || "#666"}88)`,
                           display: "inline-flex", alignItems: "center", justifyContent: "center",
                           fontSize: 7, fontWeight: 800, color: dstChain?.color || "#666", flexShrink: 0,
+                          overflow: "hidden",
                         }}>
-                          {dstChain?.shortName.charAt(0) || "?"}
+                          {dstChain?.logo ? (
+                            <img src={dstChain.logo} alt={dstChain.shortName} style={{ width: 16, height: 16, borderRadius: "50%" }} />
+                          ) : (dstChain?.shortName.charAt(0) || "?")}
                         </span>
                         {dstChain?.shortName || "?"}
                         <span style={{ marginLeft: 4, fontWeight: 700 }}>{tx.amount} USDC</span>
@@ -1361,9 +1390,13 @@ export default function Bridge() {
                                   boxShadow: "0 0 0 1px rgba(255,255,255,0.08)",
                                 }}
                               >
-                                <span style={{ fontSize: 14, fontWeight: 800, color: srcChain?.color || "#888" }}>
-                                  {srcChain?.shortName.charAt(0) || "?"}
-                                </span>
+                                {srcChain?.logo ? (
+                                  <img src={srcChain.logo} alt={srcChain.shortName} className="w-full h-full object-cover" />
+                                ) : (
+                                  <span style={{ fontSize: 14, fontWeight: 800, color: srcChain?.color || "#888" }}>
+                                    {srcChain?.shortName.charAt(0) || "?"}
+                                  </span>
+                                )}
                               </div>
                               <div className="min-w-0">
                                 <p className="text-sm font-semibold text-white tabular-nums">{tx.amount}</p>
@@ -1392,9 +1425,13 @@ export default function Bridge() {
                                   boxShadow: "0 0 0 1px rgba(255,255,255,0.08)",
                                 }}
                               >
-                                <span style={{ fontSize: 14, fontWeight: 800, color: dstChain?.color || "#888" }}>
-                                  {dstChain?.shortName.charAt(0) || "?"}
-                                </span>
+                                {dstChain?.logo ? (
+                                  <img src={dstChain.logo} alt={dstChain.shortName} className="w-full h-full object-cover" />
+                                ) : (
+                                  <span style={{ fontSize: 14, fontWeight: 800, color: dstChain?.color || "#888" }}>
+                                    {dstChain?.shortName.charAt(0) || "?"}
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </div>
