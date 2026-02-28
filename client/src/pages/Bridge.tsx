@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
   ArrowDownUp, ExternalLink, ChevronDown, AlertTriangle, Clock, Check,
-  Loader2, Search, ArrowRight, Zap, Shield, Globe,
+  Loader2, Search, ArrowRight, Zap, Shield, Globe, RotateCcw,
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
@@ -13,8 +13,16 @@ import {
   ERC20_ABI,
   TOKEN_MESSENGER_V2_ABI,
   MESSAGE_TRANSMITTER_V2_ABI,
+  getWorkingProvider,
+  getChainByDomain,
   type CCTPChain,
 } from "@/lib/cctp-config";
+import {
+  savePendingTransfer,
+  updateTransferStatus,
+  getResumableTransfers,
+  type PendingBridgeTransfer,
+} from "@/lib/bridge-transfers";
 
 // ── Transfer status steps ────────────────────────────────────────────────────
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "complete" | "error";
@@ -318,13 +326,45 @@ export default function Bridge() {
   // Transfer state
   const [transfer, setTransfer] = useState<TransferState>(INITIAL_STATE);
   const abortRef = useRef(false);
+  const [pendingTransfers, setPendingTransfers] = useState<PendingBridgeTransfer[]>([]);
+  const currentTransferIdRef = useRef<string | null>(null);
+
+  // ── Load resumable transfers ───────────────────────────────────────────────
+  const refreshPendingTransfers = useCallback(() => {
+    if (address) {
+      setPendingTransfers(getResumableTransfers(address));
+    } else {
+      setPendingTransfers([]);
+    }
+  }, [address]);
+
+  useEffect(() => { refreshPendingTransfers(); }, [refreshPendingTransfers]);
+
+  // Listen for bridge-transfers-updated events (from persistence layer)
+  useEffect(() => {
+    const handler = () => refreshPendingTransfers();
+    window.addEventListener("bridge-transfers-updated", handler);
+    return () => window.removeEventListener("bridge-transfers-updated", handler);
+  }, [refreshPendingTransfers]);
+
+  // Listen for resume events from Header notification bell
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<PendingBridgeTransfer>).detail;
+      if (detail) {
+        resumeTransfer(detail);
+      }
+    };
+    window.addEventListener("bridge-resume-transfer", handler);
+    return () => window.removeEventListener("bridge-resume-transfer", handler);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Fetch USDC balance on source chain ──────────────────────────────────────
   const fetchBalance = useCallback(async () => {
     if (!address || !sourceChain) return;
     setIsLoadingBalance(true);
     try {
-      const provider = new JsonRpcProvider(sourceChain.rpcUrl);
+      const provider = await getWorkingProvider(sourceChain);
 
       if (sourceChain.isNativeUSDC) {
         // Arc Testnet: USDC is the native gas token (18 decimals for native balance)
@@ -360,6 +400,132 @@ export default function Bridge() {
     setTransfer(INITIAL_STATE);
   };
 
+  // ── Resume an interrupted transfer ──────────────────────────────────────────
+  const resumeTransfer = async (pendingTx: PendingBridgeTransfer) => {
+    if (!address || !window.ethereum) return;
+
+    const srcChain = getChainByDomain(pendingTx.sourceDomain);
+    const dstChain = getChainByDomain(pendingTx.destDomain);
+    if (!srcChain || !dstChain) return;
+
+    // Set the chains/amount in the UI
+    setSourceChain(srcChain);
+    setDestChain(dstChain);
+    setAmount(pendingTx.amount);
+    currentTransferIdRef.current = pendingTx.id;
+    abortRef.current = false;
+
+    try {
+      if (pendingTx.status === "attesting") {
+        // Resume from attestation polling
+        setTransfer({
+          step: "attesting",
+          burnTxHash: pendingTx.burnTxHash,
+          mintTxHash: null,
+          attestation: null,
+          error: null,
+        });
+
+        toast({ title: "Resuming transfer...", description: "Polling for attestation" });
+        const attestation = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
+
+        if (abortRef.current) return;
+        updateTransferStatus(pendingTx.id, { status: "ready_to_mint", attestation });
+        setTransfer(prev => ({ ...prev, step: "minting", attestation }));
+
+        // Proceed to mint
+        await executeMint(dstChain, attestation, pendingTx.id, pendingTx.amount);
+
+      } else if (pendingTx.status === "ready_to_mint" && pendingTx.attestation) {
+        // Resume from minting step
+        setTransfer({
+          step: "minting",
+          burnTxHash: pendingTx.burnTxHash,
+          mintTxHash: null,
+          attestation: pendingTx.attestation,
+          error: null,
+        });
+
+        await executeMint(dstChain, pendingTx.attestation, pendingTx.id, pendingTx.amount);
+      }
+    } catch (err: any) {
+      console.error("Resume error:", err);
+      const message = err?.message || err?.reason || "Unknown error";
+      updateTransferStatus(pendingTx.id, { status: "failed", error: message });
+      setTransfer(prev => ({ ...prev, step: "error", error: message }));
+      toast({
+        title: "Resume Failed",
+        description: message.length > 120 ? message.slice(0, 120) + "..." : message,
+        variant: "destructive",
+      });
+    }
+  };
+
+  // ── Execute the mint step (shared by handleBridge and resumeTransfer) ──────
+  const executeMint = async (
+    dstChain: CCTPChain,
+    attestation: { message: string; attestation: string },
+    transferId: string,
+    transferAmount: string,
+  ) => {
+    if (!window.ethereum) throw new Error("No wallet connected");
+
+    updateTransferStatus(transferId, { status: "minting" });
+
+    // Switch to destination chain
+    try {
+      await window.ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: "0x" + dstChain.chainId.toString(16) }],
+      });
+    } catch (switchErr: any) {
+      if (switchErr.code === 4902) {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: "0x" + dstChain.chainId.toString(16),
+            chainName: dstChain.name,
+            nativeCurrency: dstChain.nativeCurrency,
+            rpcUrls: [dstChain.rpcUrls[0]],
+            blockExplorerUrls: [dstChain.explorerUrl],
+          }],
+        });
+      } else {
+        throw new Error(`Please switch to ${dstChain.name} to receive USDC`);
+      }
+    }
+
+    const destProvider = new BrowserProvider(window.ethereum);
+    const destSigner = await destProvider.getSigner();
+
+    toast({ title: "Minting USDC...", description: `On ${dstChain.name}` });
+    const messageTransmitter = new Contract(
+      dstChain.messageTransmitterV2,
+      MESSAGE_TRANSMITTER_V2_ABI,
+      destSigner
+    );
+
+    const mintTx = await messageTransmitter.receiveMessage(
+      attestation.message,
+      attestation.attestation
+    );
+    const mintReceipt = await mintTx.wait();
+
+    updateTransferStatus(transferId, { status: "complete", mintTxHash: mintReceipt.hash });
+    setTransfer(prev => ({
+      ...prev,
+      step: "complete",
+      mintTxHash: mintReceipt.hash,
+    }));
+
+    toast({
+      title: "Bridge Complete!",
+      description: `${transferAmount} USDC bridged to ${dstChain.shortName}`,
+    });
+
+    fetchBalance();
+  };
+
   // ── CCTP Bridge execution ──────────────────────────────────────────────────
   const handleBridge = async () => {
     if (!address || !window.ethereum || !amount || parseFloat(amount) <= 0) return;
@@ -393,7 +559,7 @@ export default function Bridge() {
                 chainId: "0x" + sourceChain.chainId.toString(16),
                 chainName: sourceChain.name,
                 nativeCurrency: sourceChain.nativeCurrency,
-                rpcUrls: [sourceChain.rpcUrl],
+                rpcUrls: [sourceChain.rpcUrls[0]],
                 blockExplorerUrls: [sourceChain.explorerUrl],
               }],
             });
@@ -442,70 +608,40 @@ export default function Bridge() {
       if (abortRef.current) return;
       setTransfer(prev => ({ ...prev, step: "attesting", burnTxHash }));
 
+      // ── Persist the transfer after successful burn ──────────────────────
+      const transferId = burnTxHash;
+      currentTransferIdRef.current = transferId;
+      savePendingTransfer({
+        id: transferId,
+        burnTxHash,
+        sourceDomain: sourceChain.domain,
+        sourceChainId: sourceChain.chainId,
+        destDomain: destChain.domain,
+        destChainId: destChain.chainId,
+        amount,
+        userAddress: address,
+        timestamp: Date.now(),
+        status: "attesting",
+      });
+
       // ── Step 3: Poll for attestation ────────────────────────────────────
       toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
       const attestation = await pollForAttestation(sourceChain.domain, burnTxHash);
 
       if (abortRef.current) return;
+      updateTransferStatus(transferId, { status: "ready_to_mint", attestation });
       setTransfer(prev => ({ ...prev, step: "minting", attestation }));
 
       // ── Step 4: Mint USDC on destination ────────────────────────────────
-      // Switch to destination chain
-      try {
-        await window.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x" + destChain.chainId.toString(16) }],
-        });
-      } catch (switchErr: any) {
-        if (switchErr.code === 4902) {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: "0x" + destChain.chainId.toString(16),
-              chainName: destChain.name,
-              nativeCurrency: destChain.nativeCurrency,
-              rpcUrls: [destChain.rpcUrl],
-              blockExplorerUrls: [destChain.explorerUrl],
-            }],
-          });
-        } else {
-          throw new Error(`Please switch to ${destChain.name} to receive USDC`);
-        }
-      }
-
-      const destProvider = new BrowserProvider(window.ethereum);
-      const destSigner = await destProvider.getSigner();
-
-      toast({ title: "Minting USDC...", description: `On ${destChain.name}` });
-      const messageTransmitter = new Contract(
-        destChain.messageTransmitterV2,
-        MESSAGE_TRANSMITTER_V2_ABI,
-        destSigner
-      );
-
-      const mintTx = await messageTransmitter.receiveMessage(
-        attestation.message,
-        attestation.attestation
-      );
-      const mintReceipt = await mintTx.wait();
-
-      setTransfer(prev => ({
-        ...prev,
-        step: "complete",
-        mintTxHash: mintReceipt.hash,
-      }));
-
-      toast({
-        title: "Bridge Complete!",
-        description: `${amount} USDC bridged from ${sourceChain.shortName} to ${destChain.shortName}`,
-      });
-
-      // Refresh balance
-      fetchBalance();
+      await executeMint(destChain, attestation, transferId, amount);
 
     } catch (err: any) {
       console.error("Bridge error:", err);
       const message = err?.message || err?.reason || "Unknown error";
+      // Update persisted transfer if we have one
+      if (currentTransferIdRef.current) {
+        updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message });
+      }
       setTransfer(prev => ({ ...prev, step: "error", error: message }));
       toast({
         title: "Bridge Failed",
@@ -893,6 +1029,101 @@ export default function Bridge() {
               <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", lineHeight: 1.5 }}>Testnet chains supported via CCTP.</div>
             </div>
           </div>
+
+          {/* Pending Transfers */}
+          {pendingTransfers.length > 0 && (
+            <div style={{
+              marginTop: 16,
+              background: "rgba(255,255,255,0.03)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 20,
+              overflow: "hidden",
+            }}>
+              <div style={{
+                padding: "12px 18px",
+                borderBottom: "1px solid rgba(255,255,255,0.06)",
+                display: "flex", alignItems: "center", gap: 8,
+              }}>
+                <Clock style={{ width: 14, height: 14, color: "#f59e0b" }} />
+                <span style={{ fontSize: 13, fontWeight: 700, color: "white" }}>
+                  Pending Transfers ({pendingTransfers.length})
+                </span>
+              </div>
+              {pendingTransfers.map(tx => {
+                const srcChain = getChainByDomain(tx.sourceDomain);
+                const dstChain = getChainByDomain(tx.destDomain);
+                const age = Date.now() - tx.timestamp;
+                const ageStr = age < 60000 ? "<1m ago"
+                  : age < 3600000 ? `${Math.floor(age / 60000)}m ago`
+                  : age < 86400000 ? `${Math.floor(age / 3600000)}h ago`
+                  : `${Math.floor(age / 86400000)}d ago`;
+
+                return (
+                  <div
+                    key={tx.id}
+                    style={{
+                      padding: "12px 18px",
+                      borderBottom: "1px solid rgba(255,255,255,0.04)",
+                      display: "flex", alignItems: "center", justifyContent: "space-between",
+                      gap: 10,
+                    }}
+                  >
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "white", marginBottom: 4 }}>
+                        <span style={{
+                          width: 16, height: 16, borderRadius: "50%",
+                          background: `linear-gradient(135deg, ${srcChain?.color || "#666"}44, ${srcChain?.color || "#666"}88)`,
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          fontSize: 7, fontWeight: 800, color: srcChain?.color || "#666", flexShrink: 0,
+                        }}>
+                          {srcChain?.shortName.charAt(0) || "?"}
+                        </span>
+                        {srcChain?.shortName || "?"}
+                        <ArrowRight style={{ width: 10, height: 10, color: "#818cf8" }} />
+                        <span style={{
+                          width: 16, height: 16, borderRadius: "50%",
+                          background: `linear-gradient(135deg, ${dstChain?.color || "#666"}44, ${dstChain?.color || "#666"}88)`,
+                          display: "inline-flex", alignItems: "center", justifyContent: "center",
+                          fontSize: 7, fontWeight: 800, color: dstChain?.color || "#666", flexShrink: 0,
+                        }}>
+                          {dstChain?.shortName.charAt(0) || "?"}
+                        </span>
+                        {dstChain?.shortName || "?"}
+                        <span style={{ marginLeft: 4, fontWeight: 700 }}>{tx.amount} USDC</span>
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{
+                          fontSize: 10, fontWeight: 600,
+                          color: tx.status === "ready_to_mint" ? "#4ade80" : "#f59e0b",
+                        }}>
+                          {tx.status === "ready_to_mint" ? "Ready to mint" : "Waiting for attestation"}
+                        </span>
+                        <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)" }}>{ageStr}</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => resumeTransfer(tx)}
+                      disabled={isTransferring}
+                      style={{
+                        fontSize: 11, fontWeight: 700, color: "#4ade80",
+                        padding: "6px 12px", borderRadius: 10,
+                        background: "rgba(74,222,128,0.1)",
+                        border: "1px solid rgba(74,222,128,0.25)",
+                        cursor: isTransferring ? "not-allowed" : "pointer",
+                        opacity: isTransferring ? 0.5 : 1,
+                        display: "flex", alignItems: "center", gap: 5,
+                        transition: "all 0.2s",
+                        flexShrink: 0,
+                      }}
+                    >
+                      <RotateCcw style={{ width: 12, height: 12 }} />
+                      Resume
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
 

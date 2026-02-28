@@ -6,12 +6,14 @@
  * Domain identifiers from: https://developers.circle.com/cctp/concepts/supported-chains-and-domains
  */
 
+import { JsonRpcProvider } from "ethers";
+
 export interface CCTPChain {
   name: string;
   shortName: string;
   chainId: number;
   domain: number; // CCTP domain identifier (NOT chain ID)
-  rpcUrl: string;
+  rpcUrls: string[]; // multiple RPCs for fallback
   explorerUrl: string;
   explorerTxPath: string; // e.g. "/tx/" 
   usdcAddress: string;
@@ -38,7 +40,10 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "Arc",
     chainId: 5042002,
     domain: 26,
-    rpcUrl: "https://rpc.testnet.arc.network",
+    rpcUrls: [
+      "https://rpc.testnet.arc.network",
+      "https://rpc-testnet.arc.network",
+    ],
     explorerUrl: "https://testnet.arcscan.app",
     explorerTxPath: "/tx/",
     usdcAddress: "0x3600000000000000000000000000000000000000", // ERC-20 interface for native USDC (6 decimals, maps directly to native balance)
@@ -56,7 +61,12 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "Sepolia",
     chainId: 11155111,
     domain: 0,
-    rpcUrl: "https://rpc.sepolia.org",
+    rpcUrls: [
+      "https://rpc.sepolia.org",
+      "https://ethereum-sepolia-rpc.publicnode.com",
+      "https://sepolia.drpc.org",
+      "https://rpc2.sepolia.org",
+    ],
     explorerUrl: "https://sepolia.etherscan.io",
     explorerTxPath: "/tx/",
     usdcAddress: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
@@ -64,7 +74,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-    logo: "",
+    logo: "/img/logos/ethereum.png",
     color: "#627EEA",
     supportsFastTransfer: true,
     isNativeUSDC: false,
@@ -74,7 +84,11 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "Fuji",
     chainId: 43113,
     domain: 1,
-    rpcUrl: "https://api.avax-test.network/ext/bc/C/rpc",
+    rpcUrls: [
+      "https://api.avax-test.network/ext/bc/C/rpc",
+      "https://avalanche-fuji-c-chain-rpc.publicnode.com",
+      "https://rpc.ankr.com/avalanche_fuji",
+    ],
     explorerUrl: "https://testnet.snowtrace.io",
     explorerTxPath: "/tx/",
     usdcAddress: "0x5425890298aed601595a70AB815c96711a31Bc65",
@@ -82,7 +96,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
     nativeCurrency: { name: "Avalanche", symbol: "AVAX", decimals: 18 },
-    logo: "",
+    logo: "/img/logos/avalanche.png",
     color: "#E84142",
     supportsFastTransfer: false,
     isNativeUSDC: false,
@@ -92,7 +106,11 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "OP Sep",
     chainId: 11155420,
     domain: 2,
-    rpcUrl: "https://sepolia.optimism.io",
+    rpcUrls: [
+      "https://sepolia.optimism.io",
+      "https://optimism-sepolia-rpc.publicnode.com",
+      "https://optimism-sepolia.drpc.org",
+    ],
     explorerUrl: "https://sepolia-optimism.etherscan.io",
     explorerTxPath: "/tx/",
     usdcAddress: "0x5fd84259d66Cd46123540766Be93DFE6D43130D7",
@@ -100,7 +118,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-    logo: "",
+    logo: "/img/logos/optimism.png",
     color: "#FF0420",
     supportsFastTransfer: true,
     isNativeUSDC: false,
@@ -110,7 +128,11 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "Arb Sep",
     chainId: 421614,
     domain: 3,
-    rpcUrl: "https://sepolia-rollup.arbitrum.io/rpc",
+    rpcUrls: [
+      "https://sepolia-rollup.arbitrum.io/rpc",
+      "https://arbitrum-sepolia-rpc.publicnode.com",
+      "https://arbitrum-sepolia.drpc.org",
+    ],
     explorerUrl: "https://sepolia.arbiscan.io",
     explorerTxPath: "/tx/",
     usdcAddress: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
@@ -118,7 +140,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-    logo: "",
+    logo: "/img/logos/arbitrum.png",
     color: "#28A0F0",
     supportsFastTransfer: true,
     isNativeUSDC: false,
@@ -128,7 +150,11 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "Base Sep",
     chainId: 84532,
     domain: 6,
-    rpcUrl: "https://sepolia.base.org",
+    rpcUrls: [
+      "https://sepolia.base.org",
+      "https://base-sepolia-rpc.publicnode.com",
+      "https://base-sepolia.drpc.org",
+    ],
     explorerUrl: "https://base-sepolia.blockscout.com",
     explorerTxPath: "/tx/",
     usdcAddress: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
@@ -136,7 +162,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-    logo: "",
+    logo: "/img/logos/base.png",
     color: "#0052FF",
     supportsFastTransfer: true,
     isNativeUSDC: false,
@@ -146,7 +172,11 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "Amoy",
     chainId: 80002,
     domain: 7,
-    rpcUrl: "https://rpc-amoy.polygon.technology",
+    rpcUrls: [
+      "https://rpc-amoy.polygon.technology",
+      "https://polygon-amoy-bor-rpc.publicnode.com",
+      "https://polygon-amoy.drpc.org",
+    ],
     explorerUrl: "https://amoy.polygonscan.com",
     explorerTxPath: "/tx/",
     usdcAddress: "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582",
@@ -154,7 +184,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
     nativeCurrency: { name: "POL", symbol: "POL", decimals: 18 },
-    logo: "",
+    logo: "/img/logos/polygon.png",
     color: "#8247E5",
     supportsFastTransfer: false,
     isNativeUSDC: false,
@@ -164,7 +194,10 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "Uni Sep",
     chainId: 1301,
     domain: 10,
-    rpcUrl: "https://sepolia.unichain.org",
+    rpcUrls: [
+      "https://sepolia.unichain.org",
+      "https://unichain-sepolia.drpc.org",
+    ],
     explorerUrl: "https://unichain-sepolia.blockscout.com",
     explorerTxPath: "/tx/",
     usdcAddress: "0x31d0220469e10c4E71834a79b1f276d740d3768F",
@@ -172,7 +205,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-    logo: "",
+    logo: "/img/logos/unichain.png",
     color: "#FF007A",
     supportsFastTransfer: true,
     isNativeUSDC: false,
@@ -182,7 +215,11 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     shortName: "Linea Sep",
     chainId: 59141,
     domain: 11,
-    rpcUrl: "https://rpc.sepolia.linea.build",
+    rpcUrls: [
+      "https://rpc.sepolia.linea.build",
+      "https://linea-sepolia-rpc.publicnode.com",
+      "https://linea-sepolia.drpc.org",
+    ],
     explorerUrl: "https://sepolia.lineascan.build",
     explorerTxPath: "/tx/",
     usdcAddress: "0x31d0220469e10c4E71834a79b1f276d740d3768F",
@@ -190,7 +227,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
-    logo: "",
+    logo: "/img/logos/linea.png",
     color: "#61DFFF",
     supportsFastTransfer: true,
     isNativeUSDC: false,
@@ -205,6 +242,29 @@ export function getChainByDomain(domain: number): CCTPChain | undefined {
 // Helper to find a chain by chainId
 export function getChainByChainId(chainId: number): CCTPChain | undefined {
   return CCTP_TESTNET_CHAINS.find(c => c.chainId === chainId);
+}
+
+/**
+ * Get a working JsonRpcProvider for a chain, trying each RPC URL in order.
+ * Returns the first one that responds successfully.
+ */
+export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvider> {
+  for (const rpcUrl of chain.rpcUrls) {
+    try {
+      const provider = new JsonRpcProvider(rpcUrl);
+      // Quick health check - get block number with 5s timeout
+      await Promise.race([
+        provider.getBlockNumber(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+      ]);
+      return provider;
+    } catch {
+      // Try next RPC
+      continue;
+    }
+  }
+  // Fallback: return provider with first URL even if health check failed
+  return new JsonRpcProvider(chain.rpcUrls[0]);
 }
 
 // ABI fragments needed for CCTP operations
