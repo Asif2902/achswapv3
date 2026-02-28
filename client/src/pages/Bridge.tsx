@@ -325,11 +325,22 @@ export default function Bridge() {
     setIsLoadingBalance(true);
     try {
       const provider = new JsonRpcProvider(sourceChain.rpcUrl);
-      const usdc = new Contract(sourceChain.usdcAddress, ERC20_ABI, provider);
-      const bal: bigint = await usdc.balanceOf(address);
-      const decimals = sourceChain.usdcDecimals;
-      const formatted = (Number(bal) / 10 ** decimals).toFixed(decimals > 4 ? 4 : decimals);
-      setSourceBalance(formatted);
+
+      if (sourceChain.isNativeUSDC) {
+        // Arc Testnet: USDC is the native gas token (18 decimals for native balance)
+        // The ERC-20 interface at 0x3600... uses 6 decimals, but native balance is more reliable for display
+        const nativeBal = await provider.getBalance(address);
+        // Native balance is 18 decimals, convert to human-readable
+        const formatted = (Number(nativeBal) / 1e18).toFixed(4);
+        setSourceBalance(formatted);
+      } else {
+        // Standard ERC-20 USDC (6 decimals)
+        const usdc = new Contract(sourceChain.usdcAddress, ERC20_ABI, provider);
+        const bal: bigint = await usdc.balanceOf(address);
+        const decimals = sourceChain.usdcDecimals;
+        const formatted = (Number(bal) / 10 ** decimals).toFixed(decimals > 4 ? 4 : decimals);
+        setSourceBalance(formatted);
+      }
     } catch (e) {
       console.error("Balance fetch error:", e);
       setSourceBalance(null);
@@ -360,7 +371,7 @@ export default function Bridge() {
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const decimals = sourceChain.usdcDecimals;
+      const decimals = sourceChain.usdcDecimals; // always 6 for CCTP operations
       const amountWei = BigInt(Math.floor(parseFloat(amount) * 10 ** decimals));
       const maxFee = BigInt(Math.floor(parseFloat(amount) * 0.0005 * 10 ** decimals)); // 0.05% max fee
       const minFinalityThreshold = (useFastTransfer && sourceChain.supportsFastTransfer) ? 1000 : 2000;
@@ -744,6 +755,22 @@ export default function Bridge() {
                   </div>
                 </div>
               </div>
+
+              {/* Native USDC info for Arc */}
+              {(sourceChain.isNativeUSDC || destChain.isNativeUSDC) && (
+                <div style={{
+                  marginTop: 10, padding: "8px 12px", borderRadius: 10,
+                  background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.15)",
+                  display: "flex", alignItems: "flex-start", gap: 8,
+                }}>
+                  <Shield style={{ width: 13, height: 13, color: "#818cf8", flexShrink: 0, marginTop: 1 }} />
+                  <span style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", lineHeight: 1.5 }}>
+                    {sourceChain.isNativeUSDC
+                      ? "Arc uses USDC as its native gas token. The bridge uses Arc's ERC-20 interface to burn USDC for cross-chain transfer."
+                      : "USDC will arrive as native currency on Arc Testnet (used for both value and gas)."}
+                  </span>
+                </div>
+              )}
 
               {/* Fast Transfer toggle (only if source supports it) */}
               {sourceChain.supportsFastTransfer && (

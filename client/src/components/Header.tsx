@@ -1,14 +1,58 @@
-import { Link } from "wouter";
+import { useState, useEffect, useRef } from "react";
+import { Link, useLocation } from "wouter";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import { useAccount, useChainId } from "wagmi";
 
 export function Header() {
   const { isConnected } = useAccount();
   const chainId = useChainId();
+  const [location] = useLocation();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   const chainDisplayInfo = chainId === 2201 
     ? { name: "Stable Testnet", logo: "/img/logos/stable-network.png" }
     : { name: "ARC Testnet", logo: "/img/logos/arc-network.png" };
+
+  // Close mobile menu on route change
+  useEffect(() => {
+    setMobileMenuOpen(false);
+  }, [location]);
+
+  // Close mobile menu on outside click
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMobileMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [mobileMenuOpen]);
+
+  // Close on Escape
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMobileMenuOpen(false);
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [mobileMenuOpen]);
+
+  const navItems = [
+    { href: "/", label: "Swap", testId: "link-swap" },
+    { href: "/add-liquidity", label: "Liquidity", testId: "link-add-liquidity" },
+    { href: "/remove-liquidity", label: "Remove", testId: "link-remove-liquidity" },
+    { href: "/pools", label: "Pools", testId: "link-pools" },
+    { href: "/bridge", label: "Bridge", testId: "link-bridge" },
+  ];
+
+  const isActive = (href: string) => {
+    if (href === "/") return location === "/";
+    return location.startsWith(href);
+  };
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/80 backdrop-blur-xl supports-[backdrop-filter]:bg-background/60 shadow-lg">
@@ -21,27 +65,23 @@ export function Header() {
             </span>
           </Link>
 
+          {/* Desktop nav */}
           <nav className="hidden md:flex items-center gap-1">
-            <Link href="/" data-testid="link-swap" className="px-4 py-2 text-sm font-medium text-foreground hover:bg-accent/80 hover:text-accent-foreground rounded-lg transition-all duration-300 hover:scale-105 relative group">
-              <span className="relative z-10">Swap</span>
-              <span className="absolute inset-0 bg-primary/10 rounded-lg scale-0 group-hover:scale-100 transition-transform duration-300"></span>
-            </Link>
-            <Link href="/add-liquidity" data-testid="link-add-liquidity" className="px-4 py-2 text-sm font-medium text-foreground hover:bg-accent/80 hover:text-accent-foreground rounded-lg transition-all duration-300 hover:scale-105 relative group">
-              <span className="relative z-10">Liquidity</span>
-              <span className="absolute inset-0 bg-primary/10 rounded-lg scale-0 group-hover:scale-100 transition-transform duration-300"></span>
-            </Link>
-            <Link href="/remove-liquidity" data-testid="link-remove-liquidity" className="px-4 py-2 text-sm font-medium text-foreground hover:bg-accent/80 hover:text-accent-foreground rounded-lg transition-all duration-300 hover:scale-105 relative group">
-              <span className="relative z-10">Remove</span>
-              <span className="absolute inset-0 bg-primary/10 rounded-lg scale-0 group-hover:scale-100 transition-transform duration-300"></span>
-            </Link>
-            <Link href="/pools" data-testid="link-pools" className="px-4 py-2 text-sm font-medium text-foreground hover:bg-accent/80 hover:text-accent-foreground rounded-lg transition-all duration-300 hover:scale-105 relative group">
-              <span className="relative z-10">Pools</span>
-              <span className="absolute inset-0 bg-primary/10 rounded-lg scale-0 group-hover:scale-100 transition-transform duration-300"></span>
-            </Link>
-            <Link href="/bridge" data-testid="link-bridge" className="px-4 py-2 text-sm font-medium text-foreground hover:bg-accent/80 hover:text-accent-foreground rounded-lg transition-all duration-300 hover:scale-105 relative group">
-              <span className="relative z-10">Bridge</span>
-              <span className="absolute inset-0 bg-primary/10 rounded-lg scale-0 group-hover:scale-100 transition-transform duration-300"></span>
-            </Link>
+            {navItems.map(item => (
+              <Link
+                key={item.href}
+                href={item.href}
+                data-testid={item.testId}
+                className={`px-4 py-2 text-sm font-medium rounded-lg transition-all duration-300 hover:scale-105 relative group ${
+                  isActive(item.href)
+                    ? "text-white bg-primary/15"
+                    : "text-foreground hover:bg-accent/80 hover:text-accent-foreground"
+                }`}
+              >
+                <span className="relative z-10">{item.label}</span>
+                <span className="absolute inset-0 bg-primary/10 rounded-lg scale-0 group-hover:scale-100 transition-transform duration-300"></span>
+              </Link>
+            ))}
           </nav>
         </div>
 
@@ -57,7 +97,7 @@ export function Header() {
               className="h-4 w-4 md:h-5 md:w-5 rounded-full" 
               onError={(e) => console.error('Failed to load network logo:', e)} 
             />
-            <span className="text-xs md:text-sm font-medium text-white whitespace-nowrap">
+            <span className="hidden sm:inline text-xs md:text-sm font-medium text-white whitespace-nowrap">
               {chainDisplayInfo.name}
             </span>
             <span className="h-1.5 w-1.5 md:h-2 md:w-2 bg-green-500 rounded-full animate-pulse"></span>
@@ -69,28 +109,68 @@ export function Header() {
               chainStatus="none"
             />
           </div>
+
+          {/* Mobile hamburger button */}
+          <button
+            className="md:hidden flex flex-col items-center justify-center w-9 h-9 rounded-lg bg-muted/50 border border-border/40 hover:bg-muted/70 transition-all duration-200"
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            aria-label="Toggle menu"
+            data-testid="mobile-menu-toggle"
+          >
+            <span
+              className="block w-4 h-0.5 bg-foreground/80 rounded-full transition-all duration-300"
+              style={{
+                transform: mobileMenuOpen ? "rotate(45deg) translate(2px, 2px)" : "none",
+              }}
+            />
+            <span
+              className="block w-4 h-0.5 bg-foreground/80 rounded-full my-[3px] transition-all duration-300"
+              style={{
+                opacity: mobileMenuOpen ? 0 : 1,
+                transform: mobileMenuOpen ? "scaleX(0)" : "scaleX(1)",
+              }}
+            />
+            <span
+              className="block w-4 h-0.5 bg-foreground/80 rounded-full transition-all duration-300"
+              style={{
+                transform: mobileMenuOpen ? "rotate(-45deg) translate(2px, -2px)" : "none",
+              }}
+            />
+          </button>
         </div>
       </div>
 
-      <nav className="md:hidden border-t border-border/40 bg-background/50">
-        <div className="container px-4 py-2 flex items-center justify-center gap-1 overflow-x-auto max-w-7xl mx-auto">
-          <Link href="/" data-testid="link-swap-mobile" className="px-3 py-2 text-xs font-medium text-foreground hover:bg-accent hover:text-accent-foreground rounded-lg transition-colors whitespace-nowrap">
-            Swap
-          </Link>
-          <Link href="/add-liquidity" data-testid="link-add-liquidity-mobile" className="px-3 py-2 text-xs font-medium text-foreground hover:bg-accent hover:text-accent-foreground rounded-lg transition-colors whitespace-nowrap">
-            Add Liquidity
-          </Link>
-          <Link href="/remove-liquidity" data-testid="link-remove-liquidity-mobile" className="px-3 py-2 text-xs font-medium text-foreground hover:bg-accent hover:text-accent-foreground rounded-lg transition-colors whitespace-nowrap">
-            Remove
-          </Link>
-          <Link href="/pools" data-testid="link-pools-mobile" className="px-3 py-2 text-xs font-medium text-foreground hover:bg-accent hover:text-accent-foreground rounded-lg transition-colors whitespace-nowrap">
-            Pools
-          </Link>
-          <Link href="/bridge" data-testid="link-bridge-mobile" className="px-3 py-2 text-xs font-medium text-foreground hover:bg-accent hover:text-accent-foreground rounded-lg transition-colors whitespace-nowrap">
-            Bridge
-          </Link>
-        </div>
-      </nav>
+      {/* Mobile dropdown menu */}
+      <div
+        ref={menuRef}
+        className="md:hidden overflow-hidden transition-all duration-300 ease-in-out"
+        style={{
+          maxHeight: mobileMenuOpen ? "320px" : "0",
+          opacity: mobileMenuOpen ? 1 : 0,
+        }}
+      >
+        <nav className="border-t border-border/40 bg-background/95 backdrop-blur-xl">
+          <div className="container px-4 py-3 max-w-7xl mx-auto flex flex-col gap-1">
+            {navItems.map(item => (
+              <Link
+                key={item.href}
+                href={item.href}
+                data-testid={`${item.testId}-mobile`}
+                className={`flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 ${
+                  isActive(item.href)
+                    ? "text-white bg-primary/15 border border-primary/20"
+                    : "text-foreground/80 hover:bg-accent/60 hover:text-accent-foreground border border-transparent"
+                }`}
+              >
+                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                  isActive(item.href) ? "bg-primary" : "bg-foreground/20"
+                }`} />
+                {item.label}
+              </Link>
+            ))}
+          </div>
+        </nav>
+      </div>
     </header>
   );
 }

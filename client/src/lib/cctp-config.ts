@@ -17,11 +17,12 @@ export interface CCTPChain {
   usdcAddress: string;
   tokenMessengerV2: string;
   messageTransmitterV2: string;
-  usdcDecimals: number;
+  usdcDecimals: number; // always 6 for CCTP operations
   nativeCurrency: { name: string; symbol: string; decimals: number };
   logo: string; // path or URL
   color: string; // brand color for UI
   supportsFastTransfer: boolean;
+  isNativeUSDC: boolean; // true for chains where USDC is the native gas token (e.g., Arc)
 }
 
 // All testnet CCTP V2 contracts share the same addresses
@@ -40,7 +41,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     rpcUrl: "https://rpc.testnet.arc.network",
     explorerUrl: "https://testnet.arcscan.app",
     explorerTxPath: "/tx/",
-    usdcAddress: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d", // USDC on Arc testnet (native gas token is also USDC)
+    usdcAddress: "0x3600000000000000000000000000000000000000", // ERC-20 interface for native USDC (6 decimals, maps directly to native balance)
     tokenMessengerV2: TESTNET_TOKEN_MESSENGER_V2,
     messageTransmitterV2: TESTNET_MESSAGE_TRANSMITTER_V2,
     usdcDecimals: 6,
@@ -48,6 +49,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "/img/logos/arc-network.png",
     color: "#6366f1",
     supportsFastTransfer: false,
+    isNativeUSDC: true,
   },
   {
     name: "Ethereum Sepolia",
@@ -65,6 +67,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "",
     color: "#627EEA",
     supportsFastTransfer: true,
+    isNativeUSDC: false,
   },
   {
     name: "Avalanche Fuji",
@@ -82,6 +85,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "",
     color: "#E84142",
     supportsFastTransfer: false,
+    isNativeUSDC: false,
   },
   {
     name: "OP Sepolia",
@@ -99,6 +103,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "",
     color: "#FF0420",
     supportsFastTransfer: true,
+    isNativeUSDC: false,
   },
   {
     name: "Arbitrum Sepolia",
@@ -116,6 +121,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "",
     color: "#28A0F0",
     supportsFastTransfer: true,
+    isNativeUSDC: false,
   },
   {
     name: "Base Sepolia",
@@ -133,6 +139,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "",
     color: "#0052FF",
     supportsFastTransfer: true,
+    isNativeUSDC: false,
   },
   {
     name: "Polygon Amoy",
@@ -150,6 +157,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "",
     color: "#8247E5",
     supportsFastTransfer: false,
+    isNativeUSDC: false,
   },
   {
     name: "Unichain Sepolia",
@@ -167,6 +175,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "",
     color: "#FF007A",
     supportsFastTransfer: true,
+    isNativeUSDC: false,
   },
   {
     name: "Linea Sepolia",
@@ -184,6 +193,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     logo: "",
     color: "#61DFFF",
     supportsFastTransfer: true,
+    isNativeUSDC: false,
   },
 ];
 
