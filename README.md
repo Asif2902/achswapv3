@@ -13,30 +13,27 @@ A modern decentralized exchange (DEX) frontend built with React, Vite, and Web3 
 - **Transaction History**: Track your recent transactions
 - **Smart Routing**: Automatic best path selection across V2/V3 pools
 
-## Getting Started
-
-### Prerequisites
-
-- Node.js (v18 or higher)
-- npm or yarn package manager
-- A Web3 wallet (MetaMask, Rainbow, or any WalletConnect-compatible wallet)
-
-### Quick Start
-
-#### 1. Clone the Repository
+## Quick Start
 
 ```bash
+# Clone and install
 git clone https://github.com/Asif2902/Achswap.git
 cd Achswap
-```
-
-#### 2. Install Dependencies
-
-```bash
 npm install
+
+# Configure environment (optional but recommended)
+cp .env.example .env
+# Edit .env with your WalletConnect Project ID
+
+# Start development server
+npm run dev
 ```
 
-#### 3. Set Up Environment Variables
+> **Note:** Development server runs at `http://localhost:3000`
+
+---
+
+## Environment Setup
 
 Create a `.env` file in the root directory:
 
@@ -45,48 +42,22 @@ VITE_WALLETCONNECT_PROJECT_ID=your_project_id_here
 VITE_ALCHEMY_KEY=your_alchemy_key_here
 ```
 
-> **Get your WalletConnect Project ID:**
-> 1. Visit [WalletConnect Cloud](https://cloud.walletconnect.com/)
-> 2. Create a free account and project
-> 3. Copy your Project ID
->
-> **Get your Alchemy Key (optional):**
-> 1. Visit [Alchemy](https://www.alchemy.com/)
-> 2. Create a free account and a new app on ARC Testnet
-> 3. Copy your API Key
-> - If not provided, public RPC will be used as fallback
+### Getting Required API Keys
 
-#### 4. Run Development Server
+**WalletConnect Project ID:**
+1. Visit [WalletConnect Cloud](https://cloud.walletconnect.com/)
+2. Create a free account and project
+3. Copy your Project ID
 
-```bash
-npm run dev
-```
-
-Development server runs at: `http://localhost:3000`
+**Alchemy Key (optional):**
+1. Visit [Alchemy](https://www.alchemy.com/)
+2. Create a free account and a new app on ARC Testnet
+3. Copy your API Key
+4. If not provided, public RPC will be used as fallback
 
 ---
 
-### Production Build
-
-```bash
-npm run build
-npm start
-```
-
----
-
-### Available Commands
-
-| Command | Description |
-|---------|-------------|
-| `npm run dev` | Start development server with hot-reload |
-| `npm run build` | Build optimized production bundle |
-| `npm start` | Serve production build |
-| `npm run check` | Run TypeScript type checking |
-
----
-
-## Supported Network
+## Network Configuration
 
 ### ARC Testnet (Chain ID: 5042002)
 
@@ -126,57 +97,54 @@ npm start
 
 ---
 
+## Available Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start development server with hot-reload |
+| `npm run build` | Build optimized production bundle |
+| `npm run start` | Serve production build |
+| `npm run check` | Run TypeScript type checking |
+
+---
+
 ## Project Structure
 
 ```
-client/
-  src/
-    components/          # React components
-      ui/               # shadcn/ui components
-      AddLiquidityV2.tsx
-      AddLiquidityV3Basic.tsx
-      AddLiquidityV3Advanced.tsx
-      MigrateV2ToV3.tsx
-      RemoveLiquidityV2.tsx
-      RemoveLiquidityV3.tsx
-      TokenSelector.tsx
-      SwapSettings.tsx
-      PathVisualizer.tsx
-      PriceRangeChart.tsx
-      TransactionHistory.tsx
-      V3ContractStatus.tsx
-      WrapUnwrapModal.tsx
-      PoolHealthChecker.tsx    # V3 pool health diagnostics
-      Header.tsx
-    pages/              # Main application pages
-      Swap.tsx
-      AddLiquidity.tsx
-      RemoveLiquidity.tsx
-      Pools.tsx
-      not-found.tsx
-    lib/                # Utility libraries
-      abis/
-        v3.ts          # V3 contract ABIs
-      contracts.ts     # Contract addresses by chain
-      wagmi.ts         # Wagmi/RainbowKit config
-      v3-utils.ts       # V3 math utilities
-      v3-pool-utils.ts  # V3 pool utilities
-      v3-liquidity-math.ts
-      pool-utils.ts     # V2 pool utilities
-      pool-apr-utils.ts # APR calculation utilities
-      smart-routing.ts  # Smart routing logic
-      quote-cache.ts    # Quote caching
-      dex-settings.ts   # DEX settings management
-      decimal-utils.ts  # Decimal handling
-      ticklens-utils.ts # Tick lens utilities
-      config.ts         # RPC configuration with Alchemy support
-      error-utils.ts    # Error handling utilities
-      queryClient.ts    # React Query client
-    data/
-      tokens.ts         # Token definitions
-    hooks/              # Custom React hooks
-      use-toast.ts      # Toast notification hook
-      use-mobile.tsx    # Mobile detection hook
+client/src/
+├── components/           # React components
+│   ├── ui/             # shadcn/ui components
+│   ├── AddLiquidityV2.tsx
+│   ├── AddLiquidityV3Basic.tsx
+│   ├── AddLiquidityV3Advanced.tsx
+│   ├── MigrateV2ToV3.tsx
+│   ├── RemoveLiquidityV2.tsx
+│   ├── RemoveLiquidityV3.tsx
+│   ├── TokenSelector.tsx
+│   ├── SwapSettings.tsx
+│   ├── PathVisualizer.tsx
+│   ├── PriceRangeChart.tsx
+│   ├── TransactionHistory.tsx
+│   ├── V3ContractStatus.tsx
+│   ├── WrapUnwrapModal.tsx
+│   ├── PoolHealthChecker.tsx
+│   └── Header.tsx
+├── pages/               # Main application pages
+│   ├── Swap.tsx
+│   ├── AddLiquidity.tsx
+│   ├── RemoveLiquidity.tsx
+│   └── Pools.tsx
+├── lib/                 # Utility libraries
+│   ├── abis/v3.ts      # V3 contract ABIs
+│   ├── contracts.ts    # Contract addresses
+│   ├── wagmi.ts        # Wagmi/RainbowKit config
+│   ├── v3-utils.ts     # V3 math utilities
+│   ├── pool-utils.ts   # V2 pool utilities
+│   ├── smart-routing.ts
+│   └── config.ts       # RPC configuration
+├── data/
+│   └── tokens.ts       # Token definitions
+└── hooks/              # Custom React hooks
 ```
 
 ---
@@ -189,87 +157,34 @@ client/
 | Build Tool | Vite 5.4.20 |
 | Language | TypeScript 5.6.3 |
 | Styling | Tailwind CSS 3.4.17 |
-| UI Components | Radix UI + shadcn/ui |
 | Web3 | wagmi 2.12.0, viem 2.21.0 |
-| Wallet Connection | RainbowKit 2.1.6 |
-| Blockchain | ethers 6.13.4 |
-| Routing | wouter 3.3.5 |
-| State Management | Zustand 5.0.11 |
+| Wallet | RainbowKit 2.1.6 |
+| State | Zustand 5.0.11 |
 | Charts | Recharts 2.15.2 |
-| Data Fetching | TanStack React Query 5.90.10 |
-| Animations | Framer Motion 11.13.1 |
-| Date Handling | date-fns 3.6.0 |
-| Form Validation | react-hook-form + Zod |
 
 ---
 
 ## Key Features Explained
 
 ### Smart Routing
-
 The swap interface automatically finds the best route across V2 and V3 pools:
 - Compares quotes from both V2 and V3 pools
 - Routes through the pool with the best price
 - Visualizes the routing path for transparency
 
-### V3 Liquidity
-
-Concentrated liquidity allows LPs to select price ranges:
+### V3 Concentrated Liquidity
 - **Basic Mode**: Preset fee tiers (0.05%, 0.3%, 1%) with suggested price ranges
 - **Advanced Mode**: Custom tick selection with full control
-- **Price Range Chart**: Visual representation of liquidity distribution
-- **Pool Health Checker**: Real-time pool health diagnostics with auto-fix suggestions
+- **Pool Health Checker**: Real-time diagnostics with auto-fix suggestions
 
 ### V2 to V3 Migration
-
-Migrate existing V2 LP positions to V3:
 - View all V2 LP positions
-- One-click migration to V3 with selected fee tier and price range
-- Automatic approval and liquidity removal/addition
-
-### Pool Discovery
-
-Browse all available pools:
-- V2 and V3 pool listings
-- TVL (Total Value Locked) display
-- **APR Calculation**: Estimated yearly returns for V3 positions
-- Search by token name or address
-- Pool reserves and fee information
+- One-click migration to V3
+- Automatic approval and liquidity management
 
 ---
 
-## Recent Updates
-
-### v1.1.0 - Pool Health & APR
-
-- **Pool Health Checker**: New component that validates V3 pools for common issues (uninitialized pools, extreme prices, price mismatches, no active liquidity)
-- **APR Display**: Added estimated APR calculation for V3 LP positions with volume-based estimation when TVL is low
-- **Auto-fix Capabilities**: Pool health issues that can be auto-fixed show an "Auto Fix" button
-
-### v1.0.x - Stability & Performance
-
-- **Alchemy RPC Integration**: Added Alchemy private RPC support for improved reliability
-- **Fallback RPC**: Automatic fallback to public RPC when primary fails
-- **Retry Logic**: Added retry logic with exponential backoff for RPC calls
-- **Error Handling**: Improved error handling across all transactions
-- **Precision Fixes**: Fixed precision issues with MAX button and token amounts
-- **Race Condition Fixes**: Resolved race conditions in quote fetching and pool data
-
----
-
-## Architecture
-
-- **Frontend-Only**: No backend server required; all blockchain interactions via RPC
-- **Multi-Protocol**: Single codebase supports both V2 and V3 DEX protocols
-- **Wallet Integration**: RainbowKit handles wallet connections with multiple wallet support
-- **Decimal Agnostic**: All math operations handle different token decimals automatically
-- **Production Ready**: Gas optimization, error handling, and user feedback on all operations
-
----
-
-## Development Notes
-
-### Adding New Tokens
+## Adding New Tokens
 
 Add tokens to `client/src/data/tokens.ts`:
 
@@ -285,7 +200,7 @@ Add tokens to `client/src/data/tokens.ts`:
 }
 ```
 
-If adding a wrapped token pair, also update `wrappedTokenMap` and `unwrappedTokenMap`:
+For wrapped token pairs, also update `wrappedTokenMap` and `unwrappedTokenMap`:
 
 ```typescript
 export const wrappedTokenMap: Record<number, Record<string, string>> = {
@@ -293,27 +208,38 @@ export const wrappedTokenMap: Record<number, Record<string, string>> = {
     "0x.native.address": "0x.wrapped.address",
   },
 };
-
-export const unwrappedTokenMap: Record<number, Record<string, string>> = {
-  5042002: {
-    "0x.wrapped.address": "0x.native.address",
-  },
-};
 ```
 
-### Adding New Chains
+---
 
-1. Define the chain in `client/src/lib/wagmi.ts`
-2. Add contract addresses in `client/src/lib/contracts.ts`
-3. Add tokens in `client/src/data/tokens.ts`
-4. Add wrapped token mappings if applicable
+## Troubleshooting
+
+### Wallet Connection Issues
+- Ensure your wallet is connected to ARC Testnet (Chain ID: 5042002)
+- Verify WalletConnect Project ID is set in `.env`
+- Try clearing wallet connection cache and reconnecting
+
+### Transaction Failures
+- Ensure sufficient USDC balance for gas
+- Check if token allowances are set
+- Verify slippage settings in Swap Settings
+
+### Pool Not Found
+- V3 pools must be initialized before adding liquidity
+- Use Pool Health Checker to diagnose issues
 
 ---
 
-## Known Limitations
+## Contributing
 
-- WalletConnect requires a valid Project ID for full wallet connectivity
-- Token import requires a valid ERC20 contract address on the current chain
-- V3 pools require the pool to be initialized before adding liquidity
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ---
+
+## License
+
+MIT License - see LICENSE file for details
