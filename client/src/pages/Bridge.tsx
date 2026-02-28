@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
   ArrowDownUp, ExternalLink, ChevronDown, AlertTriangle, Clock, Check,
-  Loader2, Search, ArrowRight, Zap, Shield, Globe, RotateCcw, Bell, X,
+  Loader2, Search, ArrowRight, Zap, Shield, Globe, RotateCcw, Bell, X, Trash2,
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
@@ -324,6 +324,7 @@ export default function Bridge() {
   const [sourceBalance, setSourceBalance] = useState<string | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [useFastTransfer, setUseFastTransfer] = useState(true);
+  const [balanceRefreshKey, setBalanceRefreshKey] = useState(0);
 
   // Transfer state
   const [transfer, setTransfer] = useState<TransferState>(INITIAL_STATE);
@@ -331,11 +332,11 @@ export default function Bridge() {
   const [pendingTransfers, setPendingTransfers] = useState<PendingBridgeTransfer[]>([]);
   const currentTransferIdRef = useRef<string | null>(null);
 
-  // Notification bell state
+  // Notification panel state (full-screen modal like TransactionHistory)
   const [notifOpen, setNotifOpen] = useState(false);
   const [allTransfers, setAllTransfers] = useState<PendingBridgeTransfer[]>([]);
-  const notifRef = useRef<HTMLDivElement>(null);
-  const notifBtnRef = useRef<HTMLButtonElement>(null);
+  const [notifVisible, setNotifVisible] = useState(false);
+  const [notifMounted, setNotifMounted] = useState(false);
 
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
 
@@ -364,20 +365,24 @@ export default function Bridge() {
     return () => window.removeEventListener("bridge-transfers-updated", handler);
   }, [refreshPendingTransfers]);
 
-  // Close notification dropdown on outside click
+  // Animate notification panel in/out (same pattern as TransactionHistory)
+  useEffect(() => {
+    if (notifOpen) {
+      setNotifMounted(true);
+      requestAnimationFrame(() => requestAnimationFrame(() => setNotifVisible(true)));
+    } else {
+      setNotifVisible(false);
+      const t = setTimeout(() => setNotifMounted(false), 300);
+      return () => clearTimeout(t);
+    }
+  }, [notifOpen]);
+
+  // Escape key to close notification panel
   useEffect(() => {
     if (!notifOpen) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        notifRef.current && !notifRef.current.contains(target) &&
-        notifBtnRef.current && !notifBtnRef.current.contains(target)
-      ) {
-        setNotifOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    const handler = (e: KeyboardEvent) => { if (e.key === "Escape") setNotifOpen(false); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
   }, [notifOpen]);
 
   // Listen for resume events
@@ -412,16 +417,18 @@ export default function Bridge() {
 
   // ── Fetch USDC balance on source chain ──────────────────────────────────────
   const fetchBalance = useCallback(async () => {
-    if (!address || !sourceChain) return;
+    if (!address || !sourceChain) {
+      setSourceBalance(null);
+      setIsLoadingBalance(false);
+      return;
+    }
     setIsLoadingBalance(true);
     try {
       const provider = await getWorkingProvider(sourceChain);
 
       if (sourceChain.isNativeUSDC) {
         // Arc Testnet: USDC is the native gas token (18 decimals for native balance)
-        // The ERC-20 interface at 0x3600... uses 6 decimals, but native balance is more reliable for display
         const nativeBal = await provider.getBalance(address);
-        // Native balance is 18 decimals, convert to human-readable
         const formatted = (Number(nativeBal) / 1e18).toFixed(4);
         setSourceBalance(formatted);
       } else {
@@ -438,9 +445,18 @@ export default function Bridge() {
     } finally {
       setIsLoadingBalance(false);
     }
-  }, [address, sourceChain]);
+  }, [address, sourceChain, balanceRefreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchBalance(); }, [fetchBalance]);
+
+  // Poll balance every 20 seconds when wallet is connected
+  useEffect(() => {
+    if (!address || !sourceChain) return;
+    const interval = setInterval(() => {
+      setBalanceRefreshKey(k => k + 1);
+    }, 20000);
+    return () => clearInterval(interval);
+  }, [address, sourceChain]);
 
   // ── Swap source/dest ────────────────────────────────────────────────────────
   const handleSwapChains = () => {
@@ -816,28 +832,6 @@ export default function Bridge() {
         .br-notif-btn:hover { background:rgba(255,255,255,0.1); color:rgba(255,255,255,0.85); border-color:rgba(255,255,255,0.16); }
         .br-notif-badge { position:absolute; top:-4px; right:-4px; min-width:16px; height:16px; padding:0 4px; border-radius:8px; background:#f59e0b; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:800; color:white; animation:pulse 2s infinite; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
-        .br-notif-dropdown { position:absolute; right:0; top:100%; margin-top:8px; width:340px; max-width:calc(100vw - 32px); background:rgba(15,18,30,0.97); border:1px solid rgba(255,255,255,0.08); border-radius:16px; overflow:hidden; max-height:70vh; box-shadow:0 16px 48px rgba(0,0,0,0.5); z-index:60; }
-        .br-notif-header { padding:12px 16px; border-bottom:1px solid rgba(255,255,255,0.06); display:flex; align-items:center; justify-content:space-between; }
-        .br-notif-header-title { font-size:14px; font-weight:700; color:white; }
-        .br-notif-close { width:24px; height:24px; border-radius:6px; background:rgba(255,255,255,0.06); border:none; color:rgba(255,255,255,0.5); cursor:pointer; display:flex; align-items:center; justify-content:center; transition:all 0.2s; }
-        .br-notif-close:hover { background:rgba(255,255,255,0.12); color:rgba(255,255,255,0.8); }
-        .br-notif-list { overflow-y:auto; max-height:50vh; }
-        .br-notif-empty { padding:32px 16px; text-align:center; color:rgba(255,255,255,0.3); font-size:13px; }
-        .br-notif-item { padding:12px 16px; border-bottom:1px solid rgba(255,255,255,0.04); display:flex; flex-direction:column; gap:8px; }
-        .br-notif-route { display:flex; align-items:center; justify-content:space-between; }
-        .br-notif-chains { display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; color:white; }
-        .br-notif-chain-dot { width:18px; height:18px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:8px; font-weight:800; flex-shrink:0; }
-        .br-notif-amount { font-size:13px; font-weight:700; color:white; }
-        .br-notif-status-row { display:flex; align-items:center; justify-content:space-between; }
-        .br-notif-status { display:flex; align-items:center; gap:6px; }
-        .br-notif-age { font-size:10px; color:rgba(255,255,255,0.25); }
-        .br-notif-actions { display:flex; align-items:center; gap:6px; }
-        .br-notif-resume { font-size:10px; font-weight:700; color:#4ade80; padding:2px 8px; border-radius:6px; background:rgba(74,222,128,0.1); border:1px solid rgba(74,222,128,0.25); cursor:pointer; display:flex; align-items:center; gap:4px; transition:all 0.2s; }
-        .br-notif-resume:hover { background:rgba(74,222,128,0.2); border-color:rgba(74,222,128,0.4); }
-        .br-notif-dismiss { font-size:10px; color:rgba(255,255,255,0.3); padding:2px 6px; border-radius:4px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); cursor:pointer; transition:all 0.2s; }
-        .br-notif-dismiss:hover { background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.5); }
-        .br-notif-link { color:#818cf8; display:flex; transition:color 0.2s; }
-        .br-notif-link:hover { color:#a5b4fc; }
       `}</style>
 
       <div className="br-wrap">
@@ -861,107 +855,16 @@ export default function Bridge() {
                   <Shield style={{ width: 12, height: 12 }} />
                   <span>Powered by Circle CCTP</span>
                 </div>
-                <div style={{ position: "relative" }}>
-                  <button
-                    ref={notifBtnRef}
-                    className="br-notif-btn"
-                    onClick={() => setNotifOpen(!notifOpen)}
-                    title="Bridge transfers"
-                  >
-                    <Bell style={{ width: 15, height: 15 }} />
-                    {resumableCount > 0 && (
-                      <span className="br-notif-badge">{resumableCount}</span>
-                    )}
-                  </button>
-                  {notifOpen && (
-                    <div ref={notifRef} className="br-notif-dropdown">
-                      <div className="br-notif-header">
-                        <span>Bridge Transfers</span>
-                        <button className="br-notif-close" onClick={() => setNotifOpen(false)}>
-                          <X style={{ width: 14, height: 14 }} />
-                        </button>
-                      </div>
-                      {allTransfers.length === 0 ? (
-                        <div className="br-notif-empty">No transfers yet</div>
-                      ) : (
-                        <div className="br-notif-list">
-                          {allTransfers.map(tx => {
-                            const srcChain = getChainByDomain(tx.sourceDomain);
-                            const dstChain = getChainByDomain(tx.destDomain);
-                            const { label, color, Icon } = getStatusInfo(tx.status);
-                            const age = Date.now() - tx.timestamp;
-                            const ageStr = age < 60000 ? "<1m ago"
-                              : age < 3600000 ? `${Math.floor(age / 60000)}m ago`
-                              : age < 86400000 ? `${Math.floor(age / 3600000)}h ago`
-                              : `${Math.floor(age / 86400000)}d ago`;
-                            const canResume = tx.status === "attesting" || tx.status === "ready_to_mint";
-                            const canDismiss = tx.status === "complete" || tx.status === "failed";
-
-                            return (
-                              <div key={tx.id} className="br-notif-item">
-                                <div className="br-notif-route">
-                                  <div className="br-notif-chains">
-                                    <span
-                                      className="br-notif-chain-dot"
-                                      style={{ background: `linear-gradient(135deg, ${srcChain?.color || "#666"}66, ${srcChain?.color || "#666"})` }}
-                                    >
-                                      {srcChain?.shortName.charAt(0) || "?"}
-                                    </span>
-                                    {srcChain?.shortName || "?"}
-                                    <ArrowRight style={{ width: 10, height: 10, color: "#818cf8" }} />
-                                    <span
-                                      className="br-notif-chain-dot"
-                                      style={{ background: `linear-gradient(135deg, ${dstChain?.color || "#666"}66, ${dstChain?.color || "#666"})` }}
-                                    >
-                                      {dstChain?.shortName.charAt(0) || "?"}
-                                    </span>
-                                    {dstChain?.shortName || "?"}
-                                  </div>
-                                  <span className="br-notif-amount">{tx.amount} USDC</span>
-                                </div>
-                                <div className="br-notif-status-row">
-                                  <span className="br-notif-status" style={{ color }}>
-                                    <Icon style={{ width: 10, height: 10 }} />
-                                    {label}
-                                  </span>
-                                  <span className="br-notif-age">{ageStr}</span>
-                                </div>
-                                <div className="br-notif-actions">
-                                  {canResume && (
-                                    <button
-                                      className="br-notif-resume"
-                                      onClick={() => { setNotifOpen(false); resumeTransfer(tx); }}
-                                      disabled={isTransferring}
-                                    >
-                                      <RotateCcw style={{ width: 10, height: 10 }} />
-                                      Resume
-                                    </button>
-                                  )}
-                                  {canDismiss && (
-                                    <button className="br-notif-dismiss" onClick={() => handleDismiss(tx.id)}>
-                                      Dismiss
-                                    </button>
-                                  )}
-                                  {tx.burnTxHash && srcChain && (
-                                    <a
-                                      className="br-notif-link"
-                                      href={`${srcChain.explorerUrl}/tx/${tx.burnTxHash}`}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                    >
-                                      <ExternalLink style={{ width: 10, height: 10 }} />
-                                      Tx
-                                    </a>
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
+                <button
+                  className="br-notif-btn"
+                  onClick={() => setNotifOpen(true)}
+                  title="Bridge transfers"
+                >
+                  <Bell style={{ width: 15, height: 15 }} />
+                  {resumableCount > 0 && (
+                    <span className="br-notif-badge">{resumableCount}</span>
                   )}
-                </div>
+                </button>
               </div>
             </div>
 
@@ -1308,6 +1211,252 @@ export default function Bridge() {
           )}
         </div>
       </div>
+
+      {/* Bridge Transfers Panel (full-screen modal — same pattern as TransactionHistory) */}
+      {notifMounted && (
+        <>
+          {/* Backdrop */}
+          <div
+            onClick={() => setNotifOpen(false)}
+            onTouchMove={(e) => e.preventDefault()}
+            className="fixed inset-0 z-50 transition-all duration-300"
+            style={{
+              background: "rgba(0,0,0,0.72)",
+              backdropFilter: notifVisible ? "blur(8px)" : "blur(0px)",
+              opacity: notifVisible ? 1 : 0,
+            }}
+          />
+
+          {/* Panel */}
+          <div
+            className="fixed z-50 left-0 right-0 bottom-0 sm:inset-0 sm:flex sm:items-center sm:justify-center sm:p-4"
+            style={{ pointerEvents: "none" }}
+          >
+            <div
+              data-bridge-history-panel
+              className="relative w-full sm:max-w-md overflow-hidden"
+              style={{
+                pointerEvents: "auto",
+                background: "linear-gradient(160deg, #0f1117 0%, #0c0e13 100%)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                boxShadow: "0 -4px 48px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.04)",
+                borderRadius: "20px 20px 0 0",
+                transform: notifVisible ? "translateY(0)" : "translateY(100%)",
+                opacity: notifVisible ? 1 : 0,
+                transition: "transform 0.32s cubic-bezier(0.32,0.72,0,1), opacity 0.2s ease",
+                maxHeight: "92dvh",
+                display: "flex",
+                flexDirection: "column",
+              }}
+            >
+              {/* Drag handle — mobile only */}
+              <div className="flex justify-center pt-3 pb-1 sm:hidden">
+                <div className="w-9 h-1 rounded-full bg-white/10" />
+              </div>
+
+              {/* Header */}
+              <div className="flex items-center justify-between px-5 pt-4 pb-3 sm:pt-5 flex-shrink-0">
+                <div>
+                  <h2 className="text-base font-semibold text-white tracking-tight">
+                    Bridge Transfers
+                  </h2>
+                  <p className="text-[11px] text-white/30 mt-0.5">
+                    {allTransfers.length === 0
+                      ? "No transfers yet"
+                      : `${allTransfers.length} transfer${allTransfers.length !== 1 ? "s" : ""}`}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  {allTransfers.length > 0 && (
+                    <button
+                      onClick={() => {
+                        allTransfers.forEach(tx => removeTransfer(tx.id));
+                        refreshPendingTransfers();
+                      }}
+                      title="Clear all"
+                      className="w-8 h-8 rounded-xl flex items-center justify-center text-white/30 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                  <button
+                    onClick={() => setNotifOpen(false)}
+                    className="w-8 h-8 rounded-xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/8 transition-all"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Divider */}
+              <div className="mx-5 h-px flex-shrink-0" style={{ background: "rgba(255,255,255,0.05)" }} />
+
+              {/* Scrollable content */}
+              <div
+                className="flex-1 overflow-y-auto overscroll-contain px-5 py-4"
+                style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
+              >
+                {allTransfers.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-16 gap-3">
+                    <div
+                      className="w-14 h-14 rounded-2xl flex items-center justify-center"
+                      style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.06)" }}
+                    >
+                      <Clock className="w-6 h-6 text-white/15" />
+                    </div>
+                    <p className="text-sm text-white/30">No transfers yet</p>
+                    <p className="text-[11px] text-white/20">Your bridge transfers will appear here</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {allTransfers.map((tx, i) => {
+                      const srcChain = getChainByDomain(tx.sourceDomain);
+                      const dstChain = getChainByDomain(tx.destDomain);
+                      const { label, color, Icon } = getStatusInfo(tx.status);
+                      const age = Date.now() - tx.timestamp;
+                      const ageStr = age < 60000 ? "<1m ago"
+                        : age < 3600000 ? `${Math.floor(age / 60000)}m ago`
+                        : age < 86400000 ? `${Math.floor(age / 3600000)}h ago`
+                        : `${Math.floor(age / 86400000)}d ago`;
+                      const canResume = tx.status === "attesting" || tx.status === "ready_to_mint";
+                      const canDismiss = tx.status === "complete" || tx.status === "failed";
+
+                      return (
+                        <div
+                          key={tx.id}
+                          className="rounded-2xl p-4 transition-all"
+                          style={{
+                            background: "rgba(255,255,255,0.025)",
+                            border: "1px solid rgba(255,255,255,0.06)",
+                            animationDelay: `${i * 40}ms`,
+                          }}
+                        >
+                          {/* Top row: route + age */}
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-1.5">
+                              <Clock className="w-3 h-3 text-white/20" />
+                              <span className="text-[11px] text-white/30 font-medium">{ageStr}</span>
+                            </div>
+                            {tx.burnTxHash && srcChain && (
+                              <a
+                                href={`${srcChain.explorerUrl}/tx/${tx.burnTxHash}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                title="View on explorer"
+                                className="w-6 h-6 rounded-lg flex items-center justify-center text-white/25 hover:text-indigo-400 hover:bg-indigo-500/10 transition-all"
+                              >
+                                <ExternalLink className="w-3 h-3" />
+                              </a>
+                            )}
+                          </div>
+
+                          {/* Route row */}
+                          <div className="flex items-center gap-3">
+                            {/* Source chain */}
+                            <div className="flex items-center gap-2.5 flex-1 min-w-0">
+                              <div
+                                className="w-9 h-9 rounded-full overflow-hidden flex-shrink-0 flex items-center justify-center"
+                                style={{
+                                  background: `linear-gradient(135deg, ${srcChain?.color || "#666"}33, ${srcChain?.color || "#666"}66)`,
+                                  boxShadow: "0 0 0 1px rgba(255,255,255,0.08)",
+                                }}
+                              >
+                                <span style={{ fontSize: 14, fontWeight: 800, color: srcChain?.color || "#888" }}>
+                                  {srcChain?.shortName.charAt(0) || "?"}
+                                </span>
+                              </div>
+                              <div className="min-w-0">
+                                <p className="text-sm font-semibold text-white tabular-nums">{tx.amount}</p>
+                                <p className="text-[11px] text-white/35 truncate">{srcChain?.shortName || "Unknown"}</p>
+                              </div>
+                            </div>
+
+                            {/* Arrow */}
+                            <div
+                              className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center"
+                              style={{ background: "rgba(99,102,241,0.1)", border: "1px solid rgba(99,102,241,0.2)" }}
+                            >
+                              <ArrowRight className="w-3.5 h-3.5 text-indigo-400" />
+                            </div>
+
+                            {/* Dest chain */}
+                            <div className="flex items-center gap-2.5 flex-1 min-w-0 justify-end">
+                              <div className="min-w-0 text-right">
+                                <p className="text-sm font-semibold text-white tabular-nums">USDC</p>
+                                <p className="text-[11px] text-white/35 truncate">{dstChain?.shortName || "Unknown"}</p>
+                              </div>
+                              <div
+                                className="w-9 h-9 rounded-full overflow-hidden flex-shrink-0 flex items-center justify-center"
+                                style={{
+                                  background: `linear-gradient(135deg, ${dstChain?.color || "#666"}33, ${dstChain?.color || "#666"}66)`,
+                                  boxShadow: "0 0 0 1px rgba(255,255,255,0.08)",
+                                }}
+                              >
+                                <span style={{ fontSize: 14, fontWeight: 800, color: dstChain?.color || "#888" }}>
+                                  {dstChain?.shortName.charAt(0) || "?"}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Status + actions row */}
+                          <div className="flex items-center justify-between mt-3 pt-3" style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                            <div className="flex items-center gap-1.5" style={{ color }}>
+                              <Icon className="w-3 h-3" />
+                              <span className="text-[11px] font-semibold">{label}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {canResume && (
+                                <button
+                                  onClick={() => { setNotifOpen(false); resumeTransfer(tx); }}
+                                  disabled={isTransferring}
+                                  className="text-[11px] font-bold px-3 py-1 rounded-lg flex items-center gap-1.5 transition-all"
+                                  style={{
+                                    color: "#4ade80",
+                                    background: "rgba(74,222,128,0.1)",
+                                    border: "1px solid rgba(74,222,128,0.25)",
+                                    cursor: isTransferring ? "not-allowed" : "pointer",
+                                    opacity: isTransferring ? 0.5 : 1,
+                                  }}
+                                >
+                                  <RotateCcw className="w-2.5 h-2.5" />
+                                  Resume
+                                </button>
+                              )}
+                              {canDismiss && (
+                                <button
+                                  onClick={() => handleDismiss(tx.id)}
+                                  className="text-[11px] text-white/30 px-2 py-1 rounded-lg hover:text-white/50 hover:bg-white/5 transition-all"
+                                  style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.06)" }}
+                                >
+                                  Dismiss
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* Bottom safe area */}
+                <div className="h-safe-area-bottom h-4 sm:h-2" />
+              </div>
+            </div>
+          </div>
+
+          <style>{`
+            @media (min-width: 640px) {
+              [data-bridge-history-panel] {
+                border-radius: 20px !important;
+                transform: ${notifVisible ? "translateY(0) scale(1)" : "translateY(12px) scale(0.97)"} !important;
+              }
+            }
+            [data-bridge-history-panel] ::-webkit-scrollbar { display: none; }
+          `}</style>
+        </>
+      )}
 
       {/* Chain selectors */}
       <ChainSelector
