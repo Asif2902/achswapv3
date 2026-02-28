@@ -1,56 +1,25 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { useAccount, useChainId } from "wagmi";
+import { useChainId } from "wagmi";
 import {
   ArrowLeftRight, Droplets, MinusCircle, LayoutGrid, Globe,
-  Bell, ArrowRight, Clock, Check, AlertTriangle, ExternalLink, X, RotateCcw,
 } from "lucide-react";
-import {
-  getPendingTransfers,
-  getResumableTransfers,
-  removeTransfer,
-  type PendingBridgeTransfer,
-} from "@/lib/bridge-transfers";
-import { getChainByDomain, CCTP_TESTNET_CHAINS } from "@/lib/cctp-config";
 
 export function Header() {
-  const { isConnected, address } = useAccount();
   const chainId = useChainId();
-  const [location, setLocation] = useLocation();
+  const [location] = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [notifOpen, setNotifOpen] = useState(false);
-  const [pendingTransfers, setPendingTransfers] = useState<PendingBridgeTransfer[]>([]);
   const menuRef = useRef<HTMLDivElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
-  const notifRef = useRef<HTMLDivElement>(null);
-  const notifBtnRef = useRef<HTMLButtonElement>(null);
 
   const chainDisplayInfo = chainId === 2201 
     ? { name: "Stable Testnet", logo: "/img/logos/stable-network.png" }
     : { name: "ARC Testnet", logo: "/img/logos/arc-network.png" };
 
-  // Load pending transfers
-  const refreshTransfers = useCallback(() => {
-    const transfers = address ? getPendingTransfers().filter(
-      t => t.userAddress.toLowerCase() === address.toLowerCase()
-    ) : [];
-    setPendingTransfers(transfers);
-  }, [address]);
-
-  useEffect(() => { refreshTransfers(); }, [refreshTransfers]);
-
-  // Listen for bridge transfer updates
-  useEffect(() => {
-    const handler = () => refreshTransfers();
-    window.addEventListener("bridge-transfers-updated", handler);
-    return () => window.removeEventListener("bridge-transfers-updated", handler);
-  }, [refreshTransfers]);
-
   // Close mobile menu on route change
   useEffect(() => {
     setMobileMenuOpen(false);
-    setNotifOpen(false);
   }, [location]);
 
   // Close mobile menu on outside click (exclude toggle button)
@@ -69,34 +38,17 @@ export function Header() {
     return () => document.removeEventListener("mousedown", handleClick);
   }, [mobileMenuOpen]);
 
-  // Close notification on outside click
-  useEffect(() => {
-    if (!notifOpen) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (
-        notifRef.current && !notifRef.current.contains(target) &&
-        notifBtnRef.current && !notifBtnRef.current.contains(target)
-      ) {
-        setNotifOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, [notifOpen]);
-
   // Close on Escape
   useEffect(() => {
-    if (!mobileMenuOpen && !notifOpen) return;
+    if (!mobileMenuOpen) return;
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         setMobileMenuOpen(false);
-        setNotifOpen(false);
       }
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [mobileMenuOpen, notifOpen]);
+  }, [mobileMenuOpen]);
 
   const navItems = [
     { href: "/", label: "Swap", testId: "link-swap", icon: ArrowLeftRight },
@@ -109,31 +61,6 @@ export function Header() {
   const isActive = (href: string) => {
     if (href === "/") return location === "/";
     return location.startsWith(href);
-  };
-
-  const resumableCount = address ? getResumableTransfers(address).length : 0;
-
-  const handleResume = (transfer: PendingBridgeTransfer) => {
-    setNotifOpen(false);
-    // Navigate to bridge with resume state via custom event
-    window.dispatchEvent(new CustomEvent("bridge-resume-transfer", { detail: transfer }));
-    setLocation("/bridge");
-  };
-
-  const handleDismiss = (id: string) => {
-    removeTransfer(id);
-    refreshTransfers();
-  };
-
-  const getStatusInfo = (status: PendingBridgeTransfer["status"]) => {
-    switch (status) {
-      case "attesting": return { label: "Waiting for attestation", color: "#f59e0b", Icon: Clock };
-      case "ready_to_mint": return { label: "Ready to mint", color: "#4ade80", Icon: Check };
-      case "minting": return { label: "Minting...", color: "#818cf8", Icon: RotateCcw };
-      case "complete": return { label: "Complete", color: "#4ade80", Icon: Check };
-      case "failed": return { label: "Failed", color: "#f87171", Icon: AlertTriangle };
-      default: return { label: status, color: "#818cf8", Icon: Clock };
-    }
   };
 
   return (
@@ -172,182 +99,6 @@ export function Header() {
         </div>
 
         <div className="flex items-center gap-2 md:gap-3 fade-in">
-          {/* Notification bell */}
-          <div className="relative">
-            <button
-              ref={notifBtnRef}
-              onClick={() => { setNotifOpen(!notifOpen); setMobileMenuOpen(false); }}
-              className="relative flex items-center justify-center w-9 h-9 rounded-lg bg-muted/50 border border-border/40 hover:bg-muted/70 transition-all duration-200"
-              aria-label="Bridge notifications"
-            >
-              <Bell className="w-4 h-4 text-foreground/70" />
-              {resumableCount > 0 && (
-                <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 rounded-full flex items-center justify-center text-[9px] font-bold text-white animate-pulse">
-                  {resumableCount}
-                </span>
-              )}
-            </button>
-
-            {/* Notification dropdown */}
-            {notifOpen && (
-              <div
-                ref={notifRef}
-                className="absolute right-0 top-full mt-2 w-80 sm:w-96 z-[60]"
-                style={{
-                  background: "rgba(15,18,30,0.97)",
-                  border: "1px solid rgba(255,255,255,0.08)",
-                  borderRadius: 16,
-                  overflow: "hidden",
-                  maxHeight: "70vh",
-                  boxShadow: "0 16px 48px rgba(0,0,0,0.5)",
-                }}
-              >
-                {/* Notif header */}
-                <div style={{
-                  padding: "12px 16px",
-                  borderBottom: "1px solid rgba(255,255,255,0.06)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: "white" }}>Bridge Transfers</span>
-                  <button
-                    onClick={() => setNotifOpen(false)}
-                    style={{
-                      width: 24, height: 24, borderRadius: 6,
-                      background: "rgba(255,255,255,0.06)", border: "none",
-                      color: "rgba(255,255,255,0.5)", cursor: "pointer",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                    }}
-                  >
-                    <X style={{ width: 12, height: 12 }} />
-                  </button>
-                </div>
-
-                {/* Transfer list */}
-                <div style={{ overflowY: "auto", maxHeight: "50vh" }}>
-                  {pendingTransfers.length === 0 ? (
-                    <div style={{
-                      padding: "32px 16px",
-                      textAlign: "center",
-                      color: "rgba(255,255,255,0.3)",
-                      fontSize: 13,
-                    }}>
-                      <Bell style={{ width: 24, height: 24, margin: "0 auto 8px", opacity: 0.3 }} />
-                      No bridge transfers yet
-                    </div>
-                  ) : (
-                    pendingTransfers.map(transfer => {
-                      const srcChain = getChainByDomain(transfer.sourceDomain);
-                      const dstChain = getChainByDomain(transfer.destDomain);
-                      const { label, color, Icon } = getStatusInfo(transfer.status);
-                      const isResumable = transfer.status === "attesting" || transfer.status === "ready_to_mint";
-                      const age = Date.now() - transfer.timestamp;
-                      const ageStr = age < 60000 ? "<1m ago"
-                        : age < 3600000 ? `${Math.floor(age / 60000)}m ago`
-                        : age < 86400000 ? `${Math.floor(age / 3600000)}h ago`
-                        : `${Math.floor(age / 86400000)}d ago`;
-
-                      return (
-                        <div
-                          key={transfer.id}
-                          style={{
-                            padding: "12px 16px",
-                            borderBottom: "1px solid rgba(255,255,255,0.04)",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 8,
-                          }}
-                        >
-                          {/* Route + amount */}
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 600, color: "white" }}>
-                              <span style={{
-                                width: 18, height: 18, borderRadius: "50%",
-                                background: `linear-gradient(135deg, ${srcChain?.color || "#666"}44, ${srcChain?.color || "#666"}88)`,
-                                display: "inline-flex", alignItems: "center", justifyContent: "center",
-                                fontSize: 8, fontWeight: 800, color: srcChain?.color || "#666",
-                                flexShrink: 0,
-                              }}>
-                                {srcChain?.shortName.charAt(0) || "?"}
-                              </span>
-                              {srcChain?.shortName || "?"}
-                              <ArrowRight style={{ width: 12, height: 12, color: "#818cf8" }} />
-                              <span style={{
-                                width: 18, height: 18, borderRadius: "50%",
-                                background: `linear-gradient(135deg, ${dstChain?.color || "#666"}44, ${dstChain?.color || "#666"}88)`,
-                                display: "inline-flex", alignItems: "center", justifyContent: "center",
-                                fontSize: 8, fontWeight: 800, color: dstChain?.color || "#666",
-                                flexShrink: 0,
-                              }}>
-                                {dstChain?.shortName.charAt(0) || "?"}
-                              </span>
-                              {dstChain?.shortName || "?"}
-                            </div>
-                            <span style={{ fontSize: 13, fontWeight: 700, color: "white" }}>
-                              {transfer.amount} USDC
-                            </span>
-                          </div>
-
-                          {/* Status + actions */}
-                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              <Icon style={{ width: 12, height: 12, color }} />
-                              <span style={{ fontSize: 11, fontWeight: 600, color }}>{label}</span>
-                              <span style={{ fontSize: 10, color: "rgba(255,255,255,0.25)" }}>{ageStr}</span>
-                            </div>
-                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                              {transfer.burnTxHash && srcChain && (
-                                <a
-                                  href={`${srcChain.explorerUrl}${srcChain.explorerTxPath}${transfer.burnTxHash}`}
-                                  target="_blank" rel="noopener noreferrer"
-                                  style={{ color: "#818cf8", display: "flex" }}
-                                  title="View burn tx"
-                                >
-                                  <ExternalLink style={{ width: 12, height: 12 }} />
-                                </a>
-                              )}
-                              {isResumable && (
-                                <button
-                                  onClick={() => handleResume(transfer)}
-                                  style={{
-                                    fontSize: 10, fontWeight: 700, color: "#4ade80",
-                                    padding: "2px 8px", borderRadius: 6,
-                                    background: "rgba(74,222,128,0.1)",
-                                    border: "1px solid rgba(74,222,128,0.25)",
-                                    cursor: "pointer",
-                                    display: "flex", alignItems: "center", gap: 4,
-                                  }}
-                                >
-                                  <RotateCcw style={{ width: 10, height: 10 }} />
-                                  Resume
-                                </button>
-                              )}
-                              {(transfer.status === "complete" || transfer.status === "failed") && (
-                                <button
-                                  onClick={() => handleDismiss(transfer.id)}
-                                  style={{
-                                    fontSize: 10, color: "rgba(255,255,255,0.3)",
-                                    padding: "2px 6px", borderRadius: 4,
-                                    background: "rgba(255,255,255,0.04)",
-                                    border: "1px solid rgba(255,255,255,0.08)",
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  Dismiss
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
           <button
             onClick={() => (document.querySelector('[data-testid="connect-wallet-button"] button') as HTMLButtonElement)?.click()}
             className="flex items-center gap-1.5 md:gap-2 px-2 md:px-3 py-2 bg-muted/50 rounded-lg border border-primary/30 hover:border-primary/60 hover:bg-muted/70 transition-all duration-300 cursor-pointer group"
@@ -376,7 +127,7 @@ export function Header() {
           <button
             ref={toggleRef}
             className="md:hidden flex flex-col items-center justify-center w-9 h-9 rounded-lg bg-muted/50 border border-border/40 hover:bg-muted/70 transition-all duration-200"
-            onClick={() => { setMobileMenuOpen(prev => !prev); setNotifOpen(false); }}
+            onClick={() => setMobileMenuOpen(prev => !prev)}
             aria-label="Toggle menu"
             data-testid="mobile-menu-toggle"
           >
@@ -432,17 +183,6 @@ export function Header() {
                 </Link>
               );
             })}
-
-            {/* Pending transfers shortcut in mobile menu */}
-            {resumableCount > 0 && (
-              <button
-                onClick={() => { setMobileMenuOpen(false); setNotifOpen(true); }}
-                className="flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 text-amber-400 bg-amber-500/10 border border-amber-500/20 mt-1"
-              >
-                <Bell className="w-4 h-4 flex-shrink-0 text-amber-400" />
-                {resumableCount} pending transfer{resumableCount > 1 ? "s" : ""}
-              </button>
-            )}
           </div>
         </nav>
       </div>
