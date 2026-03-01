@@ -144,6 +144,8 @@ export function Header() {
             ref={toggleRef}
             onClick={() => setMenuOpen(p => !p)}
             aria-label="Toggle menu"
+            aria-expanded={menuOpen}
+            aria-controls="main-nav-menu"
             data-testid="mobile-menu-toggle"
             className="flex items-center justify-center w-9 h-9 rounded-lg bg-muted/50 border border-border/40 hover:bg-muted/70 transition-all duration-200"
           >
@@ -157,6 +159,7 @@ export function Header() {
 
       {/* Dropdown nav — all screen sizes */}
       <div
+        id="main-nav-menu"
         ref={menuRef}
         className="overflow-hidden transition-all duration-300 ease-in-out"
         style={{

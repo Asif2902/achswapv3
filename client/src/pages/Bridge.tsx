@@ -382,16 +382,21 @@ export default function Bridge() {
   }, [notifOpen]);
 
   // Listen for resume events
+  // Keep a ref to the latest resumeTransfer so the stable event handler never
+  // holds a stale closure (e.g. address captured as undefined on first render).
+  const resumeTransferRef = useRef<(tx: PendingBridgeTransfer) => unknown>(() => {});
+  useEffect(() => {
+    resumeTransferRef.current = resumeTransfer;
+  }); // runs after every render — intentionally no dep array
+
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<PendingBridgeTransfer>).detail;
-      if (detail) {
-        resumeTransfer(detail);
-      }
+      if (detail) resumeTransferRef.current(detail);
     };
     window.addEventListener("bridge-resume-transfer", handler);
     return () => window.removeEventListener("bridge-resume-transfer", handler);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // handler is stable; ref gives it access to the latest resumeTransfer
 
   const resumableCount = address ? getResumableTransfers(address).length : 0;
 
@@ -605,6 +610,7 @@ export default function Bridge() {
     if (transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error") return;
 
     abortRef.current = false;
+    currentTransferIdRef.current = null;
     setTransfer({ ...INITIAL_STATE, step: "approving" });
 
     try {
@@ -1195,7 +1201,7 @@ export default function Bridge() {
                   {allTransfers.length > 0 && (
                     <button
                       onClick={() => {
-                        allTransfers.forEach(tx => removeTransfer(tx.id));
+                        allTransfers.forEach(tx => { removeTransfer(tx.id); });
                         refreshPendingTransfers();
                       }}
                       title="Clear all"

@@ -34,10 +34,15 @@ export function getPendingTransfers(): PendingBridgeTransfer[] {
     const transfers: PendingBridgeTransfer[] = JSON.parse(raw);
     // Filter out completed transfers older than 24 hours, keep pending ones indefinitely
     const now = Date.now();
-    return transfers.filter(t => {
+    const filtered = transfers.filter(t => {
       if (t.status === "complete") return now - t.timestamp < 24 * 60 * 60 * 1000;
       return true;
     });
+    // Write the pruned list back so stale entries don't accumulate
+    if (filtered.length !== transfers.length) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
+    }
+    return filtered;
   } catch {
     return [];
   }
@@ -79,7 +84,11 @@ export function removeTransfer(id: string): void {
 export function getResumableTransfers(userAddress?: string): PendingBridgeTransfer[] {
   const all = getPendingTransfers();
   return all.filter(t => {
-    if (userAddress && t.userAddress.toLowerCase() !== userAddress.toLowerCase()) return false;
+    if (userAddress) {
+      // Defensively skip records with missing or malformed userAddress
+      if (typeof t.userAddress !== "string" || t.userAddress.length === 0) return false;
+      if (t.userAddress.toLowerCase() !== userAddress.toLowerCase()) return false;
+    }
     return t.status === "attesting" || t.status === "ready_to_mint";
   });
 }
