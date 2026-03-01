@@ -182,8 +182,10 @@ export function RemoveLiquidityV2() {
             token1Contract.decimals(),
           ]);
 
-        const amount0 = (liquidity * reserves.reserve0) / totalSupply;
-        const amount1 = (liquidity * reserves.reserve1) / totalSupply;
+        const r0 = BigInt(reserves.reserve0);
+        const r1 = BigInt(reserves.reserve1);
+        const amount0 = (liquidity * r0) / totalSupply;
+        const amount1 = (liquidity * r1) / totalSupply;
 
         onChainPositions.push({
           pairAddress,
@@ -287,8 +289,10 @@ export function RemoveLiquidityV2() {
           token1Contract.decimals(),
         ]);
 
-      const amount0 = (balance * reserves.reserve0) / totalSupply;
-      const amount1 = (balance * reserves.reserve1) / totalSupply;
+      const r0 = BigInt(reserves.reserve0);
+      const r1 = BigInt(reserves.reserve1);
+      const amount0 = (balance * r0) / totalSupply;
+      const amount1 = (balance * r1) / totalSupply;
 
       // FIX 4: token1Address comes from pair.token1(), not inferred from UI state
       const newPosition: V2Position = {

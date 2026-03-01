@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
-import { Contract, JsonRpcProvider, BrowserProvider, zeroPadValue, getAddress } from "ethers";
+import { Contract, JsonRpcProvider, BrowserProvider, zeroPadValue, getAddress, parseUnits } from "ethers";
 import {
   CCTP_TESTNET_CHAINS,
   CCTP_ATTESTATION_API,
@@ -68,8 +68,10 @@ function ChainSelector({
   const [visible, setVisible] = useState(false);
 
   useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
     if (open) { setMounted(true); requestAnimationFrame(() => setVisible(true)); setSearch(""); }
-    else { setVisible(false); setTimeout(() => setMounted(false), 200); }
+    else { setVisible(false); timer = setTimeout(() => setMounted(false), 200); }
+    return () => clearTimeout(timer);
   }, [open]);
 
   useEffect(() => {
@@ -519,12 +521,20 @@ export default function Bridge() {
     } catch (err: any) {
       console.error("Resume error:", err);
       const message = err?.message || err?.reason || "Unknown error";
-      updateTransferStatus(pendingTx.id, { status: "failed", error: message });
-      setTransfer(prev => ({ ...prev, step: "error", error: message }));
+      const isTimeout = /timeout/i.test(message);
+      if (isTimeout) {
+        // Keep transfer resumable — don't mark as failed
+        updateTransferStatus(pendingTx.id, { status: "attesting", error: message });
+        setTransfer(prev => ({ ...prev, step: "error", error: message }));
+      } else {
+        updateTransferStatus(pendingTx.id, { status: "failed", error: message });
+        setTransfer(prev => ({ ...prev, step: "error", error: message }));
+      }
       toast({
-        title: "Resume Failed",
-        description: message.length > 120 ? message.slice(0, 120) + "..." : message,
-        variant: "destructive",
+        title: isTimeout ? "Attestation Timed Out" : "Resume Failed",
+        description: (isTimeout ? "You can retry later. " : "") +
+          (message.length > 120 ? message.slice(0, 120) + "..." : message),
+        variant: isTimeout ? "warning" : "destructive",
       });
     }
   };
@@ -615,8 +625,8 @@ export default function Bridge() {
 
     try {
       const decimals = sourceChain.usdcDecimals; // always 6 for CCTP operations
-      const amountWei = BigInt(Math.floor(parseFloat(amount) * 10 ** decimals));
-      const maxFee = BigInt(Math.floor(parseFloat(amount) * 0.0005 * 10 ** decimals)); // 0.05% max fee
+      const amountWei = parseUnits(amount, decimals);
+      const maxFee = amountWei * 5n / 10000n; // 0.05% max fee
       const minFinalityThreshold = (useFastTransfer && sourceChain.supportsFastTransfer) ? 1000 : 2000;
 
       // ── Check connected network & prompt switch ─────────────────────────
@@ -730,15 +740,22 @@ export default function Bridge() {
     } catch (err: any) {
       console.error("Bridge error:", err);
       const message = err?.message || err?.reason || "Unknown error";
+      const isTimeout = /timeout/i.test(message);
       // Update persisted transfer if we have one
       if (currentTransferIdRef.current) {
-        updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message });
+        if (isTimeout) {
+          // Keep transfer resumable — don't mark as failed
+          updateTransferStatus(currentTransferIdRef.current, { status: "attesting", error: message });
+        } else {
+          updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message });
+        }
       }
       setTransfer(prev => ({ ...prev, step: "error", error: message }));
       toast({
-        title: "Bridge Failed",
-        description: message.length > 120 ? message.slice(0, 120) + "..." : message,
-        variant: "destructive",
+        title: isTimeout ? "Attestation Timed Out" : "Bridge Failed",
+        description: (isTimeout ? "You can retry later. " : "") +
+          (message.length > 120 ? message.slice(0, 120) + "..." : message),
+        variant: isTimeout ? "warning" : "destructive",
       });
     }
   };
@@ -750,12 +767,20 @@ export default function Bridge() {
   ): Promise<{ message: string; attestation: string }> {
     const url = `${CCTP_ATTESTATION_API}/v2/messages/${srcDomain}?transactionHash=${txHash}`;
     const maxAttempts = 120; // ~10 minutes at 5s intervals
+    const FETCH_TIMEOUT_MS = 10_000; // 10 seconds per request
 
     for (let i = 0; i < maxAttempts; i++) {
       if (abortRef.current) throw new Error("Transfer cancelled");
 
       try {
-        const res = await fetch(url);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+        let res: Response;
+        try {
+          res = await fetch(url, { signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
+        }
         if (res.ok) {
           const data = await res.json();
           if (data?.messages?.[0]?.status === "complete") {
@@ -765,7 +790,7 @@ export default function Bridge() {
             };
           }
         }
-      } catch { /* retry */ }
+      } catch { /* transient error or abort timeout — retry */ }
 
       await new Promise(r => setTimeout(r, 5000));
     }

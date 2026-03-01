@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Link, useLocation } from "wouter";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import {
@@ -39,6 +39,16 @@ export function Header() {
     return () => window.removeEventListener("keydown", handle);
   }, [menuOpen]);
 
+  // Remove focusable children from tab order when menu is closed
+  const syncTabIndex = useCallback(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const focusables = el.querySelectorAll<HTMLElement>("a, button, input, [tabindex]");
+    focusables.forEach(f => { f.tabIndex = menuOpen ? 0 : -1; });
+  }, [menuOpen]);
+
+  useEffect(() => { syncTabIndex(); }, [syncTabIndex]);
+
   const navItems = [
     { href: "/",               label: "Swap",     testId: "link-swap",            icon: ArrowLeftRight },
     { href: "/add-liquidity",  label: "Liquidity", testId: "link-add-liquidity",  icon: Droplets },
@@ -76,11 +86,13 @@ export function Header() {
               const connected = ready && account && chain;
               return (
                 <div
-                  {...(!ready && {
-                    "aria-hidden": true,
-                    style: { opacity: 0, pointerEvents: "none" as const, userSelect: "none" as const },
-                  })}
-                  style={{ display: "flex", alignItems: "center", gap: 8 }}
+                  {...(!ready && { "aria-hidden": true })}
+                  style={{
+                    ...(!ready ? { opacity: 0, pointerEvents: "none" as const, userSelect: "none" as const } : {}),
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
                 >
                   {!connected ? (
                     <button
@@ -161,10 +173,12 @@ export function Header() {
       <div
         id="main-nav-menu"
         ref={menuRef}
+        aria-hidden={!menuOpen}
         className="overflow-hidden transition-all duration-300 ease-in-out"
         style={{
           maxHeight: menuOpen ? "480px" : "0",
           opacity: menuOpen ? 1 : 0,
+          pointerEvents: menuOpen ? "auto" : "none",
         }}
       >
         <nav className="border-t border-border/40 bg-background/95 backdrop-blur-xl">

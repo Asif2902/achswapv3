@@ -56,7 +56,11 @@ export function savePendingTransfer(transfer: PendingBridgeTransfer): void {
   } else {
     existing.unshift(transfer); // newest first
   }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
+  } catch (e) {
+    console.warn(`[${STORAGE_KEY}] localStorage write failed:`, e);
+  }
   // Dispatch a custom event so other components (Header) can react
   window.dispatchEvent(new CustomEvent("bridge-transfers-updated"));
 }
@@ -69,7 +73,11 @@ export function updateTransferStatus(
   const idx = existing.findIndex(t => t.id === id);
   if (idx >= 0) {
     existing[idx] = { ...existing[idx], ...updates };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
+    } catch (e) {
+      console.warn(`[${STORAGE_KEY}] localStorage write failed:`, e);
+    }
     window.dispatchEvent(new CustomEvent("bridge-transfers-updated"));
   }
 }
@@ -77,7 +85,11 @@ export function updateTransferStatus(
 export function removeTransfer(id: string): void {
   const existing = getPendingTransfers();
   const filtered = existing.filter(t => t.id !== id);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
+  } catch (e) {
+    console.warn(`[${STORAGE_KEY}] localStorage write failed:`, e);
+  }
   window.dispatchEvent(new CustomEvent("bridge-transfers-updated"));
 }
 
