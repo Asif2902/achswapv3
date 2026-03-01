@@ -324,6 +324,7 @@ export default function Bridge() {
   // Amount + balances
   const [amount, setAmount] = useState("");
   const [sourceBalance, setSourceBalance] = useState<string | null>(null);
+  const [sourceBalanceRaw, setSourceBalanceRaw] = useState<bigint | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [useFastTransfer, setUseFastTransfer] = useState(true);
   const [balanceRefreshKey, setBalanceRefreshKey] = useState(0);
@@ -422,6 +423,7 @@ export default function Bridge() {
   const fetchBalance = useCallback(async () => {
     if (!address || !sourceChain) {
       setSourceBalance(null);
+      setSourceBalanceRaw(null);
       setIsLoadingBalance(false);
       return;
     }
@@ -434,6 +436,7 @@ export default function Bridge() {
         const nativeBal = await provider.getBalance(address);
         const formatted = (Number(nativeBal) / 1e18).toFixed(4);
         setSourceBalance(formatted);
+        setSourceBalanceRaw(nativeBal);
       } else {
         // Standard ERC-20 USDC (6 decimals)
         const usdc = new Contract(sourceChain.usdcAddress, ERC20_ABI, provider);
@@ -441,10 +444,12 @@ export default function Bridge() {
         const decimals = sourceChain.usdcDecimals;
         const formatted = (Number(bal) / 10 ** decimals).toFixed(decimals > 4 ? 4 : decimals);
         setSourceBalance(formatted);
+        setSourceBalanceRaw(bal);
       }
     } catch (e) {
       console.error("Balance fetch error:", e);
       setSourceBalance(null);
+      setSourceBalanceRaw(null);
     } finally {
       setIsLoadingBalance(false);
     }
@@ -467,6 +472,7 @@ export default function Bridge() {
     setDestChain(sourceChain);
     setAmount("");
     setSourceBalance(null);
+    setSourceBalanceRaw(null);
     setTransfer(INITIAL_STATE);
   };
 
@@ -832,8 +838,15 @@ export default function Bridge() {
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const parsedAmount = amount ? parseFloat(amount) : 0;
-  const parsedBalance = sourceBalance ? parseFloat(sourceBalance) : 0;
-  const insufficientBalance = parsedAmount > 0 && sourceBalance !== null && parsedAmount > parsedBalance;
+  let insufficientBalance = false;
+  if (parsedAmount > 0 && sourceBalanceRaw !== null && amount) {
+    try {
+      const amountWei = parseUnits(amount, sourceChain.usdcDecimals);
+      insufficientBalance = amountWei > sourceBalanceRaw;
+    } catch {
+      // Invalid input (e.g. trailing dot) — don't flag as insufficient
+    }
+  }
   const canBridge = isConnected && amount && parsedAmount > 0 && !isTransferring && !insufficientBalance;
   const estimatedTime = (useFastTransfer && sourceChain.supportsFastTransfer) ? "~8-20 seconds" : "~15-19 minutes";
 
