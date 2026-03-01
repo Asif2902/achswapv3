@@ -76,7 +76,9 @@ export default function Swap() {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
-  const contracts = chainId ? getContractsForChain(chainId) : null;
+
+  let contracts: ReturnType<typeof getContractsForChain> | null = null;
+  try { contracts = chainId ? getContractsForChain(chainId) : null; } catch { /* wrong chain */ }
 
   useEffect(() => { const s = loadDexSettings(); setV2Enabled(s.v2Enabled); setV3Enabled(s.v3Enabled); }, []);
   useEffect(() => { saveDexSettings({ v2Enabled, v3Enabled }); }, [v2Enabled, v3Enabled]);

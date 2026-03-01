@@ -25,7 +25,7 @@ export function Toaster() {
             {...props}
           >
             <div className="relative flex items-start gap-3 pr-8">
-              <ToastIcon variant={variant} />
+              <ToastIcon variant={variant ?? undefined} />
               <div className="flex-1 grid gap-1 min-w-0">
                 {title && <ToastTitle>{title}</ToastTitle>}
                 {description && (
