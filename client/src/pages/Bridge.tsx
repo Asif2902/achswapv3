@@ -324,6 +324,7 @@ export default function Bridge() {
   // Amount + balances
   const [amount, setAmount] = useState("");
   const [sourceBalance, setSourceBalance] = useState<string | null>(null);
+  const [sourceBalanceRaw, setSourceBalanceRaw] = useState<bigint | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [useFastTransfer, setUseFastTransfer] = useState(true);
   const [balanceRefreshKey, setBalanceRefreshKey] = useState(0);
@@ -422,6 +423,7 @@ export default function Bridge() {
   const fetchBalance = useCallback(async () => {
     if (!address || !sourceChain) {
       setSourceBalance(null);
+      setSourceBalanceRaw(null);
       setIsLoadingBalance(false);
       return;
     }
@@ -434,6 +436,7 @@ export default function Bridge() {
         const nativeBal = await provider.getBalance(address);
         const formatted = (Number(nativeBal) / 1e18).toFixed(4);
         setSourceBalance(formatted);
+        setSourceBalanceRaw(nativeBal);
       } else {
         // Standard ERC-20 USDC (6 decimals)
         const usdc = new Contract(sourceChain.usdcAddress, ERC20_ABI, provider);
@@ -441,10 +444,12 @@ export default function Bridge() {
         const decimals = sourceChain.usdcDecimals;
         const formatted = (Number(bal) / 10 ** decimals).toFixed(decimals > 4 ? 4 : decimals);
         setSourceBalance(formatted);
+        setSourceBalanceRaw(bal);
       }
     } catch (e) {
       console.error("Balance fetch error:", e);
       setSourceBalance(null);
+      setSourceBalanceRaw(null);
     } finally {
       setIsLoadingBalance(false);
     }
@@ -467,6 +472,7 @@ export default function Bridge() {
     setDestChain(sourceChain);
     setAmount("");
     setSourceBalance(null);
+    setSourceBalanceRaw(null);
     setTransfer(INITIAL_STATE);
   };
 
@@ -550,68 +556,90 @@ export default function Bridge() {
 
     updateTransferStatus(transferId, { status: "minting" });
 
-    // Switch to destination chain
     try {
-      await window.ethereum.request({
-        method: "wallet_switchEthereumChain",
-        params: [{ chainId: "0x" + dstChain.chainId.toString(16) }],
-      });
-    } catch (switchErr: any) {
-      if (switchErr.code === 4902) {
+      // Switch to destination chain
+      try {
         await window.ethereum.request({
-          method: "wallet_addEthereumChain",
-          params: [{
-            chainId: "0x" + dstChain.chainId.toString(16),
-            chainName: dstChain.name,
-            nativeCurrency: dstChain.nativeCurrency,
-            rpcUrls: [dstChain.rpcUrls[0]],
-            blockExplorerUrls: [dstChain.explorerUrl],
-          }],
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: "0x" + dstChain.chainId.toString(16) }],
         });
-      } else {
-        throw new Error(`Please switch to ${dstChain.name} to receive USDC`);
+      } catch (switchErr: any) {
+        if (switchErr.code === 4902) {
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: "0x" + dstChain.chainId.toString(16),
+              chainName: dstChain.name,
+              nativeCurrency: dstChain.nativeCurrency,
+              rpcUrls: [dstChain.rpcUrls[0]],
+              blockExplorerUrls: [dstChain.explorerUrl],
+            }],
+          });
+        } else {
+          throw new Error(`Please switch to ${dstChain.name} to receive USDC`);
+        }
       }
+
+      // Wait for chain switch to stabilize
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Verify the chain actually switched
+      const verifyProvider = new BrowserProvider(window.ethereum);
+      const verifiedChainId = await verifyProvider.getNetwork().then(n => Number(n.chainId));
+      if (verifiedChainId !== dstChain.chainId) {
+        throw new Error(`Chain switch to ${dstChain.name} did not complete. Please try again.`);
+      }
+
+      const destProvider = new BrowserProvider(window.ethereum);
+      const destSigner = await destProvider.getSigner();
+
+      toast({ title: "Minting USDC...", description: `On ${dstChain.name}` });
+      const messageTransmitter = new Contract(
+        dstChain.messageTransmitterV2,
+        MESSAGE_TRANSMITTER_V2_ABI,
+        destSigner
+      );
+
+      // Estimate gas and apply 150% boost for slow chains
+      const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
+        attestation.message,
+        attestation.attestation
+      );
+      const boostedGas = gasEstimate * 150n / 100n;
+
+      const mintTx = await messageTransmitter.receiveMessage(
+        attestation.message,
+        attestation.attestation,
+        { gasLimit: boostedGas }
+      );
+      const mintReceipt = await mintTx.wait();
+
+      updateTransferStatus(transferId, { status: "complete", mintTxHash: mintReceipt.hash });
+      setTransfer(prev => ({
+        ...prev,
+        step: "complete",
+        mintTxHash: mintReceipt.hash,
+      }));
+
+      toast({
+        title: "Bridge Complete!",
+        description: `${transferAmount} USDC bridged to ${dstChain.shortName}`,
+      });
+
+      fetchBalance();
+
+    } catch (mintErr: any) {
+      // Mint failed or was cancelled — keep transfer resumable with attestation intact
+      const msg = mintErr?.message || mintErr?.reason || "Mint failed";
+      updateTransferStatus(transferId, { status: "ready_to_mint", attestation, error: msg });
+      setTransfer(prev => ({ ...prev, step: "error", error: msg }));
+      toast({
+        title: "Mint Failed — Your Funds Are Safe",
+        description: "The attestation is saved. You can retry minting from the notifications panel.",
+        variant: "warning",
+      });
+      // Don't re-throw — the transfer is recoverable, not lost
     }
-
-    // Wait for chain switch to stabilize
-    await new Promise(r => setTimeout(r, 1500));
-
-    // Verify the chain actually switched
-    const verifyProvider = new BrowserProvider(window.ethereum);
-    const verifiedChainId = await verifyProvider.getNetwork().then(n => Number(n.chainId));
-    if (verifiedChainId !== dstChain.chainId) {
-      throw new Error(`Chain switch to ${dstChain.name} did not complete. Please try again.`);
-    }
-
-    const destProvider = new BrowserProvider(window.ethereum);
-    const destSigner = await destProvider.getSigner();
-
-    toast({ title: "Minting USDC...", description: `On ${dstChain.name}` });
-    const messageTransmitter = new Contract(
-      dstChain.messageTransmitterV2,
-      MESSAGE_TRANSMITTER_V2_ABI,
-      destSigner
-    );
-
-    const mintTx = await messageTransmitter.receiveMessage(
-      attestation.message,
-      attestation.attestation
-    );
-    const mintReceipt = await mintTx.wait();
-
-    updateTransferStatus(transferId, { status: "complete", mintTxHash: mintReceipt.hash });
-    setTransfer(prev => ({
-      ...prev,
-      step: "complete",
-      mintTxHash: mintReceipt.hash,
-    }));
-
-    toast({
-      title: "Bridge Complete!",
-      description: `${transferAmount} USDC bridged to ${dstChain.shortName}`,
-    });
-
-    fetchBalance();
   };
 
   // ── CCTP Bridge execution ──────────────────────────────────────────────────
@@ -677,7 +705,8 @@ export default function Bridge() {
       const currentAllowance: bigint = await usdcContract.allowance(address, sourceChain.tokenMessengerV2);
 
       if (currentAllowance < amountWei) {
-        const approveTx = await usdcContract.approve(sourceChain.tokenMessengerV2, amountWei);
+        const approveGas = await usdcContract.approve.estimateGas(sourceChain.tokenMessengerV2, amountWei);
+        const approveTx = await usdcContract.approve(sourceChain.tokenMessengerV2, amountWei, { gasLimit: approveGas * 150n / 100n });
         await approveTx.wait();
       }
 
@@ -695,7 +724,7 @@ export default function Bridge() {
         signer
       );
 
-      const burnTx = await tokenMessenger.depositForBurn(
+      const burnGas = await tokenMessenger.depositForBurn.estimateGas(
         amountWei,
         destChain.domain,
         mintRecipient,
@@ -703,6 +732,16 @@ export default function Bridge() {
         destCallerBytes32,
         maxFee,
         minFinalityThreshold
+      );
+      const burnTx = await tokenMessenger.depositForBurn(
+        amountWei,
+        destChain.domain,
+        mintRecipient,
+        sourceChain.usdcAddress,
+        destCallerBytes32,
+        maxFee,
+        minFinalityThreshold,
+        { gasLimit: burnGas * 150n / 100n }
       );
       const burnReceipt = await burnTx.wait();
       const burnTxHash = burnReceipt.hash;
@@ -798,7 +837,17 @@ export default function Bridge() {
   }
 
   // ── Derived ────────────────────────────────────────────────────────────────
-  const canBridge = isConnected && amount && parseFloat(amount) > 0 && !isTransferring;
+  const parsedAmount = amount ? parseFloat(amount) : 0;
+  let insufficientBalance = false;
+  if (parsedAmount > 0 && sourceBalanceRaw !== null && amount) {
+    try {
+      const amountWei = parseUnits(amount, sourceChain.usdcDecimals);
+      insufficientBalance = amountWei > sourceBalanceRaw;
+    } catch {
+      // Invalid input (e.g. trailing dot) — don't flag as insufficient
+    }
+  }
+  const canBridge = isConnected && amount && parsedAmount > 0 && !isTransferring && !insufficientBalance;
   const estimatedTime = (useFastTransfer && sourceChain.supportsFastTransfer) ? "~8-20 seconds" : "~15-19 minutes";
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1119,6 +1168,8 @@ export default function Bridge() {
                 >
                   {isTransferring ? (
                     <><span className="br-spin" />Bridging...</>
+                  ) : insufficientBalance ? (
+                    <><AlertTriangle style={{ width: 18, height: 18 }} />Insufficient USDC Balance</>
                   ) : transfer.step === "complete" ? (
                     <><Check style={{ width: 18, height: 18 }} />Bridge Again</>
                   ) : (
