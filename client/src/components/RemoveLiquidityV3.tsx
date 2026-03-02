@@ -185,6 +185,134 @@ export function RemoveLiquidityV3() {
   const getDisplayLogo = (address: string, onChainSymbol: string): string =>
     isWrappedToken(chainId, address) ? getTokenLogo("USDC") : getTokenLogo(onChainSymbol);
 
+  // ── Single-position loader ─────────────────────────────────────────────────
+  // Re-fetches only one NFT position by tokenId. Used after collect/partial-remove
+  // to avoid re-enumerating the entire list (saves N-1 positions worth of RPC calls).
+  const refreshSinglePosition = async (tokenId: bigint): Promise<void> => {
+    if (!address || !contracts || !chainId) return;
+    try {
+      const provider = createAlchemyProvider(chainId);
+      const positionManager = new Contract(
+        contracts.v3.nonfungiblePositionManager,
+        NONFUNGIBLE_POSITION_MANAGER_ABI,
+        provider,
+      );
+      const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
+      const knownTokenList = getTokensByChainId(chainId);
+
+      const position = await positionManager.positions(tokenId);
+
+      const token0Address: string = position[2];
+      const token1Address: string = position[3];
+      const fee = Number(position[4]);
+      const tickLower = Number(position[5]);
+      const tickUpper = Number(position[6]);
+      const liquidity: bigint = position[7];
+      const feeGrowthInside0LastX128: bigint = position[8];
+      const feeGrowthInside1LastX128: bigint = position[9];
+      const tokensOwed0: bigint = position[10];
+      const tokensOwed1: bigint = position[11];
+
+      const [info0, info1] = await Promise.all([
+        safeTokenInfo(token0Address, provider, knownTokenList),
+        safeTokenInfo(token1Address, provider, knownTokenList),
+      ]);
+
+      let amount0 = 0n;
+      let amount1 = 0n;
+      let unclaimedFees0 = tokensOwed0;
+      let unclaimedFees1 = tokensOwed1;
+      let currentTick: number | undefined = undefined;
+
+      try {
+        const [tokenA, tokenB] =
+          token0Address.toLowerCase() < token1Address.toLowerCase()
+            ? [token0Address, token1Address]
+            : [token1Address, token0Address];
+
+        const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+
+        if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
+          const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
+
+          const [slot0, feeGrowthGlobal0X128, feeGrowthGlobal1X128, tickLowerData, tickUpperData] =
+            await Promise.all([
+              pool.slot0(),
+              pool.feeGrowthGlobal0X128(),
+              pool.feeGrowthGlobal1X128(),
+              pool.ticks(tickLower),
+              pool.ticks(tickUpper),
+            ]);
+
+          let currentSqrtPriceX96: bigint = slot0[0];
+          currentTick = Number(slot0[1]);
+          if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
+
+          const feeGrowthOutsideLower0: bigint = tickLowerData[2];
+          const feeGrowthOutsideLower1: bigint = tickLowerData[3];
+          const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
+          const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
+
+          if (liquidity > 0n) {
+            unclaimedFees0 = calculateUnclaimedFees(
+              liquidity,
+              calculateFeeGrowthInside(feeGrowthGlobal0X128, feeGrowthOutsideLower0, feeGrowthOutsideUpper0, currentTick, tickLower, tickUpper),
+              feeGrowthInside0LastX128,
+              tokensOwed0,
+            );
+            unclaimedFees1 = calculateUnclaimedFees(
+              liquidity,
+              calculateFeeGrowthInside(feeGrowthGlobal1X128, feeGrowthOutsideLower1, feeGrowthOutsideUpper1, currentTick, tickLower, tickUpper),
+              feeGrowthInside1LastX128,
+              tokensOwed1,
+            );
+          }
+
+          const tokenAmounts = getTokensFromLiquidity(liquidity, currentSqrtPriceX96, tickLower, tickUpper);
+          if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
+            amount0 = tokenAmounts.amount1;
+            amount1 = tokenAmounts.amount0;
+          } else {
+            amount0 = tokenAmounts.amount0;
+            amount1 = tokenAmounts.amount1;
+          }
+        }
+      } catch (poolError) {
+        console.error("Error fetching pool data for single position:", poolError);
+      }
+
+      const updated: V3Position = {
+        tokenId,
+        token0Address,
+        token0Symbol: info0.symbol,
+        token0Decimals: info0.decimals,
+        token1Address,
+        token1Symbol: info1.symbol,
+        token1Decimals: info1.decimals,
+        fee,
+        liquidity,
+        tickLower,
+        tickUpper,
+        tokensOwed0,
+        tokensOwed1,
+        unclaimedFees0,
+        unclaimedFees1,
+        amount0,
+        amount1,
+        currentTick,
+      };
+
+      setPositions((prev) => {
+        const next = prev.map((p) => (p.tokenId === tokenId ? updated : p));
+        if (address && chainId) writePositionCache(chainId, address, next);
+        return next;
+      });
+      setSelectedPosition(updated);
+    } catch (err) {
+      console.error("Failed to refresh single position:", err);
+    }
+  };
+
   const loadPositions = async () => {
     if (!address || !contracts || !chainId) return;
 
@@ -471,7 +599,7 @@ export function RemoveLiquidityV3() {
         } catch {}
       }
 
-      await loadPositions();
+      await refreshSinglePosition(selectedPosition.tokenId);
 
       const display0 = getDisplaySymbol(selectedPosition.token0Address, selectedPosition.token0Symbol);
       const display1 = getDisplaySymbol(selectedPosition.token1Address, selectedPosition.token1Symbol);
@@ -637,8 +765,18 @@ export function RemoveLiquidityV3() {
         ),
       });
 
-      await loadPositions();
-      setSelectedPosition(null);
+      if (isFullRemove) {
+        // NFT was burned on-chain — remove from state without any RPC call
+        setPositions((prev) => {
+          const next = prev.filter((p) => p.tokenId !== selectedPosition.tokenId);
+          if (address && chainId) writePositionCache(chainId, address, next);
+          return next;
+        });
+        setSelectedPosition(null);
+      } else {
+        // Partial remove — only re-fetch this one position
+        await refreshSinglePosition(selectedPosition.tokenId);
+      }
       setPercentage([50]);
     } catch (error: any) {
       console.error("Remove liquidity error:", error);
