@@ -8,20 +8,96 @@ import { Contract, BrowserProvider } from "ethers";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import { createAlchemyProvider } from "@/lib/config";
+import { safeTokenInfo } from "@/lib/v3-pool-utils";
 import { NONFUNGIBLE_POSITION_MANAGER_ABI, V3_POOL_ABI, V3_FACTORY_ABI, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getTokensFromLiquidity } from "@/lib/v3-liquidity-math";
 import { getTokensByChainId, isWrappedToken } from "@/data/tokens";
 import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign, Wallet, ChevronRight, Zap, ArrowDown } from "lucide-react";
 
-const ERC20_ABI = [
-  "function symbol() view returns (string)",
-  "function decimals() view returns (uint8)",
-];
-
 const MAX_UINT128 = 2n ** 128n - 1n;
 const Q128 = 2n ** 128n;
 const MASK256 = (1n << 256n) - 1n;
+
+// ─── Position cache ──────────────────────────────────────────────────────────
+// Cache V3 positions in localStorage so the page shows data instantly on mount
+// and refreshes in the background.
+
+const POSITION_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+interface CachedPosition {
+  tokenId: string;
+  token0Address: string;
+  token0Symbol: string;
+  token0Decimals: number;
+  token1Address: string;
+  token1Symbol: string;
+  token1Decimals: number;
+  fee: number;
+  liquidity: string;
+  tickLower: number;
+  tickUpper: number;
+  tokensOwed0: string;
+  tokensOwed1: string;
+  unclaimedFees0: string;
+  unclaimedFees1: string;
+  amount0: string;
+  amount1: string;
+  currentTick?: number;
+}
+
+interface PositionCache {
+  positions: CachedPosition[];
+  timestamp: number;
+}
+
+function positionCacheKey(chainId: number, address: string): string {
+  return `v3_positions_${chainId}_${address.toLowerCase()}`;
+}
+
+function readPositionCache(chainId: number, address: string): V3Position[] | null {
+  try {
+    const raw = localStorage.getItem(positionCacheKey(chainId, address));
+    if (!raw) return null;
+    const entry: PositionCache = JSON.parse(raw);
+    if (Date.now() - entry.timestamp > POSITION_CACHE_TTL_MS) return null;
+    return entry.positions.map((p) => ({
+      ...p,
+      tokenId: BigInt(p.tokenId),
+      liquidity: BigInt(p.liquidity),
+      tokensOwed0: BigInt(p.tokensOwed0),
+      tokensOwed1: BigInt(p.tokensOwed1),
+      unclaimedFees0: BigInt(p.unclaimedFees0),
+      unclaimedFees1: BigInt(p.unclaimedFees1),
+      amount0: BigInt(p.amount0),
+      amount1: BigInt(p.amount1),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+function writePositionCache(chainId: number, address: string, positions: V3Position[]): void {
+  try {
+    const entry: PositionCache = {
+      positions: positions.map((p) => ({
+        ...p,
+        tokenId: p.tokenId.toString(),
+        liquidity: p.liquidity.toString(),
+        tokensOwed0: p.tokensOwed0.toString(),
+        tokensOwed1: p.tokensOwed1.toString(),
+        unclaimedFees0: p.unclaimedFees0.toString(),
+        unclaimedFees1: p.unclaimedFees1.toString(),
+        amount0: p.amount0.toString(),
+        amount1: p.amount1.toString(),
+      })),
+      timestamp: Date.now(),
+    };
+    localStorage.setItem(positionCacheKey(chainId, address), JSON.stringify(entry));
+  } catch {
+    // storage quota exceeded — non-fatal
+  }
+}
 
 function subU256(a: bigint, b: bigint): bigint {
   return (a - b) & MASK256;
@@ -111,6 +187,13 @@ export function RemoveLiquidityV3() {
 
   const loadPositions = async () => {
     if (!address || !contracts || !chainId) return;
+
+    // Show cached data instantly (if available) while refreshing in background
+    const cached = readPositionCache(chainId, address);
+    if (cached && cached.length > 0 && positions.length === 0) {
+      setPositions(cached);
+    }
+
     setIsLoading(true);
     try {
       const provider = createAlchemyProvider(chainId);
@@ -119,155 +202,182 @@ export function RemoveLiquidityV3() {
         NONFUNGIBLE_POSITION_MANAGER_ABI,
         provider,
       );
+      const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
+      const knownTokenList = getTokensByChainId(chainId);
 
+      // Step 1: Get NFT balance
       const balance = await positionManager.balanceOf(address);
-      const userPositions: V3Position[] = [];
+      const count = Number(balance);
 
-      for (let i = 0; i < Number(balance); i++) {
-        try {
-          const tokenId = await positionManager.tokenOfOwnerByIndex(address, i);
-          const position = await positionManager.positions(tokenId);
-
-          const token0Address: string = position[2];
-          const token1Address: string = position[3];
-          const fee = Number(position[4]);
-          const tickLower = Number(position[5]);
-          const tickUpper = Number(position[6]);
-          const liquidity: bigint = position[7];
-          const feeGrowthInside0LastX128: bigint = position[8];
-          const feeGrowthInside1LastX128: bigint = position[9];
-          const tokensOwed0: bigint = position[10];
-          const tokensOwed1: bigint = position[11];
-
-          const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
-          const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
-
-          const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
-            await Promise.all([
-              token0Contract.symbol(),
-              token0Contract.decimals(),
-              token1Contract.symbol(),
-              token1Contract.decimals(),
-            ]);
-
-          let amount0 = 0n;
-          let amount1 = 0n;
-          let unclaimedFees0 = tokensOwed0;
-          let unclaimedFees1 = tokensOwed1;
-          let currentTick: number | undefined = undefined;
-
-          try {
-            const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
-            const [tokenA, tokenB] =
-              token0Address.toLowerCase() < token1Address.toLowerCase()
-                ? [token0Address, token1Address]
-                : [token1Address, token0Address];
-
-            const poolAddress = await factory.getPool(tokenA, tokenB, fee);
-
-            if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
-              const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
-
-              const [
-                slot0,
-                feeGrowthGlobal0X128,
-                feeGrowthGlobal1X128,
-                tickLowerData,
-                tickUpperData,
-              ] = await Promise.all([
-                pool.slot0(),
-                pool.feeGrowthGlobal0X128(),
-                pool.feeGrowthGlobal1X128(),
-                pool.ticks(tickLower),
-                pool.ticks(tickUpper),
-              ]);
-
-              let currentSqrtPriceX96: bigint = slot0[0];
-              currentTick = Number(slot0[1]);
-              if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
-
-              const feeGrowthOutsideLower0: bigint = tickLowerData[2];
-              const feeGrowthOutsideLower1: bigint = tickLowerData[3];
-              const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
-              const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
-
-              if (liquidity > 0n) {
-                const feeGrowthInside0 = calculateFeeGrowthInside(
-                  feeGrowthGlobal0X128,
-                  feeGrowthOutsideLower0,
-                  feeGrowthOutsideUpper0,
-                  currentTick,
-                  tickLower,
-                  tickUpper,
-                );
-                const feeGrowthInside1 = calculateFeeGrowthInside(
-                  feeGrowthGlobal1X128,
-                  feeGrowthOutsideLower1,
-                  feeGrowthOutsideUpper1,
-                  currentTick,
-                  tickLower,
-                  tickUpper,
-                );
-                unclaimedFees0 = calculateUnclaimedFees(
-                  liquidity,
-                  feeGrowthInside0,
-                  feeGrowthInside0LastX128,
-                  tokensOwed0,
-                );
-                unclaimedFees1 = calculateUnclaimedFees(
-                  liquidity,
-                  feeGrowthInside1,
-                  feeGrowthInside1LastX128,
-                  tokensOwed1,
-                );
-              }
-
-              const tokenAmounts = getTokensFromLiquidity(
-                liquidity,
-                currentSqrtPriceX96,
-                tickLower,
-                tickUpper,
-              );
-
-              if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
-                amount0 = tokenAmounts.amount1;
-                amount1 = tokenAmounts.amount0;
-              } else {
-                amount0 = tokenAmounts.amount0;
-                amount1 = tokenAmounts.amount1;
-              }
-            }
-          } catch (poolError) {
-            console.error("Error fetching pool data:", poolError);
-          }
-
-          userPositions.push({
-            tokenId,
-            token0Address,
-            token0Symbol,
-            token0Decimals: Number(token0Decimals),
-            token1Address,
-            token1Symbol,
-            token1Decimals: Number(token1Decimals),
-            fee,
-            liquidity,
-            tickLower,
-            tickUpper,
-            tokensOwed0,
-            tokensOwed1,
-            unclaimedFees0,
-            unclaimedFees1,
-            amount0,
-            amount1,
-            currentTick,
-          });
-        } catch (error) {
-          console.error(`Error loading position ${i}:`, error);
-        }
+      if (count === 0) {
+        setPositions([]);
+        writePositionCache(chainId, address, []);
+        toast({
+          title: "No V3 positions found",
+          description: "You don't have any V3 liquidity positions",
+        });
+        return;
       }
 
-      setPositions(userPositions);
-      if (userPositions.length === 0) {
+      // Step 2: Fetch ALL tokenIds in parallel (batch provider packs these into ~1 HTTP request)
+      const tokenIds: bigint[] = await Promise.all(
+        Array.from({ length: count }, (_, i) =>
+          positionManager.tokenOfOwnerByIndex(address, i),
+        ),
+      );
+
+      // Step 3: Fetch ALL position data in parallel (another ~1 HTTP batch)
+      const rawPositions = await Promise.all(
+        tokenIds.map((id) => positionManager.positions(id)),
+      );
+
+      // Step 4: For each position, fetch token metadata + pool state in parallel.
+      // All positions are loaded concurrently — the batch provider packs all
+      // eth_calls into minimal HTTP requests automatically.
+      const userPositions = await Promise.all(
+        rawPositions.map(async (position, idx): Promise<V3Position | null> => {
+          try {
+            const tokenId = tokenIds[idx];
+            const token0Address: string = position[2];
+            const token1Address: string = position[3];
+            const fee = Number(position[4]);
+            const tickLower = Number(position[5]);
+            const tickUpper = Number(position[6]);
+            const liquidity: bigint = position[7];
+            const feeGrowthInside0LastX128: bigint = position[8];
+            const feeGrowthInside1LastX128: bigint = position[9];
+            const tokensOwed0: bigint = position[10];
+            const tokensOwed1: bigint = position[11];
+
+            // Token metadata (uses cache → knownTokens → RPC)
+            const [info0, info1] = await Promise.all([
+              safeTokenInfo(token0Address, provider, knownTokenList),
+              safeTokenInfo(token1Address, provider, knownTokenList),
+            ]);
+
+            let amount0 = 0n;
+            let amount1 = 0n;
+            let unclaimedFees0 = tokensOwed0;
+            let unclaimedFees1 = tokensOwed1;
+            let currentTick: number | undefined = undefined;
+
+            try {
+              const [tokenA, tokenB] =
+                token0Address.toLowerCase() < token1Address.toLowerCase()
+                  ? [token0Address, token1Address]
+                  : [token1Address, token0Address];
+
+              const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+
+              if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
+                const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
+
+                // All 5 pool reads in parallel — batch provider packs them together
+                const [
+                  slot0,
+                  feeGrowthGlobal0X128,
+                  feeGrowthGlobal1X128,
+                  tickLowerData,
+                  tickUpperData,
+                ] = await Promise.all([
+                  pool.slot0(),
+                  pool.feeGrowthGlobal0X128(),
+                  pool.feeGrowthGlobal1X128(),
+                  pool.ticks(tickLower),
+                  pool.ticks(tickUpper),
+                ]);
+
+                let currentSqrtPriceX96: bigint = slot0[0];
+                currentTick = Number(slot0[1]);
+                if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
+
+                const feeGrowthOutsideLower0: bigint = tickLowerData[2];
+                const feeGrowthOutsideLower1: bigint = tickLowerData[3];
+                const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
+                const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
+
+                if (liquidity > 0n) {
+                  const feeGrowthInside0 = calculateFeeGrowthInside(
+                    feeGrowthGlobal0X128,
+                    feeGrowthOutsideLower0,
+                    feeGrowthOutsideUpper0,
+                    currentTick,
+                    tickLower,
+                    tickUpper,
+                  );
+                  const feeGrowthInside1 = calculateFeeGrowthInside(
+                    feeGrowthGlobal1X128,
+                    feeGrowthOutsideLower1,
+                    feeGrowthOutsideUpper1,
+                    currentTick,
+                    tickLower,
+                    tickUpper,
+                  );
+                  unclaimedFees0 = calculateUnclaimedFees(
+                    liquidity,
+                    feeGrowthInside0,
+                    feeGrowthInside0LastX128,
+                    tokensOwed0,
+                  );
+                  unclaimedFees1 = calculateUnclaimedFees(
+                    liquidity,
+                    feeGrowthInside1,
+                    feeGrowthInside1LastX128,
+                    tokensOwed1,
+                  );
+                }
+
+                const tokenAmounts = getTokensFromLiquidity(
+                  liquidity,
+                  currentSqrtPriceX96,
+                  tickLower,
+                  tickUpper,
+                );
+
+                if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
+                  amount0 = tokenAmounts.amount1;
+                  amount1 = tokenAmounts.amount0;
+                } else {
+                  amount0 = tokenAmounts.amount0;
+                  amount1 = tokenAmounts.amount1;
+                }
+              }
+            } catch (poolError) {
+              console.error("Error fetching pool data:", poolError);
+            }
+
+            return {
+              tokenId,
+              token0Address,
+              token0Symbol: info0.symbol,
+              token0Decimals: info0.decimals,
+              token1Address,
+              token1Symbol: info1.symbol,
+              token1Decimals: info1.decimals,
+              fee,
+              liquidity,
+              tickLower,
+              tickUpper,
+              tokensOwed0,
+              tokensOwed1,
+              unclaimedFees0,
+              unclaimedFees1,
+              amount0,
+              amount1,
+              currentTick,
+            };
+          } catch (error) {
+            console.error(`Error loading position ${idx}:`, error);
+            return null;
+          }
+        }),
+      );
+
+      const validPositions = userPositions.filter((p): p is V3Position => p !== null);
+      setPositions(validPositions);
+      writePositionCache(chainId, address, validPositions);
+
+      if (validPositions.length === 0) {
         toast({
           title: "No V3 positions found",
           description: "You don't have any V3 liquidity positions",
