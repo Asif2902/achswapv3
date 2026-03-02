@@ -413,22 +413,31 @@ export function AddLiquidityV3Advanced() {
       let nativeAmount = 0n;
       if (tokenAIsNative) nativeAmount = isToken0A ? amount0Desired : amount1Desired;
       else if (tokenBIsNative) nativeAmount = isToken0A ? amount1Desired : amount0Desired;
+      let createPoolData: string | null = null;
       if (!poolExists) {
         const midPrice = (parseFloat(minPrice) + parseFloat(maxPrice)) / 2;
         const sqrtPX96 = priceToSqrtPriceX96(midPrice, token0.decimals, token1.decimals);
-        toast({ title: "Creating pool…", description: "Initializing new V3 pool" });
-        if (nativeAmount > 0n) { await (await pm.multicall([pm.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [token0.address, token1.address, selectedFee, sqrtPX96]), pm.interface.encodeFunctionData("refundETH", [])], { value: nativeAmount })).wait(); }
-        else { await (await pm.createAndInitializePoolIfNecessary(token0.address, token1.address, selectedFee, sqrtPX96)).wait(); }
+        createPoolData = pm.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [token0.address, token1.address, selectedFee, sqrtPX96]);
       }
       toast({ title: "Approving tokens…" });
       const pmAddr = contracts.v3.nonfungiblePositionManager;
       if (amount0Desired > 0n && !(tokenAIsNative && isToken0A) && !(tokenBIsNative && !isToken0A)) { const c = new Contract(token0.address, ERC20_ABI, signer); if (await c.allowance(address, pmAddr) < amount0Desired) await (await c.approve(pmAddr, amount0Desired)).wait(); }
       if (amount1Desired > 0n && !(tokenAIsNative && !isToken0A) && !(tokenBIsNative && isToken0A)) { const c = new Contract(token1.address, ERC20_ABI, signer); if (await c.allowance(address, pmAddr) < amount1Desired) await (await c.approve(pmAddr, amount1Desired)).wait(); }
       const params = { token0: token0.address, token1: token1.address, fee: selectedFee, tickLower, tickUpper, amount0Desired, amount1Desired, amount0Min: 0n, amount1Min: 0n, recipient: address, deadline: Math.floor(Date.now() / 1000) + 1200 };
-      toast({ title: "Adding liquidity…", description: "Creating your V3 position" });
+      toast({ title: !poolExists ? "Creating pool & adding liquidity…" : "Adding liquidity…", description: !poolExists ? "Creating V3 pool and position in one transaction" : "Creating your V3 position" });
       let receipt;
-      if (nativeAmount > 0n) { const md = pm.interface.encodeFunctionData("mint", [params]); const rd = pm.interface.encodeFunctionData("refundETH", []); const gas = await pm.multicall.estimateGas([md, rd], { value: nativeAmount }); receipt = await (await pm.multicall([md, rd], { value: nativeAmount, gasLimit: gas * 150n / 100n })).wait(); }
-      else { const gas = await pm.mint.estimateGas(params); receipt = await (await pm.mint(params, { gasLimit: gas * 150n / 100n })).wait(); }
+      // Build multicall: optionally create pool + mint + refundETH in a single transaction
+      const calls: string[] = [];
+      if (createPoolData) calls.push(createPoolData);
+      calls.push(pm.interface.encodeFunctionData("mint", [params]));
+      if (nativeAmount > 0n) calls.push(pm.interface.encodeFunctionData("refundETH", []));
+      if (calls.length > 1 || nativeAmount > 0n) {
+        const gas = await pm.multicall.estimateGas(calls, { value: nativeAmount });
+        receipt = await (await pm.multicall(calls, { value: nativeAmount, gasLimit: gas * 150n / 100n })).wait();
+      } else {
+        const gas = await pm.mint.estimateGas(params);
+        receipt = await (await pm.mint(params, { gasLimit: gas * 150n / 100n })).wait();
+      }
       setAmountA(""); setAmountB(""); setAmountBIsAuto(false); setAutoCalcAmounts(null);
       await fetchPoolState();
       toast({ title: "Liquidity added!", description: (<div className="flex items-center gap-2"><span>V3 position created</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => window.open(`${contracts.explorer}${receipt.hash}`, "_blank")}><ExternalLink className="h-3 w-3" /></Button></div>) });

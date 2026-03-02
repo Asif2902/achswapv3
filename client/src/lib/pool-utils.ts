@@ -53,7 +53,7 @@ export async function fetchAllPools(
 ): Promise<PoolData[]> {
   try {
     const primaryRpcUrl = getRpcUrl(chainId);
-    const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
+    const fallbackRpcUrl = FALLBACK_RPC;
 
     const provider = new BrowserProvider({
       request: async ({ method, params }: any) => {
@@ -248,11 +248,9 @@ function calculateTVL(
   chainId: number
 ): number {
   // All stable tokens are pegged to $1 USD
-  // wUSDT, gUSDT, USDT = $1 USD on Stable Testnet
   // wUSDC, USDC = $1 USD on ARC Testnet
-  const stableTokens = chainId === 2201 
-    ? ['gUSDT', 'wUSDT', 'USDT']
-    : ['USDC', 'wUSDC'];
+  // Extend this list per chain as needed
+  const stableTokens = ['USDC', 'wUSDC'];
 
   const isToken0Stable = stableTokens.includes(token0Symbol);
   const isToken1Stable = stableTokens.includes(token1Symbol);
@@ -274,9 +272,8 @@ function calculateTVL(
 
 function isWrappedTokenPair(token0Symbol: string, token1Symbol: string, chainId: number): boolean {
   // Wrapped tokens are not trading pairs, they're 1:1 wrappers
-  const wrappedPairs = chainId === 2201
-    ? [['gUSDT', 'wUSDT'], ['wUSDT', 'gUSDT']]
-    : [['USDC', 'wUSDC'], ['wUSDC', 'USDC']];
+  // Extend per chain as needed
+  const wrappedPairs = [['USDC', 'wUSDC'], ['wUSDC', 'USDC']];
   
   return wrappedPairs.some(
     ([t0, t1]) => token0Symbol === t0 && token1Symbol === t1
@@ -285,12 +282,8 @@ function isWrappedTokenPair(token0Symbol: string, token1Symbol: string, chainId:
 
 function getDisplaySymbol(symbol: string, chainId: number): string {
   // Convert wrapped tokens to their unwrapped display names
-  if (chainId === 2201) {
-    if (symbol === 'wUSDT') return 'USDT';
-    if (symbol === 'gUSDT') return 'USDT';
-  } else {
-    if (symbol === 'wUSDC') return 'USDC';
-  }
+  // Extend per chain as needed
+  if (symbol === 'wUSDC') return 'USDC';
   return symbol;
 }
 

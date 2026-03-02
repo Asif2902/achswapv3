@@ -11,7 +11,7 @@ import { createAlchemyProvider } from "@/lib/config";
 import { NONFUNGIBLE_POSITION_MANAGER_ABI, V3_POOL_ABI, V3_FACTORY_ABI, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getTokensFromLiquidity } from "@/lib/v3-liquidity-math";
-import { getTokensByChainId } from "@/data/tokens";
+import { getTokensByChainId, isWrappedToken } from "@/data/tokens";
 import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign, Wallet, ChevronRight, Zap, ArrowDown } from "lucide-react";
 
 const ERC20_ABI = [
@@ -101,6 +101,13 @@ export function RemoveLiquidityV3() {
   const getTokenLogo = (symbol: string): string =>
     knownTokens.find((t) => t.symbol === symbol)?.logoURI ??
     "/img/logos/unknown-token.png";
+
+  // Display helpers: show wUSDC as "USDC" in the UI since we auto-unwrap
+  const getDisplaySymbol = (address: string, onChainSymbol: string): string =>
+    isWrappedToken(chainId, address) ? "USDC" : onChainSymbol;
+
+  const getDisplayLogo = (address: string, onChainSymbol: string): string =>
+    isWrappedToken(chainId, address) ? getTokenLogo("USDC") : getTokenLogo(onChainSymbol);
 
   const loadPositions = async () => {
     if (!address || !contracts || !chainId) return;
@@ -292,13 +299,52 @@ export function RemoveLiquidityV3() {
 
       toast({ title: "Collecting fees…", description: "Claiming your trading fees" });
 
-      const collectTx = await positionManager.collect({
-        tokenId: selectedPosition.tokenId,
-        recipient: address,
-        amount0Max: MAX_UINT128,
-        amount1Max: MAX_UINT128,
-      });
-      const receipt = await collectTx.wait();
+      // Detect if either token is wUSDC so we can auto-unwrap to native USDC
+      const token0IsWrapped = isWrappedToken(chainId, selectedPosition.token0Address);
+      const token1IsWrapped = isWrappedToken(chainId, selectedPosition.token1Address);
+      const hasWrappedToken = token0IsWrapped || token1IsWrapped;
+
+      let receipt;
+
+      if (hasWrappedToken) {
+        // Collect to position manager, then unwrap wUSDC and sweep other token
+        const collectRecipient = contracts.v3.nonfungiblePositionManager;
+
+        const collectData = positionManager.interface.encodeFunctionData("collect", [
+          {
+            tokenId: selectedPosition.tokenId,
+            recipient: collectRecipient,
+            amount0Max: MAX_UINT128,
+            amount1Max: MAX_UINT128,
+          },
+        ]);
+
+        const unwrapData = positionManager.interface.encodeFunctionData("unwrapWETH9", [
+          0n,
+          address,
+        ]);
+
+        const otherToken = token0IsWrapped
+          ? selectedPosition.token1Address
+          : selectedPosition.token0Address;
+        const sweepData = positionManager.interface.encodeFunctionData("sweepToken", [
+          otherToken,
+          0n,
+          address,
+        ]);
+
+        const multicallTx = await positionManager.multicall([collectData, unwrapData, sweepData]);
+        receipt = await multicallTx.wait();
+      } else {
+        // No wrapped token — collect directly to user
+        const collectTx = await positionManager.collect({
+          tokenId: selectedPosition.tokenId,
+          recipient: address,
+          amount0Max: MAX_UINT128,
+          amount1Max: MAX_UINT128,
+        });
+        receipt = await collectTx.wait();
+      }
 
       let amount0Collected = 0n;
       let amount1Collected = 0n;
@@ -317,15 +363,18 @@ export function RemoveLiquidityV3() {
 
       await loadPositions();
 
+      const display0 = getDisplaySymbol(selectedPosition.token0Address, selectedPosition.token0Symbol);
+      const display1 = getDisplaySymbol(selectedPosition.token1Address, selectedPosition.token1Symbol);
+
       toast({
         title: "Fees collected!",
         description: (
           <div className="flex flex-col gap-1">
             <span>
               Collected: {formatAmount(amount0Collected, selectedPosition.token0Decimals)}{" "}
-              {selectedPosition.token0Symbol} +{" "}
+              {display0} +{" "}
               {formatAmount(amount1Collected, selectedPosition.token1Decimals)}{" "}
-              {selectedPosition.token1Symbol}
+              {display1}
             </span>
             <Button
               size="sm"
@@ -384,17 +433,49 @@ export function RemoveLiquidityV3() {
         },
       ]);
 
+      // Detect if either token is wUSDC so we can auto-unwrap to native USDC
+      const token0IsWrapped = isWrappedToken(chainId, selectedPosition.token0Address);
+      const token1IsWrapped = isWrappedToken(chainId, selectedPosition.token1Address);
+      const hasWrappedToken = token0IsWrapped || token1IsWrapped;
+
+      // If a wrapped token is involved, collect to the position manager (so it can unwrap),
+      // otherwise collect directly to the user
+      const collectRecipient = hasWrappedToken
+        ? contracts.v3.nonfungiblePositionManager
+        : address;
+
       const collectData = positionManager.interface.encodeFunctionData("collect", [
         {
           tokenId: selectedPosition.tokenId,
-          recipient: address,
+          recipient: collectRecipient,
           amount0Max: MAX_UINT128,
           amount1Max: MAX_UINT128,
         },
       ]);
 
       let calls = [decreaseData, collectData];
-      
+
+      // When we collected to the position manager, unwrap wUSDC and sweep the other token
+      if (hasWrappedToken) {
+        // unwrapWETH9 converts wUSDC held by the contract to native USDC and sends to user
+        const unwrapData = positionManager.interface.encodeFunctionData("unwrapWETH9", [
+          0n,
+          address,
+        ]);
+        calls.push(unwrapData);
+
+        // sweepToken sends the non-wUSDC token held by the contract back to user
+        const otherToken = token0IsWrapped
+          ? selectedPosition.token1Address
+          : selectedPosition.token0Address;
+        const sweepData = positionManager.interface.encodeFunctionData("sweepToken", [
+          otherToken,
+          0n,
+          address,
+        ]);
+        calls.push(sweepData);
+      }
+
       if (isFullRemove) {
         const burnData = positionManager.interface.encodeFunctionData("burn", [
           selectedPosition.tokenId,
@@ -420,15 +501,18 @@ export function RemoveLiquidityV3() {
         } catch {}
       }
 
+      const display0 = getDisplaySymbol(selectedPosition.token0Address, selectedPosition.token0Symbol);
+      const display1 = getDisplaySymbol(selectedPosition.token1Address, selectedPosition.token1Symbol);
+
       toast({
         title: isFullRemove ? "Liquidity removed!" : `Removed ${percentage[0]}% of liquidity!`,
         description: (
           <div className="flex flex-col gap-1">
             <span>
               Removed: {formatAmount(amount0Collected, selectedPosition.token0Decimals)}{" "}
-              {selectedPosition.token0Symbol} +{" "}
+              {display0} +{" "}
               {formatAmount(amount1Collected, selectedPosition.token1Decimals)}{" "}
-              {selectedPosition.token1Symbol}
+              {display1}
             </span>
             {isFullRemove && <span className="text-xs opacity-60">NFT position burned</span>}
             <Button
@@ -559,6 +643,12 @@ export function RemoveLiquidityV3() {
           FEE_TIER_LABELS[position.fee as keyof typeof FEE_TIER_LABELS] ??
           `${(position.fee / 10_000).toFixed(2)}%`;
 
+        // Resolve display names: wUSDC -> USDC since we auto-unwrap
+        const display0Symbol = getDisplaySymbol(position.token0Address, position.token0Symbol);
+        const display1Symbol = getDisplaySymbol(position.token1Address, position.token1Symbol);
+        const display0Logo = getDisplayLogo(position.token0Address, position.token0Symbol);
+        const display1Logo = getDisplayLogo(position.token1Address, position.token1Symbol);
+
         return (
           <Card
             key={index}
@@ -578,14 +668,14 @@ export function RemoveLiquidityV3() {
                   {/* Overlapping token logos */}
                   <div className="relative w-10 h-7 flex-shrink-0">
                     <img
-                      src={getTokenLogo(position.token0Symbol)}
-                      alt={position.token0Symbol}
+                      src={display0Logo}
+                      alt={display0Symbol}
                       className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-0 top-0 z-10"
                       onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                     />
                     <img
-                      src={getTokenLogo(position.token1Symbol)}
-                      alt={position.token1Symbol}
+                      src={display1Logo}
+                      alt={display1Symbol}
                       className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-4 top-0"
                       onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                     />
@@ -594,7 +684,7 @@ export function RemoveLiquidityV3() {
                   <div className="min-w-0 pl-1">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-bold text-sm">
-                        {position.token0Symbol}/{position.token1Symbol}
+                        {display0Symbol}/{display1Symbol}
                       </span>
                       <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/20">
                         {feeTierLabel}
@@ -646,8 +736,8 @@ export function RemoveLiquidityV3() {
                       <div className="flex gap-6">
                         <div className="flex items-center gap-2">
                           <img
-                            src={getTokenLogo(position.token0Symbol)}
-                            alt={position.token0Symbol}
+                            src={display0Logo}
+                            alt={display0Symbol}
                             className="w-5 h-5 rounded-full flex-shrink-0"
                             onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                           />
@@ -655,13 +745,13 @@ export function RemoveLiquidityV3() {
                             <p className="text-sm font-semibold tabular-nums">
                               {fmtCompact(position.amount0, position.token0Decimals)}
                             </p>
-                            <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                            <p className="text-[11px] text-muted-foreground">{display0Symbol}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
                           <img
-                            src={getTokenLogo(position.token1Symbol)}
-                            alt={position.token1Symbol}
+                            src={display1Logo}
+                            alt={display1Symbol}
                             className="w-5 h-5 rounded-full flex-shrink-0"
                             onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                           />
@@ -669,7 +759,7 @@ export function RemoveLiquidityV3() {
                             <p className="text-sm font-semibold tabular-nums">
                               {fmtCompact(position.amount1, position.token1Decimals)}
                             </p>
-                            <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                            <p className="text-[11px] text-muted-foreground">{display1Symbol}</p>
                           </div>
                         </div>
                       </div>
@@ -687,8 +777,8 @@ export function RemoveLiquidityV3() {
                     <div className="flex gap-6">
                       <div className="flex items-center gap-2">
                         <img
-                          src={getTokenLogo(position.token0Symbol)}
-                          alt={position.token0Symbol}
+                          src={display0Logo}
+                          alt={display0Symbol}
                           className="w-5 h-5 rounded-full flex-shrink-0"
                           onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                         />
@@ -696,13 +786,13 @@ export function RemoveLiquidityV3() {
                           <p className={`text-sm font-semibold tabular-nums ${feesAvailable ? "text-green-400" : "text-muted-foreground"}`}>
                             {fmt(position.unclaimedFees0, position.token0Decimals)}
                           </p>
-                          <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                          <p className="text-[11px] text-muted-foreground">{display0Symbol}</p>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
                         <img
-                          src={getTokenLogo(position.token1Symbol)}
-                          alt={position.token1Symbol}
+                          src={display1Logo}
+                          alt={display1Symbol}
                           className="w-5 h-5 rounded-full flex-shrink-0"
                           onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                         />
@@ -710,7 +800,7 @@ export function RemoveLiquidityV3() {
                           <p className={`text-sm font-semibold tabular-nums ${feesAvailable ? "text-green-400" : "text-muted-foreground"}`}>
                             {fmt(position.unclaimedFees1, position.token1Decimals)}
                           </p>
-                          <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                          <p className="text-[11px] text-muted-foreground">{display1Symbol}</p>
                         </div>
                       </div>
                     </div>
@@ -769,8 +859,8 @@ export function RemoveLiquidityV3() {
                       <div className="flex gap-6">
                         <div className="flex items-center gap-2">
                           <img
-                            src={getTokenLogo(position.token0Symbol)}
-                            alt={position.token0Symbol}
+                            src={display0Logo}
+                            alt={display0Symbol}
                             className="w-5 h-5 rounded-full flex-shrink-0"
                             onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                           />
@@ -778,13 +868,13 @@ export function RemoveLiquidityV3() {
                             <p className="text-sm font-semibold tabular-nums">
                               {fmtCompact(previewAmounts.amount0, position.token0Decimals)}
                             </p>
-                            <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                            <p className="text-[11px] text-muted-foreground">{display0Symbol}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
                           <img
-                            src={getTokenLogo(position.token1Symbol)}
-                            alt={position.token1Symbol}
+                            src={display1Logo}
+                            alt={display1Symbol}
                             className="w-5 h-5 rounded-full flex-shrink-0"
                             onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                           />
@@ -792,7 +882,7 @@ export function RemoveLiquidityV3() {
                             <p className="text-sm font-semibold tabular-nums">
                               {fmtCompact(previewAmounts.amount1, position.token1Decimals)}
                             </p>
-                            <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                            <p className="text-[11px] text-muted-foreground">{display1Symbol}</p>
                           </div>
                         </div>
                       </div>

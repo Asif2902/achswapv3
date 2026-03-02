@@ -6,18 +6,20 @@ export const RPC_CONFIG = {
   arcTestnet: alchemyKey 
     ? `https://arc-testnet.g.alchemy.com/v2/${alchemyKey}`
     : 'https://rpc.testnet.arc.network',
-  stableTestnet: 'https://rpc.testnet.stable.xyz/',
+  // Add more chains here, e.g.:
+  // mainnet: 'https://...',
 };
 
 export const getRpcUrl = (chainId: number): string => {
-  return chainId === 2201 ? RPC_CONFIG.stableTestnet : RPC_CONFIG.arcTestnet;
+  // Extend this switch for multi-chain support
+  return RPC_CONFIG.arcTestnet;
 };
 
 export const FALLBACK_RPC = 'https://rpc.testnet.arc.network';
 
 export function createAlchemyProvider(chainId: number): BrowserProvider {
   const rpcUrl = getRpcUrl(chainId);
-  const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
+  const fallbackRpcUrl = FALLBACK_RPC;
   const useFallback = rpcUrl !== fallbackRpcUrl;
 
   return new BrowserProvider({

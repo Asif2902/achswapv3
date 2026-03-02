@@ -49,7 +49,8 @@ const ALL_FEE_TIERS = [100, 500, 2500, 3000, 10000, 100000] as const;
 
 const STABLE_BY_CHAIN: Record<number, Set<string>> = {
   5042002: new Set(["usdc", "wusdc", "usdt", "wusdt", "usd"]),
-  2201:    new Set(["gusdt", "wusdt", "usdt", "usd"]),
+  // Add more chains here, e.g.:
+  // 1: new Set(["usdc", "usdt", "dai"]),
 };
 
 function stableSet(chainId: number): Set<string> {
@@ -122,7 +123,7 @@ async function safeTokenInfo(
 
 function makeProvider(chainId: number): BrowserProvider {
   const primaryRpcUrl = getRpcUrl(chainId);
-  const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
+  const fallbackRpcUrl = FALLBACK_RPC;
 
   return new BrowserProvider({
     request: async ({ method, params }: { method: string; params?: unknown[] }) => {
