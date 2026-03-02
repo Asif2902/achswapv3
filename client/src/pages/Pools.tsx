@@ -47,7 +47,7 @@ interface PoolCache {
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 function cacheKey(chainId: number) {
-  return `display_pools2_${chainId}`;
+  return `display_pools3_${chainId}`;
 }
 
 function readCache(chainId: number): PoolCache | null {
