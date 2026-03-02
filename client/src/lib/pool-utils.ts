@@ -1,8 +1,9 @@
 
-import { Contract, BrowserProvider } from "ethers";
+import { Contract } from "ethers";
 import { formatUnits } from "ethers";
 import type { Token } from "@shared/schema";
-import { getRpcUrl, FALLBACK_RPC, fetchWithRetry } from "./config";
+import { createAlchemyProvider } from "./config";
+import { safeTokenInfo } from "./v3-pool-utils";
 
 const FACTORY_ABI = [
   "function allPairsLength() external view returns (uint)",
@@ -14,12 +15,6 @@ const PAIR_ABI = [
   "function token1() external view returns (address)",
   "function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
   "function totalSupply() external view returns (uint256)",
-];
-
-const ERC20_ABI = [
-  "function symbol() external view returns (string)",
-  "function decimals() external view returns (uint8)",
-  "function name() external view returns (string)",
 ];
 
 export interface PoolData {
@@ -52,188 +47,103 @@ export async function fetchAllPools(
   knownTokens: Token[]
 ): Promise<PoolData[]> {
   try {
-    const primaryRpcUrl = getRpcUrl(chainId);
-    const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
-
-    const provider = new BrowserProvider({
-      request: async ({ method, params }: any) => {
-        let url = primaryRpcUrl;
-        try {
-          const response = await fetchWithRetry(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              jsonrpc: '2.0',
-              id: 1,
-              method,
-              params,
-            }),
-          }, 3);
-          const data = await response.json();
-          if (data.error) throw new Error(data.error.message);
-          return data.result;
-        } catch {
-          if (url !== fallbackRpcUrl) {
-            console.warn(`Primary RPC failed, trying fallback: ${fallbackRpcUrl}`);
-            url = fallbackRpcUrl;
-            const response = await fetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                jsonrpc: '2.0',
-                id: 1,
-                method,
-                params,
-              }),
-            });
-            const data = await response.json();
-            if (data.error) throw new Error(data.error.message);
-            return data.result;
-          }
-          throw new Error('All RPC endpoints failed');
-        }
-      },
-    });
-
+    const provider = createAlchemyProvider(chainId);
     const factory = new Contract(factoryAddress, FACTORY_ABI, provider);
     const pairsLength = await factory.allPairsLength();
     const length = Number(pairsLength);
 
     console.log(`Found ${length} pools on chain ${chainId}`);
 
-    // Fetch all pair addresses
-    const pairAddresses: string[] = [];
-    for (let i = 0; i < length; i++) {
-      const pairAddress = await factory.allPairs(i);
-      pairAddresses.push(pairAddress);
-    }
+    // Fetch all pair addresses in parallel (batch provider packs into ~1 HTTP request)
+    const pairAddresses: string[] = await Promise.all(
+      Array.from({ length }, (_, i) => factory.allPairs(i)),
+    );
 
-    // Fetch pool data for each pair
-    const pools: PoolData[] = [];
-    
-    for (const pairAddress of pairAddresses) {
-      try {
-        const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
-        
-        // Get basic pair info
-        let token0Address: string;
-        let token1Address: string;
-        let reserves: any;
-        let totalSupply: bigint;
-
+    // Fetch pool data for each pair in parallel
+    const poolResults = await Promise.all(
+      pairAddresses.map(async (pairAddress): Promise<PoolData | null> => {
         try {
-          [token0Address, token1Address, reserves, totalSupply] = await Promise.all([
-            pairContract.token0(),
-            pairContract.token1(),
-            pairContract.getReserves(),
-            pairContract.totalSupply(),
+          const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
+
+          // Get basic pair info — all 4 calls batched into one HTTP request
+          let token0Address: string;
+          let token1Address: string;
+          let reserves: any;
+          let totalSupply: bigint;
+
+          try {
+            [token0Address, token1Address, reserves, totalSupply] = await Promise.all([
+              pairContract.token0(),
+              pairContract.token1(),
+              pairContract.getReserves(),
+              pairContract.totalSupply(),
+            ]);
+          } catch (error) {
+            console.error(`Failed to fetch basic pair info for ${pairAddress}:`, error);
+            return null;
+          }
+
+          // Fetch token info in parallel (uses cached metadata when available)
+          const [info0, info1] = await Promise.all([
+            safeTokenInfo(token0Address, provider, knownTokens),
+            safeTokenInfo(token1Address, provider, knownTokens),
           ]);
+
+          // Skip wrapped token pairs (wUSDC/USDC) - these are wrap tokens, not trading pairs
+          if (isWrappedTokenPair(info0.symbol, info1.symbol, chainId)) {
+            console.log(`Skipping wrapped token pair: ${info0.symbol}/${info1.symbol}`);
+            return null;
+          }
+
+          const reserve0 = reserves[0];
+          const reserve1 = reserves[1];
+
+          // Format reserves
+          const reserve0Formatted = formatUnits(reserve0, info0.decimals);
+          const reserve1Formatted = formatUnits(reserve1, info1.decimals);
+
+          // Calculate TVL in USD using chain-specific logic
+          const tvlUSD = calculateTVL(
+            info0.symbol,
+            info1.symbol,
+            parseFloat(reserve0Formatted),
+            parseFloat(reserve1Formatted),
+            chainId
+          );
+
+          console.log(`Successfully loaded pool: ${info0.symbol}/${info1.symbol}`);
+
+          return {
+            pairAddress,
+            token0: {
+              address: token0Address,
+              symbol: info0.symbol,
+              displaySymbol: getDisplaySymbol(info0.symbol, chainId),
+              decimals: info0.decimals,
+              name: info0.name,
+            },
+            token1: {
+              address: token1Address,
+              symbol: info1.symbol,
+              displaySymbol: getDisplaySymbol(info1.symbol, chainId),
+              decimals: info1.decimals,
+              name: info1.name,
+            },
+            reserve0,
+            reserve1,
+            reserve0Formatted,
+            reserve1Formatted,
+            tvlUSD,
+            totalSupply,
+          };
         } catch (error) {
-          console.error(`Failed to fetch basic pair info for ${pairAddress}:`, error);
-          continue;
+          console.error(`Failed to fetch data for pair ${pairAddress}:`, error);
+          return null;
         }
+      }),
+    );
 
-        // Fetch token info with fallbacks
-        const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
-        const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
-
-        let token0Symbol = "UNKNOWN";
-        let token0Decimals = 18;
-        let token0Name = "Unknown Token";
-        let token1Symbol = "UNKNOWN";
-        let token1Decimals = 18;
-        let token1Name = "Unknown Token";
-
-        try {
-          token0Symbol = await token0Contract.symbol().catch(() => "UNKNOWN");
-        } catch (error) {
-          token0Symbol = "UNKNOWN";
-        }
-
-        try {
-          token0Decimals = await token0Contract.decimals().catch(() => 18);
-        } catch (error) {
-          token0Decimals = 18;
-        }
-
-        try {
-          token0Name = await token0Contract.name().catch(() => `Token ${token0Address.substring(0, 6)}`);
-        } catch (error) {
-          token0Name = `Token ${token0Address.substring(0, 6)}`;
-        }
-
-        try {
-          token1Symbol = await token1Contract.symbol().catch(() => "UNKNOWN");
-        } catch (error) {
-          token1Symbol = "UNKNOWN";
-        }
-
-        try {
-          token1Decimals = await token1Contract.decimals().catch(() => 18);
-        } catch (error) {
-          token1Decimals = 18;
-        }
-
-        try {
-          token1Name = await token1Contract.name().catch(() => `Token ${token1Address.substring(0, 6)}`);
-        } catch (error) {
-          token1Name = `Token ${token1Address.substring(0, 6)}`;
-        }
-
-        // Skip wrapped token pairs (wUSDC/USDC, wUSDT/gUSDT) - these are wrap tokens, not trading pairs
-        if (isWrappedTokenPair(token0Symbol, token1Symbol, chainId)) {
-          console.log(`Skipping wrapped token pair: ${token0Symbol}/${token1Symbol}`);
-          continue;
-        }
-
-        const reserve0 = reserves[0];
-        const reserve1 = reserves[1];
-
-        // Format reserves
-        const reserve0Formatted = formatUnits(reserve0, Number(token0Decimals));
-        const reserve1Formatted = formatUnits(reserve1, Number(token1Decimals));
-
-        // Calculate TVL in USD using chain-specific logic
-        const tvlUSD = calculateTVL(
-          token0Symbol,
-          token1Symbol,
-          parseFloat(reserve0Formatted),
-          parseFloat(reserve1Formatted),
-          chainId
-        );
-
-        pools.push({
-          pairAddress,
-          token0: {
-            address: token0Address,
-            symbol: token0Symbol,
-            displaySymbol: getDisplaySymbol(token0Symbol, chainId),
-            decimals: Number(token0Decimals),
-            name: token0Name,
-          },
-          token1: {
-            address: token1Address,
-            symbol: token1Symbol,
-            displaySymbol: getDisplaySymbol(token1Symbol, chainId),
-            decimals: Number(token1Decimals),
-            name: token1Name,
-          },
-          reserve0,
-          reserve1,
-          reserve0Formatted,
-          reserve1Formatted,
-          tvlUSD,
-          totalSupply,
-        });
-
-        console.log(`Successfully loaded pool: ${token0Symbol}/${token1Symbol}`);
-      } catch (error) {
-        console.error(`Failed to fetch data for pair ${pairAddress}:`, error);
-        // Continue to next pool instead of breaking
-      }
-    }
-
-    return pools;
+    return poolResults.filter((p): p is PoolData => p !== null);
   } catch (error) {
     console.error('Failed to fetch pools:', error);
     throw error;
@@ -248,11 +158,9 @@ function calculateTVL(
   chainId: number
 ): number {
   // All stable tokens are pegged to $1 USD
-  // wUSDT, gUSDT, USDT = $1 USD on Stable Testnet
   // wUSDC, USDC = $1 USD on ARC Testnet
-  const stableTokens = chainId === 2201 
-    ? ['gUSDT', 'wUSDT', 'USDT']
-    : ['USDC', 'wUSDC'];
+  // Extend this list per chain as needed
+  const stableTokens = ['USDC', 'wUSDC'];
 
   const isToken0Stable = stableTokens.includes(token0Symbol);
   const isToken1Stable = stableTokens.includes(token1Symbol);
@@ -274,9 +182,8 @@ function calculateTVL(
 
 function isWrappedTokenPair(token0Symbol: string, token1Symbol: string, chainId: number): boolean {
   // Wrapped tokens are not trading pairs, they're 1:1 wrappers
-  const wrappedPairs = chainId === 2201
-    ? [['gUSDT', 'wUSDT'], ['wUSDT', 'gUSDT']]
-    : [['USDC', 'wUSDC'], ['wUSDC', 'USDC']];
+  // Extend per chain as needed
+  const wrappedPairs = [['USDC', 'wUSDC'], ['wUSDC', 'USDC']];
   
   return wrappedPairs.some(
     ([t0, t1]) => token0Symbol === t0 && token1Symbol === t1
@@ -285,12 +192,8 @@ function isWrappedTokenPair(token0Symbol: string, token1Symbol: string, chainId:
 
 function getDisplaySymbol(symbol: string, chainId: number): string {
   // Convert wrapped tokens to their unwrapped display names
-  if (chainId === 2201) {
-    if (symbol === 'wUSDT') return 'USDT';
-    if (symbol === 'gUSDT') return 'USDT';
-  } else {
-    if (symbol === 'wUSDC') return 'USDC';
-  }
+  // Extend per chain as needed
+  if (symbol === 'wUSDC') return 'USDC';
   return symbol;
 }
 

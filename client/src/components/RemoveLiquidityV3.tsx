@@ -8,20 +8,96 @@ import { Contract, BrowserProvider } from "ethers";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import { createAlchemyProvider } from "@/lib/config";
+import { safeTokenInfo } from "@/lib/v3-pool-utils";
 import { NONFUNGIBLE_POSITION_MANAGER_ABI, V3_POOL_ABI, V3_FACTORY_ABI, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getTokensFromLiquidity } from "@/lib/v3-liquidity-math";
-import { getTokensByChainId } from "@/data/tokens";
+import { getTokensByChainId, isWrappedToken } from "@/data/tokens";
 import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign, Wallet, ChevronRight, Zap, ArrowDown } from "lucide-react";
-
-const ERC20_ABI = [
-  "function symbol() view returns (string)",
-  "function decimals() view returns (uint8)",
-];
 
 const MAX_UINT128 = 2n ** 128n - 1n;
 const Q128 = 2n ** 128n;
 const MASK256 = (1n << 256n) - 1n;
+
+// ─── Position cache ──────────────────────────────────────────────────────────
+// Cache V3 positions in localStorage so the page shows data instantly on mount
+// and refreshes in the background.
+
+const POSITION_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+interface CachedPosition {
+  tokenId: string;
+  token0Address: string;
+  token0Symbol: string;
+  token0Decimals: number;
+  token1Address: string;
+  token1Symbol: string;
+  token1Decimals: number;
+  fee: number;
+  liquidity: string;
+  tickLower: number;
+  tickUpper: number;
+  tokensOwed0: string;
+  tokensOwed1: string;
+  unclaimedFees0: string;
+  unclaimedFees1: string;
+  amount0: string;
+  amount1: string;
+  currentTick?: number;
+}
+
+interface PositionCache {
+  positions: CachedPosition[];
+  timestamp: number;
+}
+
+function positionCacheKey(chainId: number, address: string): string {
+  return `v3_positions_${chainId}_${address.toLowerCase()}`;
+}
+
+function readPositionCache(chainId: number, address: string): V3Position[] | null {
+  try {
+    const raw = localStorage.getItem(positionCacheKey(chainId, address));
+    if (!raw) return null;
+    const entry: PositionCache = JSON.parse(raw);
+    if (Date.now() - entry.timestamp > POSITION_CACHE_TTL_MS) return null;
+    return entry.positions.map((p) => ({
+      ...p,
+      tokenId: BigInt(p.tokenId),
+      liquidity: BigInt(p.liquidity),
+      tokensOwed0: BigInt(p.tokensOwed0),
+      tokensOwed1: BigInt(p.tokensOwed1),
+      unclaimedFees0: BigInt(p.unclaimedFees0),
+      unclaimedFees1: BigInt(p.unclaimedFees1),
+      amount0: BigInt(p.amount0),
+      amount1: BigInt(p.amount1),
+    }));
+  } catch {
+    return null;
+  }
+}
+
+function writePositionCache(chainId: number, address: string, positions: V3Position[]): void {
+  try {
+    const entry: PositionCache = {
+      positions: positions.map((p) => ({
+        ...p,
+        tokenId: p.tokenId.toString(),
+        liquidity: p.liquidity.toString(),
+        tokensOwed0: p.tokensOwed0.toString(),
+        tokensOwed1: p.tokensOwed1.toString(),
+        unclaimedFees0: p.unclaimedFees0.toString(),
+        unclaimedFees1: p.unclaimedFees1.toString(),
+        amount0: p.amount0.toString(),
+        amount1: p.amount1.toString(),
+      })),
+      timestamp: Date.now(),
+    };
+    localStorage.setItem(positionCacheKey(chainId, address), JSON.stringify(entry));
+  } catch {
+    // storage quota exceeded — non-fatal
+  }
+}
 
 function subU256(a: bigint, b: bigint): bigint {
   return (a - b) & MASK256;
@@ -102,8 +178,150 @@ export function RemoveLiquidityV3() {
     knownTokens.find((t) => t.symbol === symbol)?.logoURI ??
     "/img/logos/unknown-token.png";
 
+  // Display helpers: show wUSDC as "USDC" in the UI since we auto-unwrap
+  const getDisplaySymbol = (address: string, onChainSymbol: string): string =>
+    isWrappedToken(chainId, address) ? "USDC" : onChainSymbol;
+
+  const getDisplayLogo = (address: string, onChainSymbol: string): string =>
+    isWrappedToken(chainId, address) ? getTokenLogo("USDC") : getTokenLogo(onChainSymbol);
+
+  // ── Single-position loader ─────────────────────────────────────────────────
+  // Re-fetches only one NFT position by tokenId. Used after collect/partial-remove
+  // to avoid re-enumerating the entire list (saves N-1 positions worth of RPC calls).
+  const refreshSinglePosition = async (tokenId: bigint): Promise<void> => {
+    if (!address || !contracts || !chainId) return;
+    try {
+      const provider = createAlchemyProvider(chainId);
+      const positionManager = new Contract(
+        contracts.v3.nonfungiblePositionManager,
+        NONFUNGIBLE_POSITION_MANAGER_ABI,
+        provider,
+      );
+      const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
+      const knownTokenList = getTokensByChainId(chainId);
+
+      const position = await positionManager.positions(tokenId);
+
+      const token0Address: string = position[2];
+      const token1Address: string = position[3];
+      const fee = Number(position[4]);
+      const tickLower = Number(position[5]);
+      const tickUpper = Number(position[6]);
+      const liquidity: bigint = position[7];
+      const feeGrowthInside0LastX128: bigint = position[8];
+      const feeGrowthInside1LastX128: bigint = position[9];
+      const tokensOwed0: bigint = position[10];
+      const tokensOwed1: bigint = position[11];
+
+      const [info0, info1] = await Promise.all([
+        safeTokenInfo(token0Address, provider, knownTokenList),
+        safeTokenInfo(token1Address, provider, knownTokenList),
+      ]);
+
+      let amount0 = 0n;
+      let amount1 = 0n;
+      let unclaimedFees0 = tokensOwed0;
+      let unclaimedFees1 = tokensOwed1;
+      let currentTick: number | undefined = undefined;
+
+      try {
+        const [tokenA, tokenB] =
+          token0Address.toLowerCase() < token1Address.toLowerCase()
+            ? [token0Address, token1Address]
+            : [token1Address, token0Address];
+
+        const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+
+        if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
+          const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
+
+          const [slot0, feeGrowthGlobal0X128, feeGrowthGlobal1X128, tickLowerData, tickUpperData] =
+            await Promise.all([
+              pool.slot0(),
+              pool.feeGrowthGlobal0X128(),
+              pool.feeGrowthGlobal1X128(),
+              pool.ticks(tickLower),
+              pool.ticks(tickUpper),
+            ]);
+
+          let currentSqrtPriceX96: bigint = slot0[0];
+          currentTick = Number(slot0[1]);
+          if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
+
+          const feeGrowthOutsideLower0: bigint = tickLowerData[2];
+          const feeGrowthOutsideLower1: bigint = tickLowerData[3];
+          const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
+          const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
+
+          if (liquidity > 0n) {
+            unclaimedFees0 = calculateUnclaimedFees(
+              liquidity,
+              calculateFeeGrowthInside(feeGrowthGlobal0X128, feeGrowthOutsideLower0, feeGrowthOutsideUpper0, currentTick, tickLower, tickUpper),
+              feeGrowthInside0LastX128,
+              tokensOwed0,
+            );
+            unclaimedFees1 = calculateUnclaimedFees(
+              liquidity,
+              calculateFeeGrowthInside(feeGrowthGlobal1X128, feeGrowthOutsideLower1, feeGrowthOutsideUpper1, currentTick, tickLower, tickUpper),
+              feeGrowthInside1LastX128,
+              tokensOwed1,
+            );
+          }
+
+          const tokenAmounts = getTokensFromLiquidity(liquidity, currentSqrtPriceX96, tickLower, tickUpper);
+          if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
+            amount0 = tokenAmounts.amount1;
+            amount1 = tokenAmounts.amount0;
+          } else {
+            amount0 = tokenAmounts.amount0;
+            amount1 = tokenAmounts.amount1;
+          }
+        }
+      } catch (poolError) {
+        console.error("Error fetching pool data for single position:", poolError);
+      }
+
+      const updated: V3Position = {
+        tokenId,
+        token0Address,
+        token0Symbol: info0.symbol,
+        token0Decimals: info0.decimals,
+        token1Address,
+        token1Symbol: info1.symbol,
+        token1Decimals: info1.decimals,
+        fee,
+        liquidity,
+        tickLower,
+        tickUpper,
+        tokensOwed0,
+        tokensOwed1,
+        unclaimedFees0,
+        unclaimedFees1,
+        amount0,
+        amount1,
+        currentTick,
+      };
+
+      setPositions((prev) => {
+        const next = prev.map((p) => (p.tokenId === tokenId ? updated : p));
+        if (address && chainId) writePositionCache(chainId, address, next);
+        return next;
+      });
+      setSelectedPosition(updated);
+    } catch (err) {
+      console.error("Failed to refresh single position:", err);
+    }
+  };
+
   const loadPositions = async () => {
     if (!address || !contracts || !chainId) return;
+
+    // Show cached data instantly (if available) while refreshing in background
+    const cached = readPositionCache(chainId, address);
+    if (cached && cached.length > 0 && positions.length === 0) {
+      setPositions(cached);
+    }
+
     setIsLoading(true);
     try {
       const provider = createAlchemyProvider(chainId);
@@ -112,155 +330,182 @@ export function RemoveLiquidityV3() {
         NONFUNGIBLE_POSITION_MANAGER_ABI,
         provider,
       );
+      const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
+      const knownTokenList = getTokensByChainId(chainId);
 
+      // Step 1: Get NFT balance
       const balance = await positionManager.balanceOf(address);
-      const userPositions: V3Position[] = [];
+      const count = Number(balance);
 
-      for (let i = 0; i < Number(balance); i++) {
-        try {
-          const tokenId = await positionManager.tokenOfOwnerByIndex(address, i);
-          const position = await positionManager.positions(tokenId);
-
-          const token0Address: string = position[2];
-          const token1Address: string = position[3];
-          const fee = Number(position[4]);
-          const tickLower = Number(position[5]);
-          const tickUpper = Number(position[6]);
-          const liquidity: bigint = position[7];
-          const feeGrowthInside0LastX128: bigint = position[8];
-          const feeGrowthInside1LastX128: bigint = position[9];
-          const tokensOwed0: bigint = position[10];
-          const tokensOwed1: bigint = position[11];
-
-          const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
-          const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
-
-          const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
-            await Promise.all([
-              token0Contract.symbol(),
-              token0Contract.decimals(),
-              token1Contract.symbol(),
-              token1Contract.decimals(),
-            ]);
-
-          let amount0 = 0n;
-          let amount1 = 0n;
-          let unclaimedFees0 = tokensOwed0;
-          let unclaimedFees1 = tokensOwed1;
-          let currentTick: number | undefined = undefined;
-
-          try {
-            const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
-            const [tokenA, tokenB] =
-              token0Address.toLowerCase() < token1Address.toLowerCase()
-                ? [token0Address, token1Address]
-                : [token1Address, token0Address];
-
-            const poolAddress = await factory.getPool(tokenA, tokenB, fee);
-
-            if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
-              const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
-
-              const [
-                slot0,
-                feeGrowthGlobal0X128,
-                feeGrowthGlobal1X128,
-                tickLowerData,
-                tickUpperData,
-              ] = await Promise.all([
-                pool.slot0(),
-                pool.feeGrowthGlobal0X128(),
-                pool.feeGrowthGlobal1X128(),
-                pool.ticks(tickLower),
-                pool.ticks(tickUpper),
-              ]);
-
-              let currentSqrtPriceX96: bigint = slot0[0];
-              currentTick = Number(slot0[1]);
-              if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
-
-              const feeGrowthOutsideLower0: bigint = tickLowerData[2];
-              const feeGrowthOutsideLower1: bigint = tickLowerData[3];
-              const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
-              const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
-
-              if (liquidity > 0n) {
-                const feeGrowthInside0 = calculateFeeGrowthInside(
-                  feeGrowthGlobal0X128,
-                  feeGrowthOutsideLower0,
-                  feeGrowthOutsideUpper0,
-                  currentTick,
-                  tickLower,
-                  tickUpper,
-                );
-                const feeGrowthInside1 = calculateFeeGrowthInside(
-                  feeGrowthGlobal1X128,
-                  feeGrowthOutsideLower1,
-                  feeGrowthOutsideUpper1,
-                  currentTick,
-                  tickLower,
-                  tickUpper,
-                );
-                unclaimedFees0 = calculateUnclaimedFees(
-                  liquidity,
-                  feeGrowthInside0,
-                  feeGrowthInside0LastX128,
-                  tokensOwed0,
-                );
-                unclaimedFees1 = calculateUnclaimedFees(
-                  liquidity,
-                  feeGrowthInside1,
-                  feeGrowthInside1LastX128,
-                  tokensOwed1,
-                );
-              }
-
-              const tokenAmounts = getTokensFromLiquidity(
-                liquidity,
-                currentSqrtPriceX96,
-                tickLower,
-                tickUpper,
-              );
-
-              if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
-                amount0 = tokenAmounts.amount1;
-                amount1 = tokenAmounts.amount0;
-              } else {
-                amount0 = tokenAmounts.amount0;
-                amount1 = tokenAmounts.amount1;
-              }
-            }
-          } catch (poolError) {
-            console.error("Error fetching pool data:", poolError);
-          }
-
-          userPositions.push({
-            tokenId,
-            token0Address,
-            token0Symbol,
-            token0Decimals: Number(token0Decimals),
-            token1Address,
-            token1Symbol,
-            token1Decimals: Number(token1Decimals),
-            fee,
-            liquidity,
-            tickLower,
-            tickUpper,
-            tokensOwed0,
-            tokensOwed1,
-            unclaimedFees0,
-            unclaimedFees1,
-            amount0,
-            amount1,
-            currentTick,
-          });
-        } catch (error) {
-          console.error(`Error loading position ${i}:`, error);
-        }
+      if (count === 0) {
+        setPositions([]);
+        writePositionCache(chainId, address, []);
+        toast({
+          title: "No V3 positions found",
+          description: "You don't have any V3 liquidity positions",
+        });
+        return;
       }
 
-      setPositions(userPositions);
-      if (userPositions.length === 0) {
+      // Step 2: Fetch ALL tokenIds in parallel (batch provider packs these into ~1 HTTP request)
+      const tokenIds: bigint[] = await Promise.all(
+        Array.from({ length: count }, (_, i) =>
+          positionManager.tokenOfOwnerByIndex(address, i),
+        ),
+      );
+
+      // Step 3: Fetch ALL position data in parallel (another ~1 HTTP batch)
+      const rawPositions = await Promise.all(
+        tokenIds.map((id) => positionManager.positions(id)),
+      );
+
+      // Step 4: For each position, fetch token metadata + pool state in parallel.
+      // All positions are loaded concurrently — the batch provider packs all
+      // eth_calls into minimal HTTP requests automatically.
+      const userPositions = await Promise.all(
+        rawPositions.map(async (position, idx): Promise<V3Position | null> => {
+          try {
+            const tokenId = tokenIds[idx];
+            const token0Address: string = position[2];
+            const token1Address: string = position[3];
+            const fee = Number(position[4]);
+            const tickLower = Number(position[5]);
+            const tickUpper = Number(position[6]);
+            const liquidity: bigint = position[7];
+            const feeGrowthInside0LastX128: bigint = position[8];
+            const feeGrowthInside1LastX128: bigint = position[9];
+            const tokensOwed0: bigint = position[10];
+            const tokensOwed1: bigint = position[11];
+
+            // Token metadata (uses cache → knownTokens → RPC)
+            const [info0, info1] = await Promise.all([
+              safeTokenInfo(token0Address, provider, knownTokenList),
+              safeTokenInfo(token1Address, provider, knownTokenList),
+            ]);
+
+            let amount0 = 0n;
+            let amount1 = 0n;
+            let unclaimedFees0 = tokensOwed0;
+            let unclaimedFees1 = tokensOwed1;
+            let currentTick: number | undefined = undefined;
+
+            try {
+              const [tokenA, tokenB] =
+                token0Address.toLowerCase() < token1Address.toLowerCase()
+                  ? [token0Address, token1Address]
+                  : [token1Address, token0Address];
+
+              const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+
+              if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
+                const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
+
+                // All 5 pool reads in parallel — batch provider packs them together
+                const [
+                  slot0,
+                  feeGrowthGlobal0X128,
+                  feeGrowthGlobal1X128,
+                  tickLowerData,
+                  tickUpperData,
+                ] = await Promise.all([
+                  pool.slot0(),
+                  pool.feeGrowthGlobal0X128(),
+                  pool.feeGrowthGlobal1X128(),
+                  pool.ticks(tickLower),
+                  pool.ticks(tickUpper),
+                ]);
+
+                let currentSqrtPriceX96: bigint = slot0[0];
+                currentTick = Number(slot0[1]);
+                if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
+
+                const feeGrowthOutsideLower0: bigint = tickLowerData[2];
+                const feeGrowthOutsideLower1: bigint = tickLowerData[3];
+                const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
+                const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
+
+                if (liquidity > 0n) {
+                  const feeGrowthInside0 = calculateFeeGrowthInside(
+                    feeGrowthGlobal0X128,
+                    feeGrowthOutsideLower0,
+                    feeGrowthOutsideUpper0,
+                    currentTick,
+                    tickLower,
+                    tickUpper,
+                  );
+                  const feeGrowthInside1 = calculateFeeGrowthInside(
+                    feeGrowthGlobal1X128,
+                    feeGrowthOutsideLower1,
+                    feeGrowthOutsideUpper1,
+                    currentTick,
+                    tickLower,
+                    tickUpper,
+                  );
+                  unclaimedFees0 = calculateUnclaimedFees(
+                    liquidity,
+                    feeGrowthInside0,
+                    feeGrowthInside0LastX128,
+                    tokensOwed0,
+                  );
+                  unclaimedFees1 = calculateUnclaimedFees(
+                    liquidity,
+                    feeGrowthInside1,
+                    feeGrowthInside1LastX128,
+                    tokensOwed1,
+                  );
+                }
+
+                const tokenAmounts = getTokensFromLiquidity(
+                  liquidity,
+                  currentSqrtPriceX96,
+                  tickLower,
+                  tickUpper,
+                );
+
+                if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
+                  amount0 = tokenAmounts.amount1;
+                  amount1 = tokenAmounts.amount0;
+                } else {
+                  amount0 = tokenAmounts.amount0;
+                  amount1 = tokenAmounts.amount1;
+                }
+              }
+            } catch (poolError) {
+              console.error("Error fetching pool data:", poolError);
+            }
+
+            return {
+              tokenId,
+              token0Address,
+              token0Symbol: info0.symbol,
+              token0Decimals: info0.decimals,
+              token1Address,
+              token1Symbol: info1.symbol,
+              token1Decimals: info1.decimals,
+              fee,
+              liquidity,
+              tickLower,
+              tickUpper,
+              tokensOwed0,
+              tokensOwed1,
+              unclaimedFees0,
+              unclaimedFees1,
+              amount0,
+              amount1,
+              currentTick,
+            };
+          } catch (error) {
+            console.error(`Error loading position ${idx}:`, error);
+            return null;
+          }
+        }),
+      );
+
+      const validPositions = userPositions.filter((p): p is V3Position => p !== null);
+      setPositions(validPositions);
+      writePositionCache(chainId, address, validPositions);
+
+      if (validPositions.length === 0) {
         toast({
           title: "No V3 positions found",
           description: "You don't have any V3 liquidity positions",
@@ -292,13 +537,52 @@ export function RemoveLiquidityV3() {
 
       toast({ title: "Collecting fees…", description: "Claiming your trading fees" });
 
-      const collectTx = await positionManager.collect({
-        tokenId: selectedPosition.tokenId,
-        recipient: address,
-        amount0Max: MAX_UINT128,
-        amount1Max: MAX_UINT128,
-      });
-      const receipt = await collectTx.wait();
+      // Detect if either token is wUSDC so we can auto-unwrap to native USDC
+      const token0IsWrapped = isWrappedToken(chainId, selectedPosition.token0Address);
+      const token1IsWrapped = isWrappedToken(chainId, selectedPosition.token1Address);
+      const hasWrappedToken = token0IsWrapped || token1IsWrapped;
+
+      let receipt;
+
+      if (hasWrappedToken) {
+        // Collect to position manager, then unwrap wUSDC and sweep other token
+        const collectRecipient = contracts.v3.nonfungiblePositionManager;
+
+        const collectData = positionManager.interface.encodeFunctionData("collect", [
+          {
+            tokenId: selectedPosition.tokenId,
+            recipient: collectRecipient,
+            amount0Max: MAX_UINT128,
+            amount1Max: MAX_UINT128,
+          },
+        ]);
+
+        const unwrapData = positionManager.interface.encodeFunctionData("unwrapWETH9", [
+          0n,
+          address,
+        ]);
+
+        const otherToken = token0IsWrapped
+          ? selectedPosition.token1Address
+          : selectedPosition.token0Address;
+        const sweepData = positionManager.interface.encodeFunctionData("sweepToken", [
+          otherToken,
+          0n,
+          address,
+        ]);
+
+        const multicallTx = await positionManager.multicall([collectData, unwrapData, sweepData]);
+        receipt = await multicallTx.wait();
+      } else {
+        // No wrapped token — collect directly to user
+        const collectTx = await positionManager.collect({
+          tokenId: selectedPosition.tokenId,
+          recipient: address,
+          amount0Max: MAX_UINT128,
+          amount1Max: MAX_UINT128,
+        });
+        receipt = await collectTx.wait();
+      }
 
       let amount0Collected = 0n;
       let amount1Collected = 0n;
@@ -315,7 +599,10 @@ export function RemoveLiquidityV3() {
         } catch {}
       }
 
-      await loadPositions();
+      await refreshSinglePosition(selectedPosition.tokenId);
+
+      const display0 = getDisplaySymbol(selectedPosition.token0Address, selectedPosition.token0Symbol);
+      const display1 = getDisplaySymbol(selectedPosition.token1Address, selectedPosition.token1Symbol);
 
       toast({
         title: "Fees collected!",
@@ -323,9 +610,9 @@ export function RemoveLiquidityV3() {
           <div className="flex flex-col gap-1">
             <span>
               Collected: {formatAmount(amount0Collected, selectedPosition.token0Decimals)}{" "}
-              {selectedPosition.token0Symbol} +{" "}
+              {display0} +{" "}
               {formatAmount(amount1Collected, selectedPosition.token1Decimals)}{" "}
-              {selectedPosition.token1Symbol}
+              {display1}
             </span>
             <Button
               size="sm"
@@ -384,17 +671,49 @@ export function RemoveLiquidityV3() {
         },
       ]);
 
+      // Detect if either token is wUSDC so we can auto-unwrap to native USDC
+      const token0IsWrapped = isWrappedToken(chainId, selectedPosition.token0Address);
+      const token1IsWrapped = isWrappedToken(chainId, selectedPosition.token1Address);
+      const hasWrappedToken = token0IsWrapped || token1IsWrapped;
+
+      // If a wrapped token is involved, collect to the position manager (so it can unwrap),
+      // otherwise collect directly to the user
+      const collectRecipient = hasWrappedToken
+        ? contracts.v3.nonfungiblePositionManager
+        : address;
+
       const collectData = positionManager.interface.encodeFunctionData("collect", [
         {
           tokenId: selectedPosition.tokenId,
-          recipient: address,
+          recipient: collectRecipient,
           amount0Max: MAX_UINT128,
           amount1Max: MAX_UINT128,
         },
       ]);
 
       let calls = [decreaseData, collectData];
-      
+
+      // When we collected to the position manager, unwrap wUSDC and sweep the other token
+      if (hasWrappedToken) {
+        // unwrapWETH9 converts wUSDC held by the contract to native USDC and sends to user
+        const unwrapData = positionManager.interface.encodeFunctionData("unwrapWETH9", [
+          0n,
+          address,
+        ]);
+        calls.push(unwrapData);
+
+        // sweepToken sends the non-wUSDC token held by the contract back to user
+        const otherToken = token0IsWrapped
+          ? selectedPosition.token1Address
+          : selectedPosition.token0Address;
+        const sweepData = positionManager.interface.encodeFunctionData("sweepToken", [
+          otherToken,
+          0n,
+          address,
+        ]);
+        calls.push(sweepData);
+      }
+
       if (isFullRemove) {
         const burnData = positionManager.interface.encodeFunctionData("burn", [
           selectedPosition.tokenId,
@@ -420,15 +739,18 @@ export function RemoveLiquidityV3() {
         } catch {}
       }
 
+      const display0 = getDisplaySymbol(selectedPosition.token0Address, selectedPosition.token0Symbol);
+      const display1 = getDisplaySymbol(selectedPosition.token1Address, selectedPosition.token1Symbol);
+
       toast({
         title: isFullRemove ? "Liquidity removed!" : `Removed ${percentage[0]}% of liquidity!`,
         description: (
           <div className="flex flex-col gap-1">
             <span>
               Removed: {formatAmount(amount0Collected, selectedPosition.token0Decimals)}{" "}
-              {selectedPosition.token0Symbol} +{" "}
+              {display0} +{" "}
               {formatAmount(amount1Collected, selectedPosition.token1Decimals)}{" "}
-              {selectedPosition.token1Symbol}
+              {display1}
             </span>
             {isFullRemove && <span className="text-xs opacity-60">NFT position burned</span>}
             <Button
@@ -443,8 +765,18 @@ export function RemoveLiquidityV3() {
         ),
       });
 
-      await loadPositions();
-      setSelectedPosition(null);
+      if (isFullRemove) {
+        // NFT was burned on-chain — remove from state without any RPC call
+        setPositions((prev) => {
+          const next = prev.filter((p) => p.tokenId !== selectedPosition.tokenId);
+          if (address && chainId) writePositionCache(chainId, address, next);
+          return next;
+        });
+        setSelectedPosition(null);
+      } else {
+        // Partial remove — only re-fetch this one position
+        await refreshSinglePosition(selectedPosition.tokenId);
+      }
       setPercentage([50]);
     } catch (error: any) {
       console.error("Remove liquidity error:", error);
@@ -559,6 +891,12 @@ export function RemoveLiquidityV3() {
           FEE_TIER_LABELS[position.fee as keyof typeof FEE_TIER_LABELS] ??
           `${(position.fee / 10_000).toFixed(2)}%`;
 
+        // Resolve display names: wUSDC -> USDC since we auto-unwrap
+        const display0Symbol = getDisplaySymbol(position.token0Address, position.token0Symbol);
+        const display1Symbol = getDisplaySymbol(position.token1Address, position.token1Symbol);
+        const display0Logo = getDisplayLogo(position.token0Address, position.token0Symbol);
+        const display1Logo = getDisplayLogo(position.token1Address, position.token1Symbol);
+
         return (
           <Card
             key={index}
@@ -578,14 +916,14 @@ export function RemoveLiquidityV3() {
                   {/* Overlapping token logos */}
                   <div className="relative w-10 h-7 flex-shrink-0">
                     <img
-                      src={getTokenLogo(position.token0Symbol)}
-                      alt={position.token0Symbol}
+                      src={display0Logo}
+                      alt={display0Symbol}
                       className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-0 top-0 z-10"
                       onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                     />
                     <img
-                      src={getTokenLogo(position.token1Symbol)}
-                      alt={position.token1Symbol}
+                      src={display1Logo}
+                      alt={display1Symbol}
                       className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-4 top-0"
                       onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                     />
@@ -594,7 +932,7 @@ export function RemoveLiquidityV3() {
                   <div className="min-w-0 pl-1">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="font-bold text-sm">
-                        {position.token0Symbol}/{position.token1Symbol}
+                        {display0Symbol}/{display1Symbol}
                       </span>
                       <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-400 border border-amber-500/20">
                         {feeTierLabel}
@@ -646,8 +984,8 @@ export function RemoveLiquidityV3() {
                       <div className="flex gap-6">
                         <div className="flex items-center gap-2">
                           <img
-                            src={getTokenLogo(position.token0Symbol)}
-                            alt={position.token0Symbol}
+                            src={display0Logo}
+                            alt={display0Symbol}
                             className="w-5 h-5 rounded-full flex-shrink-0"
                             onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                           />
@@ -655,13 +993,13 @@ export function RemoveLiquidityV3() {
                             <p className="text-sm font-semibold tabular-nums">
                               {fmtCompact(position.amount0, position.token0Decimals)}
                             </p>
-                            <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                            <p className="text-[11px] text-muted-foreground">{display0Symbol}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
                           <img
-                            src={getTokenLogo(position.token1Symbol)}
-                            alt={position.token1Symbol}
+                            src={display1Logo}
+                            alt={display1Symbol}
                             className="w-5 h-5 rounded-full flex-shrink-0"
                             onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                           />
@@ -669,7 +1007,7 @@ export function RemoveLiquidityV3() {
                             <p className="text-sm font-semibold tabular-nums">
                               {fmtCompact(position.amount1, position.token1Decimals)}
                             </p>
-                            <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                            <p className="text-[11px] text-muted-foreground">{display1Symbol}</p>
                           </div>
                         </div>
                       </div>
@@ -687,8 +1025,8 @@ export function RemoveLiquidityV3() {
                     <div className="flex gap-6">
                       <div className="flex items-center gap-2">
                         <img
-                          src={getTokenLogo(position.token0Symbol)}
-                          alt={position.token0Symbol}
+                          src={display0Logo}
+                          alt={display0Symbol}
                           className="w-5 h-5 rounded-full flex-shrink-0"
                           onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                         />
@@ -696,13 +1034,13 @@ export function RemoveLiquidityV3() {
                           <p className={`text-sm font-semibold tabular-nums ${feesAvailable ? "text-green-400" : "text-muted-foreground"}`}>
                             {fmt(position.unclaimedFees0, position.token0Decimals)}
                           </p>
-                          <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                          <p className="text-[11px] text-muted-foreground">{display0Symbol}</p>
                         </div>
                       </div>
                       <div className="flex items-center gap-2">
                         <img
-                          src={getTokenLogo(position.token1Symbol)}
-                          alt={position.token1Symbol}
+                          src={display1Logo}
+                          alt={display1Symbol}
                           className="w-5 h-5 rounded-full flex-shrink-0"
                           onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                         />
@@ -710,7 +1048,7 @@ export function RemoveLiquidityV3() {
                           <p className={`text-sm font-semibold tabular-nums ${feesAvailable ? "text-green-400" : "text-muted-foreground"}`}>
                             {fmt(position.unclaimedFees1, position.token1Decimals)}
                           </p>
-                          <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                          <p className="text-[11px] text-muted-foreground">{display1Symbol}</p>
                         </div>
                       </div>
                     </div>
@@ -769,8 +1107,8 @@ export function RemoveLiquidityV3() {
                       <div className="flex gap-6">
                         <div className="flex items-center gap-2">
                           <img
-                            src={getTokenLogo(position.token0Symbol)}
-                            alt={position.token0Symbol}
+                            src={display0Logo}
+                            alt={display0Symbol}
                             className="w-5 h-5 rounded-full flex-shrink-0"
                             onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                           />
@@ -778,13 +1116,13 @@ export function RemoveLiquidityV3() {
                             <p className="text-sm font-semibold tabular-nums">
                               {fmtCompact(previewAmounts.amount0, position.token0Decimals)}
                             </p>
-                            <p className="text-[11px] text-muted-foreground">{position.token0Symbol}</p>
+                            <p className="text-[11px] text-muted-foreground">{display0Symbol}</p>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
                           <img
-                            src={getTokenLogo(position.token1Symbol)}
-                            alt={position.token1Symbol}
+                            src={display1Logo}
+                            alt={display1Symbol}
                             className="w-5 h-5 rounded-full flex-shrink-0"
                             onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                           />
@@ -792,7 +1130,7 @@ export function RemoveLiquidityV3() {
                             <p className="text-sm font-semibold tabular-nums">
                               {fmtCompact(previewAmounts.amount1, position.token1Decimals)}
                             </p>
-                            <p className="text-[11px] text-muted-foreground">{position.token1Symbol}</p>
+                            <p className="text-[11px] text-muted-foreground">{display1Symbol}</p>
                           </div>
                         </div>
                       </div>

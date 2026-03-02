@@ -275,25 +275,28 @@ export function AddLiquidityV3Basic() {
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const existingPool = await factory.getPool(token0.address, token1.address, selectedFee);
       const ZERO = "0x0000000000000000000000000000000000000000";
-      if (!existingPool || existingPool === ZERO) {
+      const needsPoolCreation = !existingPool || existingPool === ZERO;
+      let createPoolData: string | null = null;
+      if (needsPoolCreation) {
         const price = getPriceFromAmounts(amount0Desired, amount1Desired, token0.decimals, token1.decimals);
         const sqrtPriceX96 = priceToSqrtPriceX96(price, token0.decimals, token1.decimals);
-        toast({ title: "Creating V3 pool…", description: "Initializing new pool with current price" });
-        if (nativeAmount > 0n) {
-          const tx = await pm.multicall([pm.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [token0.address, token1.address, selectedFee, sqrtPriceX96]), pm.interface.encodeFunctionData("refundETH", [])], { value: nativeAmount });
-          await tx.wait();
-        } else { await (await pm.createAndInitializePoolIfNecessary(token0.address, token1.address, selectedFee, sqrtPriceX96)).wait(); }
+        createPoolData = pm.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [token0.address, token1.address, selectedFee, sqrtPriceX96]);
       }
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
       toast({ title: "Approving tokens…", description: "Please approve token spending" });
       if (!tokenAIsNative || !isToken0A) { const c = new Contract(token0.address, ERC20_ABI, signer); if ((await c.allowance(address, contracts.v3.nonfungiblePositionManager)) < amount0Desired) await (await c.approve(contracts.v3.nonfungiblePositionManager, amount0Desired)).wait(); }
       if (!tokenBIsNative || isToken0A) { const c = new Contract(token1.address, ERC20_ABI, signer); if ((await c.allowance(address, contracts.v3.nonfungiblePositionManager)) < amount1Desired) await (await c.approve(contracts.v3.nonfungiblePositionManager, amount1Desired)).wait(); }
       const params = { token0: token0.address, token1: token1.address, fee: selectedFee, tickLower, tickUpper, amount0Desired, amount1Desired, amount0Min: (amount0Desired * 98n) / 100n, amount1Min: (amount1Desired * 98n) / 100n, recipient: address, deadline: Math.floor(Date.now() / 1000) + 1200 };
-      toast({ title: "Adding liquidity…", description: "Creating V3 position" });
+      toast({ title: needsPoolCreation ? "Creating pool & adding liquidity…" : "Adding liquidity…", description: needsPoolCreation ? "Creating V3 pool and position in one transaction" : "Creating V3 position" });
       let receipt;
-      if (nativeAmount > 0n) {
-        const gasEst = await pm.multicall.estimateGas([pm.interface.encodeFunctionData("mint", [params]), pm.interface.encodeFunctionData("refundETH", [])], { value: nativeAmount });
-        receipt = await (await pm.multicall([pm.interface.encodeFunctionData("mint", [params]), pm.interface.encodeFunctionData("refundETH", [])], { value: nativeAmount, gasLimit: gasEst * 150n / 100n })).wait();
+      // Build multicall: optionally create pool + mint + refundETH in a single transaction
+      const calls: string[] = [];
+      if (createPoolData) calls.push(createPoolData);
+      calls.push(pm.interface.encodeFunctionData("mint", [params]));
+      if (nativeAmount > 0n) calls.push(pm.interface.encodeFunctionData("refundETH", []));
+      if (calls.length > 1 || nativeAmount > 0n) {
+        const gasEst = await pm.multicall.estimateGas(calls, { value: nativeAmount });
+        receipt = await (await pm.multicall(calls, { value: nativeAmount, gasLimit: gasEst * 150n / 100n })).wait();
       } else {
         const gasEst = await pm.mint.estimateGas(params);
         receipt = await (await pm.mint(params, { gasLimit: gasEst * 150n / 100n })).wait();

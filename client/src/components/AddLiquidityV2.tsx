@@ -132,7 +132,7 @@ export function AddLiquidityV2() {
       const exists = tokens.find(t => t.address.toLowerCase() === address.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` }); return exists; }
       const primaryRpcUrl = getRpcUrl(chainId);
-      const fallbackRpcUrl = chainId === 2201 ? getRpcUrl(2201) : FALLBACK_RPC;
+      const fallbackRpcUrl = FALLBACK_RPC;
       const provider = new BrowserProvider({
         request: async ({ method, params }: any) => {
           let url = primaryRpcUrl;
@@ -205,7 +205,7 @@ export function AddLiquidityV2() {
       const amountAMin = (!pairExists || reserveA === 0n || reserveB === 0n) ? 0n : amountADesired * 95n / 100n;
       const amountBMin = (!pairExists || reserveA === 0n || reserveB === 0n) ? 0n : amountBDesired * 95n / 100n;
       const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
-      const wrappedSymbol = chainId === 2201 ? 'wUSDT' : 'wUSDC';
+      const wrappedSymbol = 'wUSDC';
       const wrappedToken = tokens.find(t => t.symbol === wrappedSymbol);
       if (!wrappedToken?.address) throw new Error(`${wrappedSymbol} token not found`);
       const tokenAAddress = isTokenANative ? wrappedToken.address : tokenA.address;
