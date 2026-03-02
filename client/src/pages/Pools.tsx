@@ -9,7 +9,7 @@ import { useChainId } from "wagmi";
 import { fetchAllPools, type PoolData } from "@/lib/pool-utils";
 import { fetchAllV3Pools, type V3PoolData } from "@/lib/v3-pool-utils";
 import { getContractsForChain } from "@/lib/contracts";
-import { getTokensByChainId } from "@/data/tokens";
+import { getTokensByChainId, isWrappedToken } from "@/data/tokens";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -47,7 +47,7 @@ interface PoolCache {
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 function cacheKey(chainId: number) {
-  return `display_pools_${chainId}`;
+  return `display_pools2_${chainId}`;
 }
 
 function readCache(chainId: number): PoolCache | null {
@@ -115,22 +115,30 @@ function normaliseV2(
 function normaliseV3(
   raw: V3PoolData[],
   tokens: ReturnType<typeof getTokensByChainId>,
+  chainId: number,
 ): DisplayPool[] {
-  return raw.map((p) => ({
-    key: p.poolAddress,
-    version: "v3" as const,
-    address: p.poolAddress,
-    symbol0: p.token0.symbol,
-    symbol1: p.token1.symbol,
-    name0: p.token0.name || p.token0.symbol,
-    name1: p.token1.name || p.token1.symbol,
-    logo0: bestLogo(tokens, p.token0.symbol),
-    logo1: bestLogo(tokens, p.token1.symbol),
-    tvlUSD: p.tvlUSD,
-    reserve0: fmtReserve(p.token0Formatted),
-    reserve1: fmtReserve(p.token1Formatted),
-    fee: p.feeLabel,
-  }));
+  const disp = (addr: string, sym: string) =>
+    isWrappedToken(chainId, addr) ? "USDC" : sym;
+
+  return raw.map((p) => {
+    const sym0 = disp(p.token0.address, p.token0.symbol);
+    const sym1 = disp(p.token1.address, p.token1.symbol);
+    return {
+      key: p.poolAddress,
+      version: "v3" as const,
+      address: p.poolAddress,
+      symbol0: sym0,
+      symbol1: sym1,
+      name0: p.token0.name || sym0,
+      name1: p.token1.name || sym1,
+      logo0: bestLogo(tokens, sym0, p.token0.symbol),
+      logo1: bestLogo(tokens, sym1, p.token1.symbol),
+      tvlUSD: p.tvlUSD,
+      reserve0: fmtReserve(p.token0Formatted),
+      reserve1: fmtReserve(p.token1Formatted),
+      fee: p.feeLabel,
+    };
+  });
 }
 
 function combine(v2: DisplayPool[], v3: DisplayPool[]): DisplayPool[] {
@@ -188,7 +196,7 @@ export default function Pools() {
           fetchAllV3Pools(contracts.v3.factory, chainId, tokens),
         ]);
 
-        const display = combine(normaliseV2(rawV2, tokens), normaliseV3(rawV3, tokens));
+        const display = combine(normaliseV2(rawV2, tokens), normaliseV3(rawV3, tokens, chainId));
 
         writeCache(chainId, display);
         setPools(display);
