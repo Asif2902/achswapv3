@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Link, useLocation } from "wouter";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import {
-  ArrowLeftRight, Droplets, MinusCircle, LayoutGrid, Globe,
+  ArrowLeftRight, Droplets, MinusCircle, BarChart3, Globe,
   AlertTriangle, Menu, X,
 } from "lucide-react";
 
@@ -53,7 +53,7 @@ export function Header() {
     { href: "/",               label: "Swap",     testId: "link-swap",            icon: ArrowLeftRight },
     { href: "/add-liquidity",  label: "Liquidity", testId: "link-add-liquidity",  icon: Droplets },
     { href: "/remove-liquidity", label: "Remove",  testId: "link-remove-liquidity", icon: MinusCircle },
-    { href: "/pools",          label: "Pools",     testId: "link-pools",           icon: LayoutGrid },
+    { href: "/analytics",       label: "Analytics", testId: "link-analytics",       icon: BarChart3 },
     { href: "/bridge",         label: "Bridge",    testId: "link-bridge",          icon: Globe },
   ];
 

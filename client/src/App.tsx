@@ -10,7 +10,7 @@ import { Header } from "@/components/Header";
 import Swap from "@/pages/Swap";
 import AddLiquidity from "@/pages/AddLiquidity";
 import RemoveLiquidity from "@/pages/RemoveLiquidity";
-import Pools from "@/pages/Pools";
+import Analytics from "@/pages/Pools";
 import Bridge from "@/pages/Bridge";
 import NotFound from "@/pages/not-found";
 
@@ -22,7 +22,7 @@ function Router() {
       <Route path="/" component={Swap} />
       <Route path="/add-liquidity" component={AddLiquidity} />
       <Route path="/remove-liquidity" component={RemoveLiquidity} />
-      <Route path="/pools" component={Pools} />
+      <Route path="/analytics" component={Analytics} />
       <Route path="/bridge" component={Bridge} />
       <Route component={NotFound} />
     </Switch>
