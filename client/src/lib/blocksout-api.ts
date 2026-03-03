@@ -1,84 +1,39 @@
 /**
- * Blockscout API v2 service for fetching on-chain analytics data.
+ * Blockscout API v2 service — swap activity analytics.
+ *
+ * Fetches router transactions (which have timestamps) and groups them
+ * by time range for fast swap-count analytics. No per-pool log parsing.
  *
  * Endpoints used:
- *  - /api/v2/addresses/{addr}/logs          → decoded Swap / Swap(V3) events
- *  - /api/v2/addresses/{addr}/counters      → total tx count per contract
- *  - /api/v2/addresses/{addr}/transactions  → recent txs with timestamps
- *
- * All amounts are converted to USD using a stable-token heuristic:
- *   wUSDC / USDC = $1, ACHS priced via pool ratio.
+ *  - /api/v2/addresses/{addr}/counters      → total tx count (all-time)
+ *  - /api/v2/addresses/{addr}/transactions  → paginated txs with timestamps
  */
 
 const API_BASE = "https://testnet.arcscan.app/api/v2";
 
-// ─── Swap event topic hashes ─────────────────────────────────────────────────
-// V2: Swap(address indexed sender, uint amount0In, uint amount1In, uint amount0Out, uint amount1Out, address indexed to)
-const V2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822";
-// V3: Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
-const V3_SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67";
+// ─── Public types ────────────────────────────────────────────────────────────
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+export type TimeRange = "1h" | "6h" | "12h" | "24h" | "7d" | "30d" | "all";
 
-export interface SwapEvent {
-  txHash: string;
-  timestamp: string;
-  blockNumber: number;
-  poolAddress: string;
-  version: "v2" | "v3";
-  /** Volume in the "stable" side — raw amount parsed to float. */
-  volumeUSD: number;
+export interface TimeRangeData {
+  v2Swaps: number;
+  v3Swaps: number;
+  totalSwaps: number;
 }
 
-export interface PoolVolumeData {
-  poolAddress: string;
-  symbol0: string;
-  symbol1: string;
-  version: "v2" | "v3";
-  fee?: string;
-  totalVolume: number;
-  volume24h: number;
-  swapCount: number;
-  swapCount24h: number;
-  tvlUSD: number;
-}
+export type TimeRangeSwapCounts = Record<TimeRange, TimeRangeData>;
 
-export interface ProtocolVolumeData {
-  v2TotalVolume: number;
-  v3TotalVolume: number;
-  totalVolume: number;
-  v2Volume24h: number;
-  v3Volume24h: number;
-  volume24h: number;
-  v2SwapCount: number;
-  v3SwapCount: number;
-  totalSwapCount: number;
-  pools: PoolVolumeData[];
-}
+export const TIME_RANGE_LABELS: Record<TimeRange, string> = {
+  "1h": "1H",
+  "6h": "6H",
+  "12h": "12H",
+  "24h": "24H",
+  "7d": "7D",
+  "30d": "30D",
+  "all": "All",
+};
 
-interface LogItem {
-  address: { hash: string };
-  block_number: number;
-  data: string;
-  decoded: {
-    method_call: string;
-    method_id: string;
-    parameters: Array<{
-      indexed: boolean;
-      name: string;
-      type: string;
-      value: string;
-    }>;
-  } | null;
-  index: number;
-  topics: (string | null)[];
-  transaction_hash: string;
-}
-
-interface LogsResponse {
-  items: LogItem[];
-  next_page_params: Record<string, unknown> | null;
-}
+// ─── Internal types ──────────────────────────────────────────────────────────
 
 interface CountersResponse {
   transactions_count: string;
@@ -102,7 +57,22 @@ interface TransactionsResponse {
   next_page_params: Record<string, unknown> | null;
 }
 
-// ─── Fetch helpers ───────────────────────────────────────────────────────────
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const TIME_RANGE_MS: Record<Exclude<TimeRange, "all">, number> = {
+  "1h": 60 * 60 * 1000,
+  "6h": 6 * 60 * 60 * 1000,
+  "12h": 12 * 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "30d": 30 * 24 * 60 * 60 * 1000,
+};
+
+// Cache: 5-minute TTL
+const SWAP_CACHE_KEY = "achswap_swap_counts";
+const SWAP_CACHE_TTL = 5 * 60 * 1000;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 async function apiFetch<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`);
@@ -110,29 +80,44 @@ async function apiFetch<T>(path: string): Promise<T> {
   return res.json();
 }
 
+async function getContractCounters(address: string): Promise<CountersResponse> {
+  return apiFetch<CountersResponse>(`/addresses/${address}/counters`);
+}
+
 /**
- * Fetch ALL log pages for a given contract address (paginated).
- * Stops after `maxPages` to avoid runaway requests.
+ * Fetch paginated transactions from a router address.
+ * Stops when we go beyond `maxAgeMs` or hit `maxPages`.
  */
-async function fetchAllLogs(
-  address: string,
-  maxPages = 10,
-): Promise<LogItem[]> {
-  const all: LogItem[] = [];
+async function fetchRouterTxs(
+  routerAddress: string,
+  maxPages = 20,
+  maxAgeMs = 30 * 24 * 60 * 60 * 1000,
+): Promise<TransactionItem[]> {
+  const all: TransactionItem[] = [];
   let nextParams: Record<string, unknown> | null = null;
+  const cutoff = Date.now() - maxAgeMs;
 
   for (let page = 0; page < maxPages; page++) {
     const qs: string = nextParams
-      ? "?" + new URLSearchParams(
-          Object.entries(nextParams).map(([k, v]) => [k, String(v)])
+      ? "?" +
+        new URLSearchParams(
+          Object.entries(nextParams).map(([k, v]) => [k, String(v)]),
         ).toString()
       : "";
 
-    const data: LogsResponse = await apiFetch<LogsResponse>(
-      `/addresses/${address}/logs${qs}`,
+    const data = await apiFetch<TransactionsResponse>(
+      `/addresses/${routerAddress}/transactions${qs}`,
     );
 
     all.push(...data.items);
+
+    // Stop if the oldest tx in this page is beyond our time window
+    if (data.items.length > 0) {
+      const oldest = new Date(
+        data.items[data.items.length - 1].timestamp,
+      ).getTime();
+      if (oldest < cutoff) break;
+    }
 
     if (!data.next_page_params) break;
     nextParams = data.next_page_params;
@@ -141,288 +126,86 @@ async function fetchAllLogs(
   return all;
 }
 
-// ─── Core functions ──────────────────────────────────────────────────────────
+// ─── Cache ───────────────────────────────────────────────────────────────────
 
-/**
- * Get transaction count for a contract address.
- */
-export async function getContractCounters(address: string): Promise<CountersResponse> {
-  return apiFetch<CountersResponse>(`/addresses/${address}/counters`);
+interface SwapCountCache {
+  data: TimeRangeSwapCounts;
+  timestamp: number;
 }
 
-/**
- * Fetch recent transactions for a contract (first page only for speed).
- */
-export async function getRecentTransactions(address: string): Promise<TransactionItem[]> {
-  const data = await apiFetch<TransactionsResponse>(
-    `/addresses/${address}/transactions`,
-  );
-  return data.items;
-}
-
-// ─── V2 Swap parsing ─────────────────────────────────────────────────────────
-
-/**
- * Parse V2 Swap events from pool logs.
- *
- * Decoded parameters:
- *   amount0In, amount1In, amount0Out, amount1Out — all uint256 strings.
- *
- * Volume = max(amount0In + amount0Out, amount1In + amount1Out)
- * We pick the stable-side if one token is wUSDC/USDC.
- */
-function parseV2Swap(
-  log: LogItem,
-  stableIdx: 0 | 1 | -1,
-  stableDecimals: number,
-): number {
-  if (!log.decoded?.parameters) return 0;
-
-  const params = log.decoded.parameters;
-  const a0In = BigInt(params.find(p => p.name === "amount0In")?.value ?? "0");
-  const a1In = BigInt(params.find(p => p.name === "amount1In")?.value ?? "0");
-  const a0Out = BigInt(params.find(p => p.name === "amount0Out")?.value ?? "0");
-  const a1Out = BigInt(params.find(p => p.name === "amount1Out")?.value ?? "0");
-
-  if (stableIdx === 0) {
-    const vol = a0In > 0n ? a0In : a0Out;
-    return Number(vol) / 10 ** stableDecimals;
-  } else if (stableIdx === 1) {
-    const vol = a1In > 0n ? a1In : a1Out;
-    return Number(vol) / 10 ** stableDecimals;
+function readSwapCache(): SwapCountCache | null {
+  try {
+    const raw = localStorage.getItem(SWAP_CACHE_KEY);
+    if (!raw) return null;
+    const entry: SwapCountCache = JSON.parse(raw);
+    if (Date.now() - entry.timestamp > SWAP_CACHE_TTL) return null;
+    return entry;
+  } catch {
+    return null;
   }
-
-  // Fallback: assume 18-decimal token, take the max side
-  const side0 = Number(a0In + a0Out) / 1e18;
-  const side1 = Number(a1In + a1Out) / 1e18;
-  return Math.max(side0, side1);
 }
 
-// ─── V3 Swap parsing ─────────────────────────────────────────────────────────
+function writeSwapCache(data: TimeRangeSwapCounts): void {
+  try {
+    localStorage.setItem(
+      SWAP_CACHE_KEY,
+      JSON.stringify({ data, timestamp: Date.now() }),
+    );
+  } catch {}
+}
+
+// ─── Main export ─────────────────────────────────────────────────────────────
 
 /**
- * Parse V3 Swap events from pool logs.
+ * Fetch swap counts grouped by time range for both V2 and V3 routers.
  *
- * Decoded parameters:
- *   amount0 (int256), amount1 (int256) — signed, one positive one negative.
- *
- * Volume = abs(stable-side amount).
+ * - For 1h..30d: fetches paginated transactions with timestamps
+ * - For "all": uses the fast /counters endpoint
+ * - Results are cached in localStorage for 5 minutes
  */
-function parseV3Swap(
-  log: LogItem,
-  stableIdx: 0 | 1 | -1,
-  stableDecimals: number,
-): number {
-  if (!log.decoded?.parameters) return 0;
+export async function fetchTimeRangeSwapCounts(
+  v2Router: string,
+  v3Router: string,
+): Promise<TimeRangeSwapCounts> {
+  // Check cache first
+  const cached = readSwapCache();
+  if (cached) return cached.data;
 
-  const params = log.decoded.parameters;
-  const a0 = BigInt(params.find(p => p.name === "amount0")?.value ?? "0");
-  const a1 = BigInt(params.find(p => p.name === "amount1")?.value ?? "0");
-
-  const abs0 = a0 < 0n ? -a0 : a0;
-  const abs1 = a1 < 0n ? -a1 : a1;
-
-  if (stableIdx === 0) {
-    return Number(abs0) / 10 ** stableDecimals;
-  } else if (stableIdx === 1) {
-    return Number(abs1) / 10 ** stableDecimals;
-  }
-
-  // Fallback
-  return Math.max(Number(abs0) / 1e18, Number(abs1) / 1e18);
-}
-
-// ─── Pool volume fetcher ─────────────────────────────────────────────────────
-
-interface PoolInfo {
-  address: string;
-  version: "v2" | "v3";
-  symbol0: string;
-  symbol1: string;
-  decimals0: number;
-  decimals1: number;
-  fee?: string;
-  tvlUSD: number;
-}
-
-const STABLE_SYMBOLS = new Set(["USDC", "wUSDC"]);
-
-function getStableIndex(
-  sym0: string,
-  sym1: string,
-): { idx: 0 | 1 | -1; decimals: number } {
-  if (STABLE_SYMBOLS.has(sym0)) return { idx: 0, decimals: 18 };
-  if (STABLE_SYMBOLS.has(sym1)) return { idx: 1, decimals: 18 };
-  return { idx: -1, decimals: 18 };
-}
-
-/**
- * Fetch swap volume for a single pool by reading its event logs from Blockscout.
- */
-export async function fetchPoolVolume(pool: PoolInfo): Promise<PoolVolumeData> {
-  const logs = await fetchAllLogs(pool.address, 20);
-  const { idx: stableIdx, decimals: stableDec } = getStableIndex(
-    pool.symbol0,
-    pool.symbol1,
-  );
-
-  const swapTopic = pool.version === "v2" ? V2_SWAP_TOPIC : V3_SWAP_TOPIC;
-  const parseFn = pool.version === "v2" ? parseV2Swap : parseV3Swap;
+  // Fetch transactions and counters in parallel
+  const [v2Txs, v3Txs, v2Counters, v3Counters] = await Promise.all([
+    fetchRouterTxs(v2Router),
+    fetchRouterTxs(v3Router),
+    getContractCounters(v2Router),
+    getContractCounters(v3Router),
+  ]);
 
   const now = Date.now();
-  const ms24h = 24 * 60 * 60 * 1000;
+  const result = {} as TimeRangeSwapCounts;
 
-  let totalVolume = 0;
-  let volume24h = 0;
-  let swapCount = 0;
-  let swapCount24h = 0;
-
-  for (const log of logs) {
-    const isSwap = log.topics[0] === swapTopic;
-    if (!isSwap) continue;
-
-    const vol = parseFn(log, stableIdx, stableDec);
-    totalVolume += vol;
-    swapCount++;
-
-    // We don't have a direct timestamp on log items from Blockscout.
-    // We approximate using the block number difference.
-    // ARC Testnet has ~0.5s blocks, so we estimate timestamp from recent blocks.
-    // For the 24h filter we use a conservative check.
-    // If the block is within the last ~172800 blocks (24h at 0.5s blocks), count it.
-    // This is an approximation — exact timestamps could be gotten from /blocks/{n}
-    // but that would require O(n) extra API calls.
+  // Time-ranged counts
+  for (const range of Object.keys(TIME_RANGE_MS) as Exclude<
+    TimeRange,
+    "all"
+  >[]) {
+    const cutoff = now - TIME_RANGE_MS[range];
+    const v2Count = v2Txs.filter(
+      (tx) => new Date(tx.timestamp).getTime() >= cutoff,
+    ).length;
+    const v3Count = v3Txs.filter(
+      (tx) => new Date(tx.timestamp).getTime() >= cutoff,
+    ).length;
+    result[range] = {
+      v2Swaps: v2Count,
+      v3Swaps: v3Count,
+      totalSwaps: v2Count + v3Count,
+    };
   }
 
-  return {
-    poolAddress: pool.address,
-    symbol0: pool.symbol0,
-    symbol1: pool.symbol1,
-    version: pool.version,
-    fee: pool.fee,
-    totalVolume,
-    volume24h: 0, // Will be refined below
-    swapCount,
-    swapCount24h: 0,
-    tvlUSD: pool.tvlUSD,
-  };
-}
+  // All-time from counters (fast, no pagination needed)
+  const v2All = parseInt(v2Counters.transactions_count, 10) || 0;
+  const v3All = parseInt(v3Counters.transactions_count, 10) || 0;
+  result.all = { v2Swaps: v2All, v3Swaps: v3All, totalSwaps: v2All + v3All };
 
-// ─── Main aggregation ────────────────────────────────────────────────────────
-
-/**
- * Fetch volume data for all pools.
- *
- * Accepts the pre-loaded DisplayPool[] from the existing Pools page cache
- * to avoid double-fetching pool metadata from RPC.
- */
-export async function fetchProtocolVolume(
-  pools: PoolInfo[],
-): Promise<ProtocolVolumeData> {
-  // Fetch volume for each pool with bounded concurrency
-  const CONCURRENCY = 3;
-  const results: PoolVolumeData[] = [];
-
-  for (let i = 0; i < pools.length; i += CONCURRENCY) {
-    const batch = pools.slice(i, i + CONCURRENCY);
-    const batchResults = await Promise.all(
-      batch.map(p => fetchPoolVolume(p).catch(err => {
-        console.warn(`[blocksout] Failed to fetch volume for ${p.address}:`, err);
-        return {
-          poolAddress: p.address,
-          symbol0: p.symbol0,
-          symbol1: p.symbol1,
-          version: p.version,
-          fee: p.fee,
-          totalVolume: 0,
-          volume24h: 0,
-          swapCount: 0,
-          swapCount24h: 0,
-          tvlUSD: p.tvlUSD,
-        } as PoolVolumeData;
-      })),
-    );
-    results.push(...batchResults);
-  }
-
-  // Aggregate
-  let v2Total = 0, v3Total = 0;
-  let v2_24h = 0, v3_24h = 0;
-  let v2Swaps = 0, v3Swaps = 0;
-
-  for (const r of results) {
-    if (r.version === "v2") {
-      v2Total += r.totalVolume;
-      v2_24h += r.volume24h;
-      v2Swaps += r.swapCount;
-    } else {
-      v3Total += r.totalVolume;
-      v3_24h += r.volume24h;
-      v3Swaps += r.swapCount;
-    }
-  }
-
-  return {
-    v2TotalVolume: v2Total,
-    v3TotalVolume: v3Total,
-    totalVolume: v2Total + v3Total,
-    v2Volume24h: v2_24h,
-    v3Volume24h: v3_24h,
-    volume24h: v2_24h + v3_24h,
-    v2SwapCount: v2Swaps,
-    v3SwapCount: v3Swaps,
-    totalSwapCount: v2Swaps + v3Swaps,
-    pools: results.sort((a, b) => b.totalVolume - a.totalVolume),
-  };
-}
-
-/**
- * Fetch 24h volume by reading recent transactions for V2 Router + V3 SwapRouter
- * and counting how many occurred within the last 24 hours.
- */
-export async function fetch24hSwapCounts(
-  v2Router: string,
-  v3SwapRouter: string,
-): Promise<{ v2Count24h: number; v3Count24h: number }> {
-  const [v2Txs, v3Txs] = await Promise.all([
-    getRecentTransactions(v2Router),
-    getRecentTransactions(v3SwapRouter),
-  ]);
-
-  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-  const v2Count24h = v2Txs.filter(
-    tx => new Date(tx.timestamp) >= cutoff,
-  ).length;
-  const v3Count24h = v3Txs.filter(
-    tx => new Date(tx.timestamp) >= cutoff,
-  ).length;
-
-  return { v2Count24h, v3Count24h };
-}
-
-/**
- * Quick summary — fetch total transaction counts for both routers.
- */
-export async function fetchRouterCounters(
-  v2Router: string,
-  v3SwapRouter: string,
-): Promise<{
-  v2TotalTxs: number;
-  v3TotalTxs: number;
-  totalTxs: number;
-}> {
-  const [v2, v3] = await Promise.all([
-    getContractCounters(v2Router),
-    getContractCounters(v3SwapRouter),
-  ]);
-
-  const v2TotalTxs = parseInt(v2.transactions_count, 10);
-  const v3TotalTxs = parseInt(v3.transactions_count, 10);
-
-  return {
-    v2TotalTxs,
-    v3TotalTxs,
-    totalTxs: v2TotalTxs + v3TotalTxs,
-  };
+  writeSwapCache(result);
+  return result;
 }
