@@ -1,7 +1,8 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users } from "lucide-react";
 import { useAccount, useBalance, useChainId } from "wagmi";
-import { isAddress, Contract, JsonRpcProvider } from "ethers";
+import { isAddress, Contract } from "ethers";
+import { createAlchemyProvider } from "@/lib/config";
 import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
 import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
@@ -34,7 +35,7 @@ async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> 
   }
 
   try {
-    const provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
+    const provider = createAlchemyProvider(chainId);
     const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
 
     const [infos, liquidities] = await factory.getAllTokensLiquidity();
