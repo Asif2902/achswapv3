@@ -108,7 +108,8 @@ export default function LaunchToken() {
       // e.g. parseFloat("1000000000000").toFixed(0) can drift — pass string directly
       const cleanSupply = totalSupply.trim().replace(/[^0-9]/g, "");
       if (!cleanSupply || cleanSupply === "0") throw new Error("Invalid total supply");
-      const totalSupplyWei = parseUnits(cleanSupply, 18);
+      // Pass whole tokens — contract does *10^18 internally. parseUnits would double-multiply → uint112 overflow
+      const totalSupplyArg = BigInt(cleanSupply);
 
       const cleanUsdc = usdcAmount.trim();
       if (!cleanUsdc || parseFloat(cleanUsdc) <= 0) throw new Error("Invalid USDC amount");
@@ -119,7 +120,7 @@ export default function LaunchToken() {
       const gasEstimate = await factory.deployToken.estimateGas(
         name.trim(),
         symbol.trim().toUpperCase(),
-        totalSupplyWei,
+        totalSupplyArg,
         logoUrl.trim() || "",
         BigInt(liquidityPercent),
         { value: msgValue }
@@ -128,7 +129,7 @@ export default function LaunchToken() {
       const tx = await factory.deployToken(
         name.trim(),
         symbol.trim().toUpperCase(),
-        totalSupplyWei,
+        totalSupplyArg,
         logoUrl.trim() || "",
         BigInt(liquidityPercent),
         { value: msgValue, gasLimit: gasEstimate * 150n / 100n }
