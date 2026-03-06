@@ -173,12 +173,15 @@ export default function LaunchToken() {
       }
 
       if (!newTokenAddress) {
-        // Tx confirmed but TokenCreated event not found — something went wrong in the contract
-        console.error("[LaunchToken] TokenCreated event missing from receipt logs", receipt);
+        // Tx confirmed but TokenCreated event couldn't be decoded.
+        // Token IS deployed — just show success with explorer link so user can find the address.
+        console.warn("[LaunchToken] TokenCreated event not decoded from receipt logs — tx confirmed regardless", receipt);
+        setDeployedToken(null);
+        setDeployTxHash(receipt.hash);
+        setStep(4);
         toast({
-          title: "Launch may have failed",
-          description: "Transaction confirmed but token address could not be found. Check the explorer for details.",
-          variant: "destructive",
+          title: "Token launched!",
+          description: "Transaction confirmed. Check the explorer to find your token address.",
         });
         return;
       }
@@ -1197,7 +1200,7 @@ export default function LaunchToken() {
                 </div>
 
                 {/* Token address */}
-                {deployedToken && (
+                {deployedToken ? (
                   <div style={{
                     width: "100%",
                     padding: "12px 16px",
@@ -1218,6 +1221,19 @@ export default function LaunchToken() {
                     >
                       <Copy style={{ width: 12, height: 12 }} /> Copy
                     </button>
+                  </div>
+                ) : deployTxHash && (
+                  <div style={{
+                    width: "100%",
+                    padding: "12px 16px",
+                    background: "rgba(251,191,36,0.05)",
+                    border: "1px solid rgba(251,191,36,0.15)",
+                    borderRadius: 14,
+                    fontSize: 12,
+                    color: "rgba(251,191,36,0.7)",
+                    lineHeight: 1.55,
+                  }}>
+                    Token address could not be read from the transaction. Open the explorer to find it in the contract events.
                   </div>
                 )}
 
