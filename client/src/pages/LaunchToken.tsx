@@ -104,9 +104,15 @@ export default function LaunchToken() {
 
       const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, signer);
 
-      // totalSupply in wei (18 decimals)
-      const totalSupplyWei = parseUnits(supply.toFixed(0), 18);
-      const msgValue = parseUnits(usdc.toString(), 18); // USDC is 18 decimals on Arc
+      // Use raw strings to avoid JS float precision loss on large numbers
+      // e.g. parseFloat("1000000000000").toFixed(0) can drift — pass string directly
+      const cleanSupply = totalSupply.trim().replace(/[^0-9]/g, "");
+      if (!cleanSupply || cleanSupply === "0") throw new Error("Invalid total supply");
+      const totalSupplyWei = parseUnits(cleanSupply, 18);
+
+      const cleanUsdc = usdcAmount.trim();
+      if (!cleanUsdc || parseFloat(cleanUsdc) <= 0) throw new Error("Invalid USDC amount");
+      const msgValue = parseUnits(cleanUsdc, 18); // USDC is native 18 decimals on Arc
 
       toast({ title: "Deploying your token…", description: "This is a single transaction — sit tight!" });
 
