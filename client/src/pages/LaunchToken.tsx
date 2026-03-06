@@ -139,17 +139,40 @@ export default function LaunchToken() {
 
       const receipt = await tx.wait();
 
-      // Parse TokenCreated event to get token address
+      // Parse TokenCreated event to get deployed token address.
+      // Primary: iface.parseLog (full decode, named args)
+      // Fallback: topic extraction — tokenAddress is the 1st indexed param so
+      //           it is always encoded in topics[1] regardless of log shape.
       const iface = factory.interface;
+      const tokenCreatedTopic = iface.getEvent("TokenCreated")?.topicHash ?? null;
       let newTokenAddress: string | null = null;
+
       for (const log of receipt.logs) {
+        // Primary path
         try {
           const parsed = iface.parseLog(log);
           if (parsed?.name === "TokenCreated") {
             newTokenAddress = parsed.args.tokenAddress;
             break;
           }
-        } catch { /* skip */ }
+        } catch { /* log belongs to a different contract, try next */ }
+
+        // Fallback: match topic hash, extract address from topics[1]
+        if (!newTokenAddress && tokenCreatedTopic && log.topics[0] === tokenCreatedTopic && log.topics[1]) {
+          newTokenAddress = "0x" + log.topics[1].slice(26);
+          break;
+        }
+      }
+
+      if (!newTokenAddress) {
+        // Tx confirmed but TokenCreated event not found — something went wrong in the contract
+        console.error("[LaunchToken] TokenCreated event missing from receipt logs", receipt);
+        toast({
+          title: "Launch may have failed",
+          description: "Transaction confirmed but token address could not be found. Check the explorer for details.",
+          variant: "destructive",
+        });
+        return;
       }
 
       setDeployedToken(newTokenAddress);
