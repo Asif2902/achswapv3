@@ -3,7 +3,7 @@ import { Link, useLocation } from "wouter";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import {
   ArrowLeftRight, Droplets, MinusCircle, BarChart3, Globe,
-  AlertTriangle, Menu, X,
+  AlertTriangle, Menu, X, Rocket,
 } from "lucide-react";
 
 export function Header() {
@@ -50,15 +50,17 @@ export function Header() {
   useEffect(() => { syncTabIndex(); }, [syncTabIndex]);
 
   const navItems = [
-    { href: "/",               label: "Swap",     testId: "link-swap",            icon: ArrowLeftRight },
-    { href: "/add-liquidity",  label: "Liquidity", testId: "link-add-liquidity",  icon: Droplets },
-    { href: "/remove-liquidity", label: "Remove",  testId: "link-remove-liquidity", icon: MinusCircle },
-    { href: "/analytics",       label: "Analytics", testId: "link-analytics",       icon: BarChart3 },
-    { href: "/bridge",         label: "Bridge",    testId: "link-bridge",          icon: Globe },
+    { href: "/",                 label: "Swap",      testId: "link-swap",             icon: ArrowLeftRight },
+    { href: "/add-liquidity",    label: "Liquidity", testId: "link-add-liquidity",    icon: Droplets },
+    { href: "/remove-liquidity", label: "Remove",    testId: "link-remove-liquidity", icon: MinusCircle },
+    { href: "/analytics",        label: "Analytics", testId: "link-analytics",        icon: BarChart3 },
+    { href: "/bridge",           label: "Bridge",    testId: "link-bridge",           icon: Globe },
   ];
 
   const isActive = (href: string) =>
     href === "/" ? location === "/" : location.startsWith(href);
+
+  const isLaunchActive = location.startsWith("/launch");
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/80 backdrop-blur-xl supports-[backdrop-filter]:bg-background/60 shadow-lg">
@@ -76,8 +78,56 @@ export function Header() {
           </span>
         </Link>
 
-        {/* Right side: wallet + hamburger */}
+        {/* Right side: Launch button + wallet + hamburger */}
         <div className="flex items-center gap-2 md:gap-3">
+
+          {/* Launch Token button — always visible */}
+          <Link href="/launch">
+            <button
+              data-testid="link-launch"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "7px 14px",
+                borderRadius: 10,
+                border: isLaunchActive
+                  ? "1px solid rgba(139,92,246,0.6)"
+                  : "1px solid rgba(139,92,246,0.35)",
+                background: isLaunchActive
+                  ? "linear-gradient(135deg, rgba(99,102,241,0.25), rgba(139,92,246,0.25))"
+                  : "linear-gradient(135deg, rgba(99,102,241,0.12), rgba(139,92,246,0.12))",
+                color: isLaunchActive ? "#c4b5fd" : "#a78bfa",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: "pointer",
+                transition: "all 0.2s",
+                whiteSpace: "nowrap",
+                letterSpacing: "0.01em",
+                boxShadow: isLaunchActive
+                  ? "0 0 16px rgba(139,92,246,0.25)"
+                  : "none",
+              }}
+              onMouseEnter={e => {
+                (e.currentTarget as HTMLButtonElement).style.background =
+                  "linear-gradient(135deg, rgba(99,102,241,0.22), rgba(139,92,246,0.22))";
+                (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(139,92,246,0.6)";
+                (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 16px rgba(139,92,246,0.2)";
+              }}
+              onMouseLeave={e => {
+                if (!isLaunchActive) {
+                  (e.currentTarget as HTMLButtonElement).style.background =
+                    "linear-gradient(135deg, rgba(99,102,241,0.12), rgba(139,92,246,0.12))";
+                  (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(139,92,246,0.35)";
+                  (e.currentTarget as HTMLButtonElement).style.boxShadow = "none";
+                }
+              }}
+            >
+              <Rocket style={{ width: 14, height: 14 }} />
+              <span className="hidden sm:inline">Launch Token</span>
+              <span className="sm:hidden">Launch</span>
+            </button>
+          </Link>
 
           {/* Wallet / chain buttons */}
           <ConnectButton.Custom>
@@ -151,7 +201,7 @@ export function Header() {
             }}
           </ConnectButton.Custom>
 
-          {/* Hamburger — always visible on all screen sizes */}
+          {/* Hamburger */}
           <button
             ref={toggleRef}
             onClick={() => setMenuOpen(p => !p)}
@@ -169,7 +219,7 @@ export function Header() {
         </div>
       </div>
 
-      {/* Dropdown nav — all screen sizes */}
+      {/* Dropdown nav */}
       <div
         id="main-nav-menu"
         ref={menuRef}
@@ -183,7 +233,6 @@ export function Header() {
       >
         <nav className="border-t border-border/40 bg-background/95 backdrop-blur-xl">
           <div className="container px-4 py-3 max-w-7xl mx-auto">
-            {/* Grid: 1 col on mobile, 2–3 cols on wider screens */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1">
               {navItems.map(item => {
                 const Icon = item.icon;
@@ -201,12 +250,47 @@ export function Header() {
                   >
                     <Icon className={`w-4 h-4 flex-shrink-0 ${active ? "text-primary" : "text-foreground/40"}`} />
                     <span>{item.label}</span>
-                    {active && (
-                      <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
-                    )}
+                    {active && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
                   </Link>
                 );
               })}
+
+              {/* Launch Token — special row in dropdown */}
+              <Link
+                href="/launch"
+                data-testid="link-launch-menu"
+                className="flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 border"
+                style={{
+                  background: isLaunchActive
+                    ? "rgba(139,92,246,0.12)"
+                    : "transparent",
+                  borderColor: isLaunchActive
+                    ? "rgba(139,92,246,0.3)"
+                    : "transparent",
+                  color: isLaunchActive ? "#c4b5fd" : "rgba(255,255,255,0.5)",
+                }}
+                onMouseEnter={e => {
+                  if (!isLaunchActive) {
+                    (e.currentTarget as HTMLAnchorElement).style.background = "rgba(139,92,246,0.08)";
+                    (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(139,92,246,0.2)";
+                    (e.currentTarget as HTMLAnchorElement).style.color = "#c4b5fd";
+                  }
+                }}
+                onMouseLeave={e => {
+                  if (!isLaunchActive) {
+                    (e.currentTarget as HTMLAnchorElement).style.background = "transparent";
+                    (e.currentTarget as HTMLAnchorElement).style.borderColor = "transparent";
+                    (e.currentTarget as HTMLAnchorElement).style.color = "rgba(255,255,255,0.5)";
+                  }
+                }}
+              >
+                <Rocket
+                  className="w-4 h-4 flex-shrink-0"
+                  style={{ color: isLaunchActive ? "#a78bfa" : "rgba(139,92,246,0.5)" }}
+                />
+                <span>Launch Token</span>
+                {isLaunchActive && <span className="ml-auto w-1.5 h-1.5 rounded-full" style={{ background: "#a78bfa" }} />}
+              </Link>
             </div>
           </div>
         </nav>
