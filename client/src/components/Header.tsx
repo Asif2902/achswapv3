@@ -14,10 +14,8 @@ export function Header() {
 
   const isBridgePage = location.startsWith("/bridge");
 
-  // Close on route change
   useEffect(() => { setMenuOpen(false); }, [location]);
 
-  // Close on outside click
   useEffect(() => {
     if (!menuOpen) return;
     const handle = (e: MouseEvent) => {
@@ -31,7 +29,6 @@ export function Header() {
     return () => document.removeEventListener("mousedown", handle);
   }, [menuOpen]);
 
-  // Close on Escape
   useEffect(() => {
     if (!menuOpen) return;
     const handle = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
@@ -39,7 +36,6 @@ export function Header() {
     return () => window.removeEventListener("keydown", handle);
   }, [menuOpen]);
 
-  // Remove focusable children from tab order when menu is closed
   const syncTabIndex = useCallback(() => {
     const el = menuRef.current;
     if (!el) return;
@@ -55,12 +51,11 @@ export function Header() {
     { href: "/remove-liquidity", label: "Remove",    testId: "link-remove-liquidity", icon: MinusCircle },
     { href: "/analytics",        label: "Analytics", testId: "link-analytics",        icon: BarChart3 },
     { href: "/bridge",           label: "Bridge",    testId: "link-bridge",           icon: Globe },
+    { href: "/launch",           label: "Launch Token", testId: "link-launch",        icon: Rocket },
   ];
 
   const isActive = (href: string) =>
     href === "/" ? location === "/" : location.startsWith(href);
-
-  const isLaunchActive = location.startsWith("/launch");
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-border/40 bg-background/80 backdrop-blur-xl supports-[backdrop-filter]:bg-background/60 shadow-lg">
@@ -78,56 +73,8 @@ export function Header() {
           </span>
         </Link>
 
-        {/* Right side: Launch button + wallet + hamburger */}
+        {/* Right side: wallet + hamburger */}
         <div className="flex items-center gap-2 md:gap-3">
-
-          {/* Launch Token button — always visible */}
-          <Link href="/launch">
-            <button
-              data-testid="link-launch"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "7px 14px",
-                borderRadius: 10,
-                border: isLaunchActive
-                  ? "1px solid rgba(139,92,246,0.6)"
-                  : "1px solid rgba(139,92,246,0.35)",
-                background: isLaunchActive
-                  ? "linear-gradient(135deg, rgba(99,102,241,0.25), rgba(139,92,246,0.25))"
-                  : "linear-gradient(135deg, rgba(99,102,241,0.12), rgba(139,92,246,0.12))",
-                color: isLaunchActive ? "#c4b5fd" : "#a78bfa",
-                fontSize: 13,
-                fontWeight: 700,
-                cursor: "pointer",
-                transition: "all 0.2s",
-                whiteSpace: "nowrap",
-                letterSpacing: "0.01em",
-                boxShadow: isLaunchActive
-                  ? "0 0 16px rgba(139,92,246,0.25)"
-                  : "none",
-              }}
-              onMouseEnter={e => {
-                (e.currentTarget as HTMLButtonElement).style.background =
-                  "linear-gradient(135deg, rgba(99,102,241,0.22), rgba(139,92,246,0.22))";
-                (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(139,92,246,0.6)";
-                (e.currentTarget as HTMLButtonElement).style.boxShadow = "0 0 16px rgba(139,92,246,0.2)";
-              }}
-              onMouseLeave={e => {
-                if (!isLaunchActive) {
-                  (e.currentTarget as HTMLButtonElement).style.background =
-                    "linear-gradient(135deg, rgba(99,102,241,0.12), rgba(139,92,246,0.12))";
-                  (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(139,92,246,0.35)";
-                  (e.currentTarget as HTMLButtonElement).style.boxShadow = "none";
-                }
-              }}
-            >
-              <Rocket style={{ width: 14, height: 14 }} />
-              <span className="hidden sm:inline">Launch Token</span>
-              <span className="sm:hidden">Launch</span>
-            </button>
-          </Link>
 
           {/* Wallet / chain buttons */}
           <ConnectButton.Custom>
@@ -254,43 +201,6 @@ export function Header() {
                   </Link>
                 );
               })}
-
-              {/* Launch Token — special row in dropdown */}
-              <Link
-                href="/launch"
-                data-testid="link-launch-menu"
-                className="flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 border"
-                style={{
-                  background: isLaunchActive
-                    ? "rgba(139,92,246,0.12)"
-                    : "transparent",
-                  borderColor: isLaunchActive
-                    ? "rgba(139,92,246,0.3)"
-                    : "transparent",
-                  color: isLaunchActive ? "#c4b5fd" : "rgba(255,255,255,0.5)",
-                }}
-                onMouseEnter={e => {
-                  if (!isLaunchActive) {
-                    (e.currentTarget as HTMLAnchorElement).style.background = "rgba(139,92,246,0.08)";
-                    (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(139,92,246,0.2)";
-                    (e.currentTarget as HTMLAnchorElement).style.color = "#c4b5fd";
-                  }
-                }}
-                onMouseLeave={e => {
-                  if (!isLaunchActive) {
-                    (e.currentTarget as HTMLAnchorElement).style.background = "transparent";
-                    (e.currentTarget as HTMLAnchorElement).style.borderColor = "transparent";
-                    (e.currentTarget as HTMLAnchorElement).style.color = "rgba(255,255,255,0.5)";
-                  }
-                }}
-              >
-                <Rocket
-                  className="w-4 h-4 flex-shrink-0"
-                  style={{ color: isLaunchActive ? "#a78bfa" : "rgba(139,92,246,0.5)" }}
-                />
-                <span>Launch Token</span>
-                {isLaunchActive && <span className="ml-auto w-1.5 h-1.5 rounded-full" style={{ background: "#a78bfa" }} />}
-              </Link>
             </div>
           </div>
         </nav>
