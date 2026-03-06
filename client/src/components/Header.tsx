@@ -2,8 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Link, useLocation } from "wouter";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import {
-  ArrowLeftRight, Droplets, MinusCircle, LayoutGrid, Globe,
-  AlertTriangle, Menu, X,
+  ArrowLeftRight, Droplets, MinusCircle, BarChart3, Globe,
+  AlertTriangle, Menu, X, Rocket,
 } from "lucide-react";
 
 export function Header() {
@@ -14,10 +14,8 @@ export function Header() {
 
   const isBridgePage = location.startsWith("/bridge");
 
-  // Close on route change
   useEffect(() => { setMenuOpen(false); }, [location]);
 
-  // Close on outside click
   useEffect(() => {
     if (!menuOpen) return;
     const handle = (e: MouseEvent) => {
@@ -31,7 +29,6 @@ export function Header() {
     return () => document.removeEventListener("mousedown", handle);
   }, [menuOpen]);
 
-  // Close on Escape
   useEffect(() => {
     if (!menuOpen) return;
     const handle = (e: KeyboardEvent) => { if (e.key === "Escape") setMenuOpen(false); };
@@ -39,7 +36,6 @@ export function Header() {
     return () => window.removeEventListener("keydown", handle);
   }, [menuOpen]);
 
-  // Remove focusable children from tab order when menu is closed
   const syncTabIndex = useCallback(() => {
     const el = menuRef.current;
     if (!el) return;
@@ -50,11 +46,12 @@ export function Header() {
   useEffect(() => { syncTabIndex(); }, [syncTabIndex]);
 
   const navItems = [
-    { href: "/",               label: "Swap",     testId: "link-swap",            icon: ArrowLeftRight },
-    { href: "/add-liquidity",  label: "Liquidity", testId: "link-add-liquidity",  icon: Droplets },
-    { href: "/remove-liquidity", label: "Remove",  testId: "link-remove-liquidity", icon: MinusCircle },
-    { href: "/pools",          label: "Pools",     testId: "link-pools",           icon: LayoutGrid },
-    { href: "/bridge",         label: "Bridge",    testId: "link-bridge",          icon: Globe },
+    { href: "/",                 label: "Swap",      testId: "link-swap",             icon: ArrowLeftRight },
+    { href: "/add-liquidity",    label: "Liquidity", testId: "link-add-liquidity",    icon: Droplets },
+    { href: "/remove-liquidity", label: "Remove",    testId: "link-remove-liquidity", icon: MinusCircle },
+    { href: "/analytics",        label: "Analytics", testId: "link-analytics",        icon: BarChart3 },
+    { href: "/bridge",           label: "Bridge",    testId: "link-bridge",           icon: Globe },
+    { href: "/launch",           label: "Launch Token", testId: "link-launch",        icon: Rocket },
   ];
 
   const isActive = (href: string) =>
@@ -151,7 +148,7 @@ export function Header() {
             }}
           </ConnectButton.Custom>
 
-          {/* Hamburger — always visible on all screen sizes */}
+          {/* Hamburger */}
           <button
             ref={toggleRef}
             onClick={() => setMenuOpen(p => !p)}
@@ -169,7 +166,7 @@ export function Header() {
         </div>
       </div>
 
-      {/* Dropdown nav — all screen sizes */}
+      {/* Dropdown nav */}
       <div
         id="main-nav-menu"
         ref={menuRef}
@@ -183,7 +180,6 @@ export function Header() {
       >
         <nav className="border-t border-border/40 bg-background/95 backdrop-blur-xl">
           <div className="container px-4 py-3 max-w-7xl mx-auto">
-            {/* Grid: 1 col on mobile, 2–3 cols on wider screens */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1">
               {navItems.map(item => {
                 const Icon = item.icon;
@@ -201,9 +197,7 @@ export function Header() {
                   >
                     <Icon className={`w-4 h-4 flex-shrink-0 ${active ? "text-primary" : "text-foreground/40"}`} />
                     <span>{item.label}</span>
-                    {active && (
-                      <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />
-                    )}
+                    {active && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-primary" />}
                   </Link>
                 );
               })}

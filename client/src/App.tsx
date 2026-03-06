@@ -12,6 +12,7 @@ import AddLiquidity from "@/pages/AddLiquidity";
 import RemoveLiquidity from "@/pages/RemoveLiquidity";
 import Pools from "@/pages/Pools";
 import Bridge from "@/pages/Bridge";
+import LaunchToken from "@/pages/LaunchToken";
 import NotFound from "@/pages/not-found";
 
 import "@rainbow-me/rainbowkit/styles.css";
@@ -22,8 +23,9 @@ function Router() {
       <Route path="/" component={Swap} />
       <Route path="/add-liquidity" component={AddLiquidity} />
       <Route path="/remove-liquidity" component={RemoveLiquidity} />
-      <Route path="/pools" component={Pools} />
+      <Route path="/analytics" component={Pools} />
       <Route path="/bridge" component={Bridge} />
+      <Route path="/launch" component={LaunchToken} />
       <Route component={NotFound} />
     </Switch>
   );
