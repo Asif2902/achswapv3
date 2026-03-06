@@ -84,11 +84,13 @@ export default function LaunchToken() {
   const marketCap = initialPrice > 0 ? supply * initialPrice : 0;
   const willBeListed = usdc >= COMMUNITY_THRESHOLD;
 
+  const supplyIsInteger = /^\d+$/.test(totalSupply.trim()) && totalSupply.trim() !== "0";
+
   // ── Validation ─────────────────────────────────────────────────────────────
   const step1Valid =
     name.trim().length >= 2 &&
     symbol.trim().length >= 2 && symbol.trim().length <= 10 &&
-    supply > 0;
+    supplyIsInteger;
 
   const step2Valid =
     usdc > 0 &&
@@ -97,6 +99,10 @@ export default function LaunchToken() {
   // ── Deploy ─────────────────────────────────────────────────────────────────
   const handleDeploy = async () => {
     if (!address || !window.ethereum) return;
+    if (!contracts) {
+      toast({ title: "Unsupported network", description: "Switch to Arc Testnet to launch a token.", variant: "destructive" });
+      return;
+    }
     setIsDeploying(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
@@ -104,10 +110,12 @@ export default function LaunchToken() {
 
       const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, signer);
 
-      // Use raw strings to avoid JS float precision loss on large numbers
-      // e.g. parseFloat("1000000000000").toFixed(0) can drift — pass string directly
-      const cleanSupply = totalSupply.trim().replace(/[^0-9]/g, "");
-      if (!cleanSupply || cleanSupply === "0") throw new Error("Invalid total supply");
+      // Reject decimals/exponents up-front — silent stripping (replace /[^0-9]/g)
+      // would corrupt: "1.5" → "15", "1e6" → "16". Only whole token amounts accepted.
+      const cleanSupply = totalSupply.trim();
+      if (!/^\d+$/.test(cleanSupply) || cleanSupply === "0") {
+        throw new Error("Total supply must be a whole number (no decimals or exponents)");
+      }
       // Pass whole tokens — contract does *10^18 internally. parseUnits would double-multiply → uint112 overflow
       const totalSupplyArg = BigInt(cleanSupply);
 
@@ -1140,7 +1148,7 @@ export default function LaunchToken() {
                   <AlertTriangle style={{ width: 14, height: 14 }} />
                   <span>
                     This action is <strong style={{ color: "rgba(251,191,36,0.9)" }}>irreversible</strong>.
-                    The token contract will be deployed and liquidity locked in the pool.
+                    The token contract will be deployed and LP tokens will be sent to your wallet — you will own them.
                     Make sure all details are correct before proceeding.
                     You will pay <strong style={{ color: "rgba(251,191,36,0.9)" }}>{usdc} USDC</strong> + gas.
                   </span>
@@ -1159,9 +1167,9 @@ export default function LaunchToken() {
                   <ChevronLeft style={{ width: 16, height: 16 }} /> Back
                 </button>
                 <button
-                  className={`lt-btn-next ${isDeploying ? "loading" : isConnected ? "active" : "disabled"}`}
+                  className={`lt-btn-next ${isDeploying ? "loading" : (isConnected && contracts) ? "active" : "disabled"}`}
                   onClick={handleDeploy}
-                  disabled={isDeploying || !isConnected}
+                  disabled={isDeploying || !isConnected || !contracts}
                 >
                   {isDeploying
                     ? <><span className="lt-spin" /> Launching…</>
