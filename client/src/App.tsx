@@ -23,7 +23,7 @@ function Router() {
       <Route path="/" component={Swap} />
       <Route path="/add-liquidity" component={AddLiquidity} />
       <Route path="/remove-liquidity" component={RemoveLiquidity} />
-      <Route path="/pools" component={Pools} />
+      <Route path="/analytics" component={Pools} />
       <Route path="/bridge" component={Bridge} />
       <Route path="/launch" component={LaunchToken} />
       <Route component={NotFound} />
