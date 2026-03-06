@@ -129,15 +129,17 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
       .filter(t => !q || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q) || t.address.toLowerCase().includes(q));
   }, [communityTokens, regularAddresses, searchQuery]);
 
-  const filteredTokens = useMemo(() => {
+  const { filteredVerified, filteredImported } = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
-    if (!q) return tokens;
-    return tokens.filter(
-      (t) =>
-        t.symbol.toLowerCase().includes(q) ||
-        t.name.toLowerCase().includes(q) ||
-        t.address.toLowerCase().includes(q),
-    );
+    const matches = (t: Token) =>
+      !q ||
+      t.symbol.toLowerCase().includes(q) ||
+      t.name.toLowerCase().includes(q) ||
+      t.address.toLowerCase().includes(q);
+    return {
+      filteredVerified: tokens.filter((t) => t.verified && matches(t)),
+      filteredImported: tokens.filter((t) => !t.verified && matches(t)),
+    };
   }, [tokens, searchQuery]);
 
   const isValidAddress = Boolean(searchQuery.trim() && isAddress(searchQuery.trim()));
@@ -333,19 +335,37 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
             className="flex-1 overflow-y-auto overscroll-contain px-3 py-2"
             style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
           >
-            {/* ── Listed tokens ── */}
-            {filteredTokens.length > 0 && (
+            {/* ── Verified tokens ── */}
+            {filteredVerified.length > 0 && (
               <>
-                {/* Section header — only show if community section also visible */}
-                {filteredCommunityTokens.length > 0 && (
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px 4px", marginBottom: 2 }}>
-                    <Sparkles style={{ width: 11, height: 11, color: "#818cf8" }} />
-                    <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                      Verified
-                    </span>
-                  </div>
-                )}
-                {filteredTokens.map((token, i) => (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px 4px", marginBottom: 2 }}>
+                  <Sparkles style={{ width: 11, height: 11, color: "#818cf8" }} />
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Verified
+                  </span>
+                </div>
+                {filteredVerified.map((token, i) => (
+                  <TokenRow
+                    key={token.address}
+                    token={token}
+                    userAddress={userAddress}
+                    index={i}
+                    onClick={() => handleSelect(token)}
+                  />
+                ))}
+              </>
+            )}
+
+            {/* ── Imported tokens ── */}
+            {filteredImported.length > 0 && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 4px", marginBottom: 2 }}>
+                  <AlertCircle style={{ width: 11, height: 11, color: "#facc15" }} />
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Imported
+                  </span>
+                </div>
+                {filteredImported.map((token, i) => (
                   <TokenRow
                     key={token.address}
                     token={token}
@@ -360,19 +380,11 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
             {/* ── Community Made section ── */}
             {(filteredCommunityTokens.length > 0 || loadingCommunity) && (
               <>
-                {/* Divider + section header */}
-                <div style={{ padding: "10px 12px 4px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <Users style={{ width: 11, height: 11, color: "#a78bfa" }} />
-                    <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
-                      Community Made
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "2px 8px", borderRadius: 20, background: "rgba(139,92,246,0.1)", border: "1px solid rgba(139,92,246,0.2)" }}>
-                    <span style={{ fontSize: 9, fontWeight: 800, color: "#c4b5fd", letterSpacing: "0.05em" }}>
-                      ≥500 USDC liq
-                    </span>
-                  </div>
+                <div style={{ padding: "10px 12px 4px", display: "flex", alignItems: "center", gap: 8 }}>
+                  <Users style={{ width: 11, height: 11, color: "#a78bfa" }} />
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Community Made
+                  </span>
                 </div>
 
                 {loadingCommunity && filteredCommunityTokens.length === 0 ? (
@@ -395,7 +407,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
             )}
 
             {/* Empty state */}
-            {filteredTokens.length === 0 && filteredCommunityTokens.length === 0 && !showImportButton && !loadingCommunity && (
+            {filteredVerified.length === 0 && filteredImported.length === 0 && filteredCommunityTokens.length === 0 && !showImportButton && !loadingCommunity && (
               <div className="flex flex-col items-center justify-center py-16 gap-3">
                 <div className="w-12 h-12 rounded-2xl flex items-center justify-center" style={{ background: "rgba(255,255,255,0.04)" }}>
                   <Search className="w-5 h-5 text-white/20" />
@@ -618,10 +630,7 @@ function CommunityTokenRow({
               community
             </span>
           </div>
-          <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>
-            {token.name}
-            <span style={{ marginLeft: 4, color: "rgba(139,92,246,0.6)" }}>· {token.nativeAdded} USDC liq</span>
-          </p>
+          <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>{token.name}</p>
         </div>
       </div>
       {userAddress && displayBalance && (
