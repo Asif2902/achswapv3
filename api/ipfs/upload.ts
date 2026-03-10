@@ -16,20 +16,44 @@ export default async function handler(req: Request) {
     const formData = await req.formData();
     const file = formData.get('file');
 
-    if (!file) {
+    if (!file || typeof file === 'string') {
       return new Response(JSON.stringify({ error: 'No file uploaded' }), { status: 400 });
+    }
+
+    const MAX_FILE_SIZE = 5 * 1024 * 1024;
+    if (file.size > MAX_FILE_SIZE) {
+      return new Response(JSON.stringify({ error: 'Payload Too Large' }), { status: 413 });
+    }
+
+    const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml'];
+    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+      return new Response(JSON.stringify({ error: 'Unsupported Media Type' }), { status: 415 });
     }
 
     const pinataFormData = new FormData();
     pinataFormData.append('file', file);
 
-    const pinataRes = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${pinataJwt}`,
-      },
-      body: pinataFormData,
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    let pinataRes;
+    try {
+      pinataRes = await fetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${pinataJwt}`,
+        },
+        body: pinataFormData,
+        signal: controller.signal,
+      });
+    } catch (fetchErr: any) {
+      if (fetchErr.name === 'AbortError') {
+        throw new Error('Pinata upload timeout configuration exceeded for pinataJwt/pinataFormData');
+      }
+      throw fetchErr;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     if (!pinataRes.ok) {
       const errorText = await pinataRes.text();
@@ -42,6 +66,7 @@ export default async function handler(req: Request) {
       headers: { 'Content-Type': 'application/json' },
     });
   } catch (err: any) {
-    return new Response(JSON.stringify({ error: err.message }), { status: 500 });
+    console.error(err);
+    return new Response(JSON.stringify({ error: 'Internal server error' }), { status: 500 });
   }
 }

@@ -1,6 +1,5 @@
 export async function compressImage(file: File, maxMB: number = 2): Promise<File> {
-  const targetBytes = maxMB * 1024 * 1024;
-  const earlyExitThreshold = Math.min(300 * 1024, targetBytes * 0.15);
+  const earlyExitThreshold = Math.min(300 * 1024, (maxMB * 1024 * 1024) * 0.15);
   // If the file is already very small (e.g. < 15% of maxMB limit or 300KB), no need to compress
   if (file.size < earlyExitThreshold) return file;
 

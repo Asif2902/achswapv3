@@ -56,10 +56,13 @@ export default function LaunchToken() {
   const [deployedToken, setDeployedToken] = useState<string | null>(null);
   const [deployTxHash, setDeployTxHash] = useState<string | null>(null);
 
+  const previousBlobUrl = useRef<string | null>(null);
+
   useEffect(() => {
+    previousBlobUrl.current = logoUrl;
     return () => {
-      if (logoUrl && logoUrl.startsWith("blob:")) {
-        URL.revokeObjectURL(logoUrl);
+      if (previousBlobUrl.current && previousBlobUrl.current.startsWith("blob:")) {
+        URL.revokeObjectURL(previousBlobUrl.current);
       }
     };
   }, [logoUrl]);
