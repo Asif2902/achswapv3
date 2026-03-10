@@ -162,8 +162,21 @@ export function AddLiquidityV3Advanced() {
   useEffect(() => {
     if (!chainId) return;
     const chainTokens = getTokensByChainId(chainId);
-    const imported = localStorage.getItem("importedTokens");
-    const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
+    let importedTokens: Token[] = [];
+    try {
+      const imported = localStorage.getItem("importedTokens");
+      if (imported) {
+        const parsed = JSON.parse(imported);
+        if (Array.isArray(parsed) && parsed.every(t => t && typeof t === 'object' && 'address' in t && 'chainId' in t)) {
+          importedTokens = parsed;
+        } else {
+          localStorage.removeItem("importedTokens");
+        }
+      }
+    } catch {
+      localStorage.removeItem("importedTokens");
+      importedTokens = [];
+    }
     
     const combinedTokens = [...chainTokens, ...importedTokens.filter(t => t.chainId === chainId)].map(t => ({
       ...t,
