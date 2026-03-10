@@ -56,6 +56,14 @@ export default function LaunchToken() {
   const [deployedToken, setDeployedToken] = useState<string | null>(null);
   const [deployTxHash, setDeployTxHash] = useState<string | null>(null);
 
+  useEffect(() => {
+    return () => {
+      if (logoUrl && logoUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(logoUrl);
+      }
+    };
+  }, [logoUrl]);
+
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
@@ -807,6 +815,10 @@ export default function LaunchToken() {
                                 return;
                             }
 
+                            if (logoUrl && logoUrl.startsWith("blob:")) {
+                              URL.revokeObjectURL(logoUrl);
+                            }
+
                             setLogoFile(file);
                             // Set a local object URL for preview
                             setLogoUrl(URL.createObjectURL(file));
@@ -1284,7 +1296,11 @@ export default function LaunchToken() {
                   <button
                     className="lt-success-btn secondary"
                     onClick={() => {
+                      if (logoUrl && logoUrl.startsWith("blob:")) {
+                        URL.revokeObjectURL(logoUrl);
+                      }
                       setStep(1); setName(""); setSymbol(""); setTotalSupply("1000000000");
+                      setLogoFile(null);
                       setLogoUrl(""); setUsdcAmount(""); setLiquidityPercent(20);
                       setDeployedToken(null); setDeployTxHash(null);
                     }}

@@ -1,6 +1,8 @@
 export async function compressImage(file: File, maxMB: number = 2): Promise<File> {
-  // If the file is already very small (e.g. < 300KB), no need to compress
-  if (file.size < 300 * 1024) return file;
+  const targetBytes = maxMB * 1024 * 1024;
+  const earlyExitThreshold = Math.min(300 * 1024, targetBytes * 0.15);
+  // If the file is already very small (e.g. < 15% of maxMB limit or 300KB), no need to compress
+  if (file.size < earlyExitThreshold) return file;
 
   return new Promise((resolve) => {
     const img = new Image();
@@ -38,6 +40,7 @@ export async function compressImage(file: File, maxMB: number = 2): Promise<File
       ctx.drawImage(img, 0, 0, width, height);
       
       // Compress to WebP
+      const quality = maxMB < 1 ? 0.6 : 0.8;
       canvas.toBlob(
         (blob) => {
           if (!blob) {
@@ -58,7 +61,7 @@ export async function compressImage(file: File, maxMB: number = 2): Promise<File
           }
         },
         "image/webp",
-        0.8 // 80% quality
+        quality
       );
     };
     
