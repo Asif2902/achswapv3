@@ -26,6 +26,7 @@ import {
 import { PoolHealthChecker } from "@/components/PoolHealthChecker";
 import type { PoolHealthResult } from "@/components/PoolHealthChecker";
 import { getPoolStats, type PoolStats } from "@/lib/pool-apr-utils";
+import { getGatewayUrlFromCid } from "@/pages/LaunchToken";
 import { Shield, ExternalLink, Plus, RefreshCw, Info, Zap, AlertTriangle, TrendingUp } from "lucide-react";
 
 const ERC20_ABI = [
@@ -102,7 +103,12 @@ export function AddLiquidityV3Basic() {
     const chainTokens = getTokensByChainId(chainId);
     const imported = localStorage.getItem("importedTokens");
     const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
-    setTokens([...chainTokens, ...importedTokens.filter(t => t.chainId === chainId)]);
+    
+    const combinedTokens = [...chainTokens, ...importedTokens.filter(t => t.chainId === chainId)].map(t => ({
+      ...t,
+      logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : t.logoURI
+    }));
+    setTokens(combinedTokens);
   }, [chainId]);
 
   // ── Default tokens ─────────────────────────────────────────────────────────

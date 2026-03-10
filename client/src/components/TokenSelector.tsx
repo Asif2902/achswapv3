@@ -5,6 +5,7 @@ import { isAddress, Contract, JsonRpcProvider } from "ethers";
 import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
 import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
+import { getGatewayUrlFromCid } from "@/pages/LaunchToken";
 
 interface TokenSelectorProps {
   open: boolean;
@@ -50,7 +51,7 @@ async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> 
         name: info.name,
         symbol: info.symbol,
         decimals: 18,
-        logoURI: info.logoUrl || "/img/logos/unknown-token.png",
+        logoURI: info.logoUrl ? getGatewayUrlFromCid(info.logoUrl) : "/img/logos/unknown-token.png",
         verified: false,
         chainId: 5042002,
         community: true,

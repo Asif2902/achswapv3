@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { TokenSelector } from "@/components/TokenSelector";
+import { getGatewayUrlFromCid } from "@/pages/LaunchToken";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
@@ -161,8 +162,14 @@ export function AddLiquidityV3Advanced() {
   useEffect(() => {
     if (!chainId) return;
     const chainTokens = getTokensByChainId(chainId);
-    const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
-    setTokens([...chainTokens, ...imported.filter(t => t.chainId === chainId)]);
+    const imported = localStorage.getItem("importedTokens");
+    const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
+    
+    const combinedTokens = [...chainTokens, ...importedTokens.filter(t => t.chainId === chainId)].map(t => ({
+      ...t,
+      logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : t.logoURI
+    }));
+    setTokens(combinedTokens);
   }, [chainId]);
 
   useEffect(() => {
