@@ -10,6 +10,7 @@ import { BrowserProvider, Contract, parseUnits, formatUnits } from "ethers";
 import { getContractsForChain } from "@/lib/contracts";
 import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
 import { uploadToIPFS } from "@/lib/ipfs-upload";
+import { compressImage } from "@/lib/image-utils";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -788,9 +789,24 @@ export default function LaunchToken() {
                         className="lt-input"
                         id="logo-upload"
                         style={{ display: "none" }}
-                        onChange={e => {
-                          const file = e.target.files?.[0];
+                        onChange={async (e) => {
+                          let file = e.target.files?.[0];
                           if (file) {
+                            // First, proactively compress/resize it
+                            file = await compressImage(file, 2);
+                            
+                            // If compression fails or it's still >2MB, reject it
+                            if (file.size > 2 * 1024 * 1024) {
+                                toast({
+                                    title: "File too large",
+                                    description: "Please upload an image smaller than 2MB.",
+                                    variant: "destructive"
+                                });
+                                // Clear selection
+                                e.target.value = "";
+                                return;
+                            }
+
                             setLogoFile(file);
                             // Set a local object URL for preview
                             setLogoUrl(URL.createObjectURL(file));
