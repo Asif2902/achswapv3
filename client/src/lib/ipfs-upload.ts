@@ -25,11 +25,13 @@ export async function uploadToIPFS(file: File): Promise<string> {
     }
 
     const cid = data.IpfsHash;
-    return `https://gateway.pinata.cloud/ipfs/${cid}`;
+    return `ipfs://${cid}`;
   } catch (err: any) {
     clearTimeout(timeoutId);
     if (err.name === 'AbortError') {
-      throw new Error("Upload timed out");
+      err.status = 504;
+      err.message = 'Pinata upload timeout for pinataJwt/pinataFormData';
+      throw err;
     }
     throw err;
   }

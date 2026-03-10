@@ -48,7 +48,9 @@ export default async function handler(req: Request) {
       });
     } catch (fetchErr: any) {
       if (fetchErr.name === 'AbortError') {
-        throw new Error('Pinata upload timeout configuration exceeded for pinataJwt/pinataFormData');
+        fetchErr.status = 504;
+        fetchErr.message = 'Pinata upload timeout for pinataJwt/pinataFormData';
+        throw fetchErr;
       }
       throw fetchErr;
     } finally {
@@ -67,6 +69,8 @@ export default async function handler(req: Request) {
     });
   } catch (err: any) {
     console.error(err);
-    return new Response(JSON.stringify({ error: 'Internal server error' }), { status: 500 });
+    const status = err.status || 500;
+    const msg = status === 500 ? 'Internal server error' : err.message;
+    return new Response(JSON.stringify({ error: msg }), { status });
   }
 }

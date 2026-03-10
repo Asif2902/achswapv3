@@ -14,6 +14,13 @@ import { compressImage } from "@/lib/image-utils";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+export function getGatewayUrlFromCid(url: string) {
+  if (url.startsWith("ipfs://")) {
+    return url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
+  }
+  return url;
+}
+
 function fmt(n: number, dp = 4): string {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
@@ -46,6 +53,7 @@ export default function LaunchToken() {
   const [logoUrl, setLogoUrl] = useState("");
   const [logoError, setLogoError] = useState(false);
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const [logoPreparing, setLogoPreparing] = useState(false);
 
   // Step 2 — Liquidity
   const [liquidityPercent, setLiquidityPercent] = useState(20);
@@ -803,29 +811,35 @@ export default function LaunchToken() {
                         onChange={async (e) => {
                           let file = e.target.files?.[0];
                           if (file) {
-                            // First, proactively compress/resize it
-                            file = await compressImage(file, 2);
-                            
-                            // If compression fails or it's still >2MB, reject it
-                            if (file.size > 2 * 1024 * 1024) {
-                                toast({
-                                    title: "File too large",
-                                    description: "Please upload an image smaller than 2MB.",
-                                    variant: "destructive"
-                                });
-                                // Clear selection
-                                e.target.value = "";
-                                return;
-                            }
+                            setLogoPreparing(true);
+                            try {
+                              // First, proactively compress/resize it
+                              file = await compressImage(file, 2);
+                              
+                              // If compression fails or it's still >2MB, reject it
+                              if (file.size > 2 * 1024 * 1024) {
+                                  toast({
+                                      title: "File too large",
+                                      description: "Please upload an image smaller than 2MB.",
+                                      variant: "destructive"
+                                  });
+                                  // Clear selection
+                                  e.target.value = "";
+                                  setLogoPreparing(false);
+                                  return;
+                              }
 
-                            if (logoUrl && logoUrl.startsWith("blob:")) {
-                              URL.revokeObjectURL(logoUrl);
-                            }
+                              if (logoUrl && logoUrl.startsWith("blob:")) {
+                                URL.revokeObjectURL(logoUrl);
+                              }
 
-                            setLogoFile(file);
-                            // Set a local object URL for preview
-                            setLogoUrl(URL.createObjectURL(file));
-                            setLogoError(false);
+                              setLogoFile(file);
+                              // Set a local object URL for preview
+                              setLogoUrl(URL.createObjectURL(file));
+                              setLogoError(false);
+                            } finally {
+                              setLogoPreparing(false);
+                            }
                           }
                         }}
                       />
@@ -848,7 +862,7 @@ export default function LaunchToken() {
                     <div className="lt-logo-preview">
                       {logoUrl && !logoError ? (
                         <img
-                          src={logoUrl}
+                          src={getGatewayUrlFromCid(logoUrl)}
                           alt="Token logo"
                           onError={() => setLogoError(true)}
                         />
@@ -874,12 +888,12 @@ export default function LaunchToken() {
               </div>
               <div className="lt-btn-row" style={{ justifyContent: "flex-end" }}>
                 <button
-                  className={`lt-btn-next ${step1Valid ? "active" : "disabled"}`}
+                  className={`lt-btn-next ${step1Valid && !logoPreparing ? "active" : "disabled"}`}
                   style={{ flex: 1, maxWidth: 240 }}
-                  onClick={() => step1Valid && setStep(2)}
-                  disabled={!step1Valid}
+                  onClick={() => step1Valid && !logoPreparing && setStep(2)}
+                  disabled={!step1Valid || logoPreparing}
                 >
-                  Set Liquidity <ChevronRight style={{ width: 16, height: 16 }} />
+                  {logoPreparing ? "Preparing image..." : "Set Liquidity"} <ChevronRight style={{ width: 16, height: 16 }} />
                 </button>
               </div>
             </div>
@@ -1068,13 +1082,13 @@ export default function LaunchToken() {
 
               </div>
               <div className="lt-btn-row">
-                <button className="lt-btn-back" onClick={() => setStep(1)} disabled={isUploadingLogo}>
+                <button className="lt-btn-back" onClick={() => setStep(1)} disabled={isUploadingLogo || logoPreparing}>
                   <ChevronLeft style={{ width: 16, height: 16 }} /> Back
                 </button>
                 <button
-                  className={`lt-btn-next ${step2Valid && !isUploadingLogo ? "active" : "disabled"}`}
+                  className={`lt-btn-next ${step2Valid && !isUploadingLogo && !logoPreparing ? "active" : "disabled"}`}
                   onClick={async () => {
-                    if (!step2Valid) return;
+                    if (!step2Valid || logoPreparing) return;
                     
                     // If there's a file but we haven't uploaded it to IPFS yet (it's a blob: URL)
                     if (logoFile && logoUrl.startsWith("blob:")) {
@@ -1134,7 +1148,7 @@ export default function LaunchToken() {
                 }}>
                   <div style={{ width: 52, height: 52, borderRadius: "50%", border: "2px solid rgba(99,102,241,0.3)", overflow: "hidden", background: "rgba(255,255,255,0.04)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     {logoUrl && !logoError
-                      ? <img src={logoUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={() => setLogoError(true)} />
+                      ? <img src={getGatewayUrlFromCid(logoUrl)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={() => setLogoError(true)} />
                       : <Coins style={{ width: 22, height: 22, color: "rgba(255,255,255,0.2)" }} />
                     }
                   </div>
@@ -1305,6 +1319,7 @@ export default function LaunchToken() {
                       setStep(1); setName(""); setSymbol(""); setTotalSupply("1000000000");
                       setLogoFile(null);
                       setLogoUrl(""); setUsdcAmount(""); setLiquidityPercent(20);
+                      setLogoError(false);
                       setDeployedToken(null); setDeployTxHash(null);
                     }}
                   >
