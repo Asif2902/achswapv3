@@ -19,6 +19,7 @@ import {
   type TimeRange,
   type TimeRangeSwapCounts,
 } from "@/lib/blocksout-api";
+import { getGatewayUrlFromCid } from "@/pages/LaunchToken";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -88,7 +89,7 @@ function bestLogo(
 ): string {
   for (const sym of symbols) {
     const found = tokens.find((t) => t.symbol === sym)?.logoURI;
-    if (found) return found;
+    if (found) return getGatewayUrlFromCid(found);
   }
   return FALLBACK_LOGO;
 }

@@ -9,8 +9,17 @@ import { useToast } from "@/hooks/use-toast";
 import { BrowserProvider, Contract, parseUnits, formatUnits } from "ethers";
 import { getContractsForChain } from "@/lib/contracts";
 import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
+import { uploadToIPFS } from "@/lib/ipfs-upload";
+import { compressImage } from "@/lib/image-utils";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+export function getGatewayUrlFromCid(url: string) {
+  if (url.startsWith("ipfs://")) {
+    return url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
+  }
+  return url;
+}
 
 function fmt(n: number, dp = 4): string {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
@@ -30,12 +39,7 @@ const STEPS = [
 ];
 
 // ─── Hosting tip links ────────────────────────────────────────────────────────
-
-const LOGO_HOSTS = [
-  { name: "PostImages", url: "https://postimages.org", free: true },
-  { name: "ImgBB", url: "https://imgbb.com", free: true },
-  { name: "Imgur", url: "https://imgur.com", free: true },
-];
+// (Removed external links since IPFS is automatic now)
 
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function LaunchToken() {
@@ -45,8 +49,11 @@ export default function LaunchToken() {
   const [name, setName] = useState("");
   const [symbol, setSymbol] = useState("");
   const [totalSupply, setTotalSupply] = useState("1000000000"); // 1B default
+  const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoUrl, setLogoUrl] = useState("");
   const [logoError, setLogoError] = useState(false);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const [logoPreparing, setLogoPreparing] = useState(false);
 
   // Step 2 — Liquidity
   const [liquidityPercent, setLiquidityPercent] = useState(20);
@@ -56,6 +63,17 @@ export default function LaunchToken() {
   const [isDeploying, setIsDeploying] = useState(false);
   const [deployedToken, setDeployedToken] = useState<string | null>(null);
   const [deployTxHash, setDeployTxHash] = useState<string | null>(null);
+
+  const previousBlobUrl = useRef<string | null>(null);
+
+  useEffect(() => {
+    previousBlobUrl.current = logoUrl;
+    return () => {
+      if (previousBlobUrl.current && previousBlobUrl.current.startsWith("blob:")) {
+        URL.revokeObjectURL(previousBlobUrl.current);
+      }
+    };
+  }, [logoUrl]);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -810,25 +828,75 @@ export default function LaunchToken() {
                   </div>
                 </div>
 
-                {/* Logo URL */}
+                {/* Logo Upload */}
                 <div className="lt-field">
                   <label className="lt-label">
-                    Logo URL
+                    Token Logo
                     <span style={{ fontSize: 10, fontWeight: 500, color: "rgba(255,255,255,0.2)", textTransform: "none", letterSpacing: 0 }}>optional</span>
                   </label>
-                  <div className="lt-logo-row">
-                    <div style={{ flex: 1 }}>
+                  <div className="lt-logo-row" style={{ alignItems: "center" }}>
+                    <div style={{ flex: 1, position: "relative" }}>
                       <input
+                        type="file"
+                        accept="image/*"
                         className="lt-input"
-                        placeholder="https://i.postimg.cc/your-logo.png"
-                        value={logoUrl}
-                        onChange={e => { setLogoUrl(e.target.value); setLogoError(false); }}
+                        id="logo-upload"
+                        style={{ display: "none" }}
+                        onChange={async (e) => {
+                          let file = e.target.files?.[0];
+                          if (file) {
+                            setLogoPreparing(true);
+                            try {
+                              // First, proactively compress/resize it
+                              file = await compressImage(file, 2);
+                              
+                              // If compression fails or it's still >2MB, reject it
+                              if (file.size > 2 * 1024 * 1024) {
+                                  toast({
+                                      title: "File too large",
+                                      description: "Please upload an image smaller than 2MB.",
+                                      variant: "destructive"
+                                  });
+                                  // Clear selection
+                                  e.target.value = "";
+                                  setLogoPreparing(false);
+                                  return;
+                              }
+
+                              if (logoUrl && logoUrl.startsWith("blob:")) {
+                                URL.revokeObjectURL(logoUrl);
+                              }
+
+                              setLogoFile(file);
+                              // Set a local object URL for preview
+                              setLogoUrl(URL.createObjectURL(file));
+                              setLogoError(false);
+                            } finally {
+                              setLogoPreparing(false);
+                            }
+                          }
+                        }}
                       />
+                      <label 
+                        htmlFor="logo-upload" 
+                        style={{
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: "8px",
+                          background: "rgba(255,255,255,0.04)", border: "1px dashed rgba(255,255,255,0.2)",
+                          borderRadius: "12px", padding: "13px 16px", cursor: "pointer",
+                          color: logoFile ? "white" : "rgba(255,255,255,0.4)", fontSize: 14, fontWeight: 600,
+                          transition: "all 0.2s"
+                        }}
+                        onMouseEnter={(e) => e.currentTarget.style.borderColor = "rgba(99,102,241,0.5)"}
+                        onMouseLeave={(e) => e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)"}
+                      >
+                        <ImageIcon style={{ width: 18, height: 18 }} />
+                        {logoFile ? logoFile.name : "Click to select logo image"}
+                      </label>
                     </div>
                     <div className="lt-logo-preview">
                       {logoUrl && !logoError ? (
                         <img
-                          src={logoUrl}
+                          src={getGatewayUrlFromCid(logoUrl)}
                           alt="Token logo"
                           onError={() => setLogoError(true)}
                         />
@@ -840,34 +908,26 @@ export default function LaunchToken() {
                   {logoError && (
                     <span className="lt-hint" style={{ color: "#f87171" }}>
                       <AlertTriangle style={{ width: 12, height: 12, color: "#f87171" }} />
-                      Can't load this image URL. Try a different direct link.
+                      Cannot preview this image. Please select a valid image file.
                     </span>
                   )}
                   <div style={{ marginTop: 4 }}>
                     <span className="lt-hint" style={{ marginBottom: 6, display: "flex" }}>
                       <Info style={{ width: 12, height: 12 }} />
-                      Upload your logo to a free host, then paste the <strong style={{ color: "rgba(255,255,255,0.5)" }}>direct image link</strong>
+                      Image will be automatically uploaded to decentralized IPFS storage on Review.
                     </span>
-                    <div className="lt-hosts">
-                      <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", fontWeight: 600 }}>FREE HOSTS:</span>
-                      {LOGO_HOSTS.map(h => (
-                        <a key={h.name} href={h.url} target="_blank" rel="noopener noreferrer" className="lt-host-chip">
-                          {h.name} <ExternalLink style={{ width: 9, height: 9 }} />
-                        </a>
-                      ))}
-                    </div>
                   </div>
                 </div>
 
               </div>
               <div className="lt-btn-row" style={{ justifyContent: "flex-end" }}>
                 <button
-                  className={`lt-btn-next ${step1Valid ? "active" : "disabled"}`}
+                  className={`lt-btn-next ${step1Valid && !logoPreparing ? "active" : "disabled"}`}
                   style={{ flex: 1, maxWidth: 240 }}
-                  onClick={() => step1Valid && setStep(2)}
-                  disabled={!step1Valid}
+                  onClick={() => step1Valid && !logoPreparing && setStep(2)}
+                  disabled={!step1Valid || logoPreparing}
                 >
-                  Set Liquidity <ChevronRight style={{ width: 16, height: 16 }} />
+                  {logoPreparing ? "Preparing image..." : "Set Liquidity"} <ChevronRight style={{ width: 16, height: 16 }} />
                 </button>
               </div>
             </div>
@@ -1056,15 +1116,43 @@ export default function LaunchToken() {
 
               </div>
               <div className="lt-btn-row">
-                <button className="lt-btn-back" onClick={() => setStep(1)}>
+                <button className="lt-btn-back" onClick={() => setStep(1)} disabled={isUploadingLogo || logoPreparing}>
                   <ChevronLeft style={{ width: 16, height: 16 }} /> Back
                 </button>
                 <button
-                  className={`lt-btn-next ${step2Valid ? "active" : "disabled"}`}
-                  onClick={() => step2Valid && setStep(3)}
-                  disabled={!step2Valid}
+                  className={`lt-btn-next ${step2Valid && !isUploadingLogo && !logoPreparing ? "active" : "disabled"}`}
+                  onClick={async () => {
+                    if (!step2Valid || logoPreparing) return;
+                    
+                    // If there's a file but we haven't uploaded it to IPFS yet (it's a blob: URL)
+                    if (logoFile && logoUrl.startsWith("blob:")) {
+                      setIsUploadingLogo(true);
+                      try {
+                        const ipfsLink = await uploadToIPFS(logoFile);
+                        setLogoUrl(ipfsLink);
+                        setStep(3);
+                      } catch (err: any) {
+                        toast({
+                          title: "Failed to upload logo",
+                          description: err.message || "IPFS upload failed. Please try again.",
+                          variant: "destructive"
+                        });
+                        // Stay on step 2, allow them to retry or change picture
+                      } finally {
+                        setIsUploadingLogo(false);
+                      }
+                    } else {
+                      // No logo, or already uploaded IPFS URL
+                      setStep(3);
+                    }
+                  }}
+                  disabled={!step2Valid || isUploadingLogo}
                 >
-                  Review <ChevronRight style={{ width: 16, height: 16 }} />
+                  {isUploadingLogo ? (
+                    <>Uploading... <span className="lt-spin" /></>
+                  ) : (
+                    <>Review <ChevronRight style={{ width: 16, height: 16 }} /></>
+                  )}
                 </button>
               </div>
             </div>
@@ -1094,7 +1182,7 @@ export default function LaunchToken() {
                 }}>
                   <div style={{ width: 52, height: 52, borderRadius: "50%", border: "2px solid rgba(99,102,241,0.3)", overflow: "hidden", background: "rgba(255,255,255,0.04)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
                     {logoUrl && !logoError
-                      ? <img src={logoUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={() => setLogoError(true)} />
+                      ? <img src={getGatewayUrlFromCid(logoUrl)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} onError={() => setLogoError(true)} />
                       : <Coins style={{ width: 22, height: 22, color: "rgba(255,255,255,0.2)" }} />
                     }
                   </div>
@@ -1272,8 +1360,13 @@ export default function LaunchToken() {
                   <button
                     className="lt-success-btn secondary"
                     onClick={() => {
+                      if (logoUrl && logoUrl.startsWith("blob:")) {
+                        URL.revokeObjectURL(logoUrl);
+                      }
                       setStep(1); setName(""); setSymbol(""); setTotalSupply("1000000000");
+                      setLogoFile(null);
                       setLogoUrl(""); setUsdcAmount(""); setLiquidityPercent(20);
+                      setLogoError(false);
                       setDeployedToken(null); setDeployTxHash(null);
                     }}
                   >
