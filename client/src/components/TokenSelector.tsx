@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users } from "lucide-react";
-import { useAccount, useBalance, useChainId } from "wagmi";
 import { isAddress } from "ethers";
+import { useAccount, useBalance, useChainId } from "wagmi";
 import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
 import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
@@ -13,7 +13,6 @@ interface TokenSelectorProps {
   tokens: Token[];
   onImport?: (address: string) => Promise<Token | null>;
 }
-
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: TokenSelectorProps) {
