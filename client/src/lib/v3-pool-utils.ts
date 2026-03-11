@@ -1,6 +1,5 @@
-import { Contract, ZeroAddress } from "ethers";
+import { Contract, ZeroAddress, decodeBytes32String, formatUnits } from "ethers";
 import type { JsonRpcProvider } from "ethers";
-import { formatUnits } from "ethers";
 import type { Token } from "@shared/schema";
 import { V3_FACTORY_ABI, V3_POOL_ABI, FEE_TIER_LABELS } from "./abis/v3";
 import { createAlchemyProvider } from "./config";
@@ -122,19 +121,46 @@ export async function safeTokenInfo(
   // 3. RPC fallback — fetch each field independently so one failure
   //    does not kill the rest.
   const contract  = new Contract(address, ERC20_ABI, provider);
+  const contractBytes32 = new Contract(address, [
+    "function symbol() external view returns (bytes32)",
+    "function name() external view returns (bytes32)"
+  ], provider);
+  
   const shortAddr = `${address.slice(0, 6)}…${address.slice(-4)}`;
 
-  const [symbol, decimals, name] = await Promise.all([
-    contract.symbol().catch(() => shortAddr),
-    contract.decimals().catch(() => 18),
-    contract.name().catch(() => `Token ${shortAddr}`),
-  ]);
+  // Symbol fallback logic (string -> bytes32 -> short address)
+  let symbol = shortAddr;
+  try {
+    const s = await contract.symbol();
+    if (s && s.length > 0) symbol = s;
+  } catch (e) {
+    try {
+      const s32 = await contractBytes32.symbol();
+      const s = decodeBytes32String(s32);
+      if (s && s.length > 0) symbol = s;
+    } catch (e2) {}
+  }
 
-  const info: TokenInfo = {
-    symbol:   typeof symbol === "string" && symbol.length > 0 ? symbol   : shortAddr,
-    decimals: Number(decimals) || 18,
-    name:     typeof name   === "string" && name.length   > 0 ? name     : `Token ${shortAddr}`,
-  };
+  // Name fallback logic (string -> bytes32 -> Token shortAddr)
+  let name = `Token ${shortAddr}`;
+  try {
+    const n = await contract.name();
+    if (n && n.length > 0) name = n;
+  } catch (e) {
+    try {
+      const n32 = await contractBytes32.name();
+      const n = decodeBytes32String(n32);
+      if (n && n.length > 0) name = n;
+    } catch (e2) {}
+  }
+
+  // Decimals fallback logic
+  let decimals = 18;
+  try {
+    decimals = Number(await contract.decimals());
+  } catch (e) {}
+
+  const info: TokenInfo = { symbol, decimals, name };
   tokenInfoCache.set(key, info);
   return info;
 }
