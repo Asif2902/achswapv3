@@ -85,9 +85,15 @@ export function RemoveLiquidityV2() {
   const hasAutoSelected = useRef(false);
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
-  const getTokenLogo = (symbol: string): string =>
-    tokens.find((t) => t.symbol.toLowerCase() === symbol.toLowerCase())?.logoURI ??
-    "/img/logos/unknown-token.png";
+  const getTokenLogo = (symbol: string): string => {
+    // Override wUSDC to use USDC logo
+    const lookupSymbol = symbol.toLowerCase() === "wusdc" ? "usdc" : symbol;
+    return tokens.find((t) => t.symbol.toLowerCase() === lookupSymbol.toLowerCase())?.logoURI ??
+      "/img/logos/unknown-token.png";
+  };
+
+  const getDisplaySymbol = (symbol: string): string => 
+    symbol.toLowerCase() === "wusdc" ? "USDC" : symbol;
 
   // FIX 7: Get wrapped native address from your existing utility instead of hardcoding
   const wNative = chainId ? getWrappedAddress(chainId, ZERO_ADDRESS) : null;
@@ -583,7 +589,7 @@ export function RemoveLiquidityV2() {
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-bold text-white">
-                            {position.token0Symbol}/{position.token1Symbol}
+                            {getDisplaySymbol(position.token0Symbol)}/{getDisplaySymbol(position.token1Symbol)}
                           </span>
                           <span
                             className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full"
@@ -644,7 +650,7 @@ export function RemoveLiquidityV2() {
                               {fmt(position.amount0, position.token0Decimals)}
                             </p>
                             <p className="text-[11px] text-white/40">
-                              {position.token0Symbol}
+                              {getDisplaySymbol(position.token0Symbol)}
                             </p>
                           </div>
                         </div>
@@ -662,7 +668,7 @@ export function RemoveLiquidityV2() {
                               {fmt(position.amount1, position.token1Decimals)}
                             </p>
                             <p className="text-[11px] text-white/40">
-                              {position.token1Symbol}
+                              {getDisplaySymbol(position.token1Symbol)}
                             </p>
                           </div>
                         </div>
@@ -751,7 +757,7 @@ export function RemoveLiquidityV2() {
                                   )}
                                 </p>
                                 <p className="text-[11px] text-white/40">
-                                  {position.token0Symbol}
+                                  {getDisplaySymbol(position.token0Symbol)}
                                 </p>
                               </div>
                             </div>
@@ -772,7 +778,7 @@ export function RemoveLiquidityV2() {
                                   )}
                                 </p>
                                 <p className="text-[11px] text-white/40">
-                                  {position.token1Symbol}
+                                  {getDisplaySymbol(position.token1Symbol)}
                                 </p>
                               </div>
                             </div>
