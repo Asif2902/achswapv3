@@ -59,89 +59,81 @@ export async function fetchAllPools(
       Array.from({ length }, (_, i) => factory.allPairs(i)),
     );
 
-    // Chunk the pair addresses to prevent RPC rate-limit flooding
-    const chunk_size = 5;
-    const poolResults: (PoolData | null)[] = [];
-    
-    for (let i = 0; i < pairAddresses.length; i += chunk_size) {
-      const chunk = pairAddresses.slice(i, i + chunk_size);
-      const chunkResults = await Promise.all(
-        chunk.map(async (pairAddress): Promise<PoolData | null> => {
+    // Fetch pool data for each pair in parallel (the batch provider limits concurrency under the hood)
+    const poolResults = await Promise.all(
+      pairAddresses.map(async (pairAddress): Promise<PoolData | null> => {
+        try {
+          const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
+
+          // Get basic pair info — all 4 calls batched into one HTTP request
+          let token0Address: string;
+          let token1Address: string;
+          let reserves: any;
+          let totalSupply: bigint;
+
           try {
-            const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
-
-            let token0Address: string;
-            let token1Address: string;
-            let reserves: any;
-            let totalSupply: bigint;
-
-            try {
-              [token0Address, token1Address, reserves, totalSupply] = await Promise.all([
-                pairContract.token0(),
-                pairContract.token1(),
-                pairContract.getReserves(),
-                pairContract.totalSupply(),
-              ]);
-            } catch (error) {
-              console.error(`Failed to fetch basic pair info for ${pairAddress}:`, error);
-              return null;
-            }
-
-            const [info0, info1] = await Promise.all([
-              safeTokenInfo(token0Address, provider, knownTokens),
-              safeTokenInfo(token1Address, provider, knownTokens),
+            [token0Address, token1Address, reserves, totalSupply] = await Promise.all([
+              pairContract.token0(),
+              pairContract.token1(),
+              pairContract.getReserves(),
+              pairContract.totalSupply(),
             ]);
-
-            if (isWrappedTokenPair(info0.symbol, info1.symbol, chainId)) {
-              console.log(`Skipping wrapped token pair: ${info0.symbol}/${info1.symbol}`);
-              return null;
-            }
-
-            const reserve0 = reserves[0];
-            const reserve1 = reserves[1];
-
-            const reserve0Formatted = formatUnits(reserve0, info0.decimals);
-            const reserve1Formatted = formatUnits(reserve1, info1.decimals);
-
-            const tvlUSD = calculateTVL(
-              info0.symbol,
-              info1.symbol,
-              parseFloat(reserve0Formatted),
-              parseFloat(reserve1Formatted),
-              chainId
-            );
-
-            return {
-              pairAddress,
-              token0: {
-                address: token0Address,
-                symbol: info0.symbol,
-                displaySymbol: getDisplaySymbol(info0.symbol, chainId),
-                decimals: info0.decimals,
-                name: info0.name,
-              },
-              token1: {
-                address: token1Address,
-                symbol: info1.symbol,
-                displaySymbol: getDisplaySymbol(info1.symbol, chainId),
-                decimals: info1.decimals,
-                name: info1.name,
-              },
-              reserve0,
-              reserve1,
-              reserve0Formatted,
-              reserve1Formatted,
-              tvlUSD,
-              totalSupply,
-            };
           } catch (error) {
-            console.error(`Failed to fetch data for pair ${pairAddress}:`, error);
+            console.error(`Failed to fetch basic pair info for ${pairAddress}:`, error);
             return null;
           }
-        }),
-      );
-      poolResults.push(...chunkResults);
-    }
+
+          // Fetch token info in parallel (uses cached metadata when available)
+          const [info0, info1] = await Promise.all([
+            safeTokenInfo(token0Address, provider, knownTokens),
+            safeTokenInfo(token1Address, provider, knownTokens),
+          ]);
+
+          const reserve0 = reserves[0];
+          const reserve1 = reserves[1];
+
+          // Format reserves
+          const reserve0Formatted = formatUnits(reserve0, info0.decimals);
+          const reserve1Formatted = formatUnits(reserve1, info1.decimals);
+
+          // Calculate TVL in USD using chain-specific logic
+          const tvlUSD = calculateTVL(
+            info0.symbol,
+            info1.symbol,
+            parseFloat(reserve0Formatted),
+            parseFloat(reserve1Formatted),
+            chainId
+          );
+
+          return {
+            pairAddress,
+            token0: {
+              address: token0Address,
+              symbol: info0.symbol,
+              displaySymbol: getDisplaySymbol(info0.symbol, chainId),
+              decimals: info0.decimals,
+              name: info0.name,
+            },
+            token1: {
+              address: token1Address,
+              symbol: info1.symbol,
+              displaySymbol: getDisplaySymbol(info1.symbol, chainId),
+              decimals: info1.decimals,
+              name: info1.name,
+            },
+            reserve0,
+            reserve1,
+            reserve0Formatted,
+            reserve1Formatted,
+            tvlUSD,
+            totalSupply,
+          };
+        } catch (error) {
+          console.error(`Failed to fetch data for pair ${pairAddress}:`, error);
+          return null;
+        }
+      }),
+    );
 
     return poolResults.filter((p): p is PoolData => p !== null);
   } catch (error) {

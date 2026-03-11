@@ -191,67 +191,86 @@ export async function fetchAllV3Pools(
   const provider = createAlchemyProvider(chainId);
   const factory  = new Contract(factoryAddress, V3_FACTORY_ABI, provider);
 
-  // ── Phase 1: discover pool addresses (throttled parallel) ─────────────────
+  // ── Phase 1: discover pool addresses ──────────────────────────────────────
   const discovered = new Map<string, number>();
 
   console.log("[V3] Known tokens:", knownTokens.map(t => t.symbol));
 
-  // Determine standard base tokens (e.g. USDC, wUSDC, ACHS)
-  const BASE_SYMBOLS = ["usdc", "wusdc", "achs"];
-  const isBase = (t: Token) => {
-    const s = t.symbol || "";
-    return BASE_SYMBOLS.includes(s.toLowerCase());
-  };
-
-  // Build (tokenA, tokenB, fee) combinations to check
-  // We only pair (tokenI, tokenJ) if AT LEAST ONE of them is a base token.
-  // This avoids checking every meme token against every other meme token.
-  const discoveryTasks: (() => Promise<void>)[] = [];
-  for (let i = 0; i < knownTokens.length; i++) {
-    for (let j = i + 1; j < knownTokens.length; j++) {
-      const tokenI = knownTokens[i];
-      const tokenJ = knownTokens[j];
-
-      if (!isBase(tokenI) && !isBase(tokenJ)) {
-        // Both are non-base tokens (e.g. community tokens). Skip pairing to avoid O(N^2) explosion.
-        continue;
-      }
-
-      for (const fee of ALL_FEE_TIERS) {
-        // Check ALL pairs - the batch provider handles the load efficiently
-        discoveryTasks.push(async () => {
-          try {
-            const poolAddress: string = await factory.getPool(
-              tokenI.address,
-              tokenJ.address,
-              fee,
-            );
-            if (
-              !poolAddress ||
-              poolAddress === ZeroAddress ||
-              discovered.has(poolAddress.toLowerCase())
-            ) {
-              return;
+  try {
+    // Attempt 1: Discover pools via Blockscout API (Fastest, 1 HTTP call, bypassing RPC range limits)
+    console.log("[V3] Fetching PoolCreated logs from explorer API...");
+    const url = `https://testnet.arcscan.app/api?module=logs&action=getLogs&fromBlock=0&toBlock=latest&address=${factoryAddress}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    
+    if (data && data.result && Array.isArray(data.result)) {
+      const iface = factory.interface;
+      for (const log of data.result) {
+        try {
+          const parsed = iface.parseLog({
+            topics: log.topics,
+            data: log.data
+          });
+          if (parsed && parsed.name === "PoolCreated") {
+            const poolAddress = parsed.args[4] as string;
+            const fee = Number(parsed.args[2]);
+            if (poolAddress && poolAddress !== ZeroAddress) {
+              discovered.set(poolAddress.toLowerCase(), fee);
             }
-            discovered.set(poolAddress.toLowerCase(), fee);
-            console.log(
-              `[V3] Discovered pool ${poolAddress} ` +
-              `(${tokenI.symbol}/${tokenJ.symbol} fee=${fee})`,
-            );
-          } catch {
-            // No pool for this combination — completely expected.
           }
-        });
+        } catch (e) {
+          // Ignore parse errors on irrelevant logs
+        }
       }
+      console.log(`[V3] API discovery found ${discovered.size} pools.`);
     }
+  } catch (err) {
+    console.warn("[V3] API discovery failed, falling back to pairwise matching:", err);
   }
 
-  // Run discovery with higher concurrency for faster results.
-  // The batch provider packs concurrent eth_calls into single HTTP requests.
-  try {
-    await pAll(discoveryTasks, 10);
-  } catch (err) {
-    console.error("[V3] Phase 1 discovery error:", err);
+  // Attempt 2: Fallback if API fetching failed or doesn't support it
+  if (discovered.size === 0) {
+    console.log("[V3] Using pairwise fallback discovery.");
+    
+    // Check all combinations, letting the BatchProvider handle rate limits naturally.
+    const discoveryTasks: (() => Promise<void>)[] = [];
+    for (let i = 0; i < knownTokens.length; i++) {
+        for (let j = i + 1; j < knownTokens.length; j++) {
+            const tokenI = knownTokens[i];
+            const tokenJ = knownTokens[j];
+
+            for (const fee of ALL_FEE_TIERS) {
+                discoveryTasks.push(async () => {
+                    try {
+                        const poolAddress: string = await factory.getPool(
+                            tokenI.address,
+                            tokenJ.address,
+                            fee,
+                        );
+                        if (
+                            poolAddress &&
+                            poolAddress !== ZeroAddress &&
+                            !discovered.has(poolAddress.toLowerCase())
+                        ) {
+                            discovered.set(poolAddress.toLowerCase(), fee);
+                            console.log(
+                                `[V3] Discovered pool ${poolAddress} ` +
+                                `(${tokenI.symbol}/${tokenJ.symbol} fee=${fee})`,
+                            );
+                        }
+                    } catch {
+                        // No pool for this combination
+                    }
+                });
+            }
+        }
+    }
+
+    try {
+      await pAll(discoveryTasks, 20);
+    } catch (err) {
+      console.error("[V3] Phase 1 discovery error:", err);
+    }
   }
 
   console.log(`[V3] Phase 1 done — ${discovered.size} unique pool(s) found`);
