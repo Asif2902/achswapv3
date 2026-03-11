@@ -186,11 +186,15 @@ export async function fetchAllV3Pools(
   chainId: number,
   knownTokens: Token[],
 ): Promise<V3PoolData[]> {
+  console.log("[V3] Starting pool discovery with", knownTokens.length, "tokens");
+  
   const provider = createAlchemyProvider(chainId);
   const factory  = new Contract(factoryAddress, V3_FACTORY_ABI, provider);
 
   // ── Phase 1: discover pool addresses (throttled parallel) ─────────────────
   const discovered = new Map<string, number>();
+
+  console.log("[V3] Known tokens:", knownTokens.map(t => t.symbol));
 
   // Build all (tokenA, tokenB, fee) combinations to check
   const discoveryTasks: (() => Promise<void>)[] = [];
@@ -234,7 +238,11 @@ export async function fetchAllV3Pools(
   // Run discovery with bounded concurrency.
   // The batch provider packs concurrent eth_calls into a single HTTP request,
   // so 5 concurrent = ~1 HTTP round-trip per batch.  18 combinations = ~4 HTTP requests.
-  await pAll(discoveryTasks, 5);
+  try {
+    await pAll(discoveryTasks, 5);
+  } catch (err) {
+    console.error("[V3] Phase 1 discovery error:", err);
+  }
 
   console.log(`[V3] Phase 1 done — ${discovered.size} unique pool(s) found`);
 

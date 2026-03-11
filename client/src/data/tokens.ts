@@ -14,6 +14,8 @@ let _communityCache: { tokens: CommunityToken[]; ts: number } | null = null;
 // Ensure gateway URL is consistent with LaunchToken
 function getGatewayUrlFromCid(cidOrUrl: string): string {
   if (!cidOrUrl) return "/img/logos/unknown-token.png";
+  // Handle local paths (already in correct format)
+  if (cidOrUrl.startsWith("/img/") || cidOrUrl.startsWith("data:")) return cidOrUrl;
   if (cidOrUrl.startsWith("http")) return cidOrUrl;
   if (cidOrUrl.startsWith("ipfs://")) {
     return cidOrUrl.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
