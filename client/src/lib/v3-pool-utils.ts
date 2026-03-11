@@ -111,9 +111,9 @@ export async function safeTokenInfo(
   );
   if (known) {
     const info: TokenInfo = {
-      symbol:   known.symbol   ?? address.slice(0, 8),
+      symbol:   known.symbol || `${address.slice(0, 6)}…${address.slice(-4)}`,
       decimals: known.decimals ?? 18,
-      name:     known.name     ?? known.symbol ?? address.slice(0, 8),
+      name:     known.name || known.symbol || `Token ${address.slice(0, 6)}…${address.slice(-4)}`,
     };
     tokenInfoCache.set(key, info);
     return info;
@@ -196,14 +196,28 @@ export async function fetchAllV3Pools(
 
   console.log("[V3] Known tokens:", knownTokens.map(t => t.symbol));
 
-  // Build all (tokenA, tokenB, fee) combinations to check
+  // Determine standard base tokens (e.g. USDC, wUSDC, ACHS)
+  const BASE_SYMBOLS = ["usdc", "wusdc", "achs"];
+  const isBase = (t: Token) => {
+    const s = t.symbol || "";
+    return BASE_SYMBOLS.includes(s.toLowerCase());
+  };
+
+  // Build (tokenA, tokenB, fee) combinations to check
+  // We only pair (tokenI, tokenJ) if AT LEAST ONE of them is a base token.
+  // This avoids checking every meme token against every other meme token.
   const discoveryTasks: (() => Promise<void>)[] = [];
   for (let i = 0; i < knownTokens.length; i++) {
     for (let j = i + 1; j < knownTokens.length; j++) {
-      for (const fee of ALL_FEE_TIERS) {
-        const tokenI = knownTokens[i];
-        const tokenJ = knownTokens[j];
+      const tokenI = knownTokens[i];
+      const tokenJ = knownTokens[j];
 
+      if (!isBase(tokenI) && !isBase(tokenJ)) {
+        // Both are non-base tokens (e.g. community tokens). Skip pairing to avoid O(N^2) explosion.
+        continue;
+      }
+
+      for (const fee of ALL_FEE_TIERS) {
         // Check ALL pairs - the batch provider handles the load efficiently
         discoveryTasks.push(async () => {
           try {

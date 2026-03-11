@@ -48,8 +48,8 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
 
       result.push({
         address: info.tokenAddress,
-        name: info.name,
-        symbol: info.symbol,
+        name: info.name || info.symbol || `Token …${info.tokenAddress.slice(-4)}`,
+        symbol: info.symbol || `${info.tokenAddress.slice(0, 6)}…${info.tokenAddress.slice(-4)}`,
         decimals: 18,
         logoURI: info.logoUrl ? getGatewayUrlFromCid(info.logoUrl) : "/img/logos/unknown-token.png",
         verified: false,
