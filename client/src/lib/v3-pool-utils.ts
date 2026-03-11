@@ -199,6 +199,11 @@ export async function fetchAllV3Pools(
       for (const fee of ALL_FEE_TIERS) {
         const tokenI = knownTokens[i];
         const tokenJ = knownTokens[j];
+
+        // Optimization: Do not check V3 pairs between two unverified (community) tokens.
+        // This drops O(N^2) RPC combinations down to O(N), preventing rate-limit hangups.
+        if (!tokenI.verified && !tokenJ.verified) continue;
+
         discoveryTasks.push(async () => {
           try {
             const poolAddress: string = await factory.getPool(

@@ -159,5 +159,11 @@ export async function fetchTokensWithCommunity(chainId: number): Promise<Token[]
   const defaultsSet = new Set(defaults.map(t => t.address.toLowerCase()));
   const filteredCommunities = communities.filter(t => !defaultsSet.has(t.address.toLowerCase()));
 
-  return [...defaults, ...filteredCommunities];
+  const allTokens = [...defaults, ...filteredCommunities];
+
+  // Ensure ALL tokens have their IPFS/gateway URLs properly formatted
+  return allTokens.map(t => ({
+    ...t,
+    logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : "/img/logos/unknown-token.png"
+  }));
 }
