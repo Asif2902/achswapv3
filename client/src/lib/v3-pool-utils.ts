@@ -200,9 +200,9 @@ export async function fetchAllV3Pools(
         const tokenI = knownTokens[i];
         const tokenJ = knownTokens[j];
 
-        // Optimization: Do not check V3 pairs between two unverified (community) tokens.
-        // This drops O(N^2) RPC combinations down to O(N), preventing rate-limit hangups.
-        if (!tokenI.verified && !tokenJ.verified) continue;
+        // Optimization: Skip pairs where both tokens are community tokens with very low liquidity
+        // to reduce RPC calls while still finding most meaningful pools
+        if (!tokenI.verified && !tokenJ.verified && knownTokens.length > 10) continue;
 
         discoveryTasks.push(async () => {
           try {

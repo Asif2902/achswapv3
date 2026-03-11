@@ -86,7 +86,7 @@ export function RemoveLiquidityV2() {
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
   const getTokenLogo = (symbol: string): string =>
-    tokens.find((t) => t.symbol === symbol)?.logoURI ??
+    tokens.find((t) => t.symbol.toLowerCase() === symbol.toLowerCase())?.logoURI ??
     "/img/logos/unknown-token.png";
 
   // FIX 7: Get wrapped native address from your existing utility instead of hardcoding

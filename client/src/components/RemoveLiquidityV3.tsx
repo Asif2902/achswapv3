@@ -182,7 +182,7 @@ export function RemoveLiquidityV3() {
   }, [chainId]);
 
   const getTokenLogo = (symbol: string): string =>
-    tokens.find((t) => t.symbol === symbol)?.logoURI ??
+    tokens.find((t) => t.symbol.toLowerCase() === symbol.toLowerCase())?.logoURI ??
     "/img/logos/unknown-token.png";
 
   // Display helpers: show wUSDC as "USDC" in the UI since we auto-unwrap

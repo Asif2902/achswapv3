@@ -1,6 +1,7 @@
 import { Token } from "@shared/schema";
 import { Contract, JsonRpcProvider } from "ethers";
 import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
+import { createAlchemyProvider } from "@/lib/config";
 
 export interface CommunityToken extends Token {
   community: true;
@@ -10,15 +11,15 @@ export interface CommunityToken extends Token {
 const COMMUNITY_CACHE_TTL = 5 * 60 * 1000; // 5 min
 let _communityCache: { tokens: CommunityToken[]; ts: number } | null = null;
 
-// Ensure gateway URL is consistent, mimicking that of LaunchToken
+// Ensure gateway URL is consistent with LaunchToken
 function getGatewayUrlFromCid(cidOrUrl: string): string {
-  if (!cidOrUrl) return "";
+  if (!cidOrUrl) return "/img/logos/unknown-token.png";
   if (cidOrUrl.startsWith("http")) return cidOrUrl;
-  const match = cidOrUrl.match(/ipfs:\/\/([^/]+)(?:\/(.*))?/);
-  if (match) {
-    return `https://${match[1]}.ipfs.w3s.link${match[2] ? `/${match[2]}` : ""}`;
+  if (cidOrUrl.startsWith("ipfs://")) {
+    return cidOrUrl.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
   }
-  return `https://${cidOrUrl}.ipfs.w3s.link`;
+  // Handle direct CID without protocol
+  return `https://gateway.pinata.cloud/ipfs/${cidOrUrl}`;
 }
 
 export async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> {
@@ -31,7 +32,8 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
   }
 
   try {
-    const provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
+    // Use the batch provider for better performance
+    const provider = createAlchemyProvider(chainId);
     const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
 
     const [infos, liquidities] = await factory.getAllTokensLiquidity();
