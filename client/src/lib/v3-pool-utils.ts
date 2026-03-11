@@ -208,7 +208,7 @@ export async function fetchAllV3Pools(
       for (const log of data.result) {
         try {
           const parsed = iface.parseLog({
-            topics: log.topics,
+            topics: log.topics.filter((t: string | null) => t !== null),
             data: log.data
           });
           if (parsed && parsed.name === "PoolCreated") {
