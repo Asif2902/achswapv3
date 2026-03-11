@@ -195,10 +195,7 @@ export function RemoveLiquidityV2() {
       for (let i = 0; i < rawPairsData.length; i++) {
         try {
           const [pairAddress, token0Address, token1Address, reserves, totalSupply, liquidity] = rawPairsData[i] as [string, string, string, any, bigint, bigint];
-          let [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = rawTokensData[i] as [string, bigint, string, bigint];
-
-          if (token0Symbol.toLowerCase() === 'wusdc') token0Symbol = 'USDC';
-          if (token1Symbol.toLowerCase() === 'wusdc') token1Symbol = 'USDC';
+          const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = rawTokensData[i] as [string, bigint, string, bigint];
 
           const r0 = BigInt(reserves.reserve0);
           const r1 = BigInt(reserves.reserve1);
@@ -302,16 +299,13 @@ export function RemoveLiquidityV2() {
       const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
       const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
 
-      let [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
+      const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
         await Promise.all([
           token0Contract.symbol(),
           token0Contract.decimals(),
           token1Contract.symbol(),
           token1Contract.decimals(),
         ]);
-
-      if (token0Symbol.toLowerCase() === 'wusdc') token0Symbol = 'USDC';
-      if (token1Symbol.toLowerCase() === 'wusdc') token1Symbol = 'USDC';
 
       const r0 = BigInt(reserves.reserve0);
       const r1 = BigInt(reserves.reserve1);
