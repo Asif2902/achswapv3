@@ -12,7 +12,8 @@ import { useChainId } from "wagmi";
 import { fetchAllPools, type PoolData } from "@/lib/pool-utils";
 import { fetchAllV3Pools, type V3PoolData } from "@/lib/v3-pool-utils";
 import { getContractsForChain } from "@/lib/contracts";
-import { getTokensByChainId, isWrappedToken } from "@/data/tokens";
+import type { Token } from "@shared/schema";
+import { fetchTokensWithCommunity, getTokensByChainId, isWrappedToken } from "@/data/tokens";
 import {
   fetchTimeRangeSwapCounts,
   TIME_RANGE_LABELS,
@@ -84,7 +85,7 @@ function fmtReserve(value: string): string {
 }
 
 function bestLogo(
-  tokens: ReturnType<typeof getTokensByChainId>,
+  tokens: Token[],
   ...symbols: string[]
 ): string {
   for (const sym of symbols) {
@@ -96,7 +97,7 @@ function bestLogo(
 
 function normaliseV2(
   raw: PoolData[],
-  tokens: ReturnType<typeof getTokensByChainId>,
+  tokens: Token[],
 ): DisplayPool[] {
   return raw.map((p) => ({
     key: p.pairAddress,
@@ -116,7 +117,7 @@ function normaliseV2(
 
 function normaliseV3(
   raw: V3PoolData[],
-  tokens: ReturnType<typeof getTokensByChainId>,
+  tokens: Token[],
   chainId: number,
 ): DisplayPool[] {
   const disp = (addr: string, sym: string) =>
@@ -196,7 +197,6 @@ export default function Analytics() {
 
   let contracts: ReturnType<typeof getContractsForChain> | null = null;
   try { contracts = chainId ? getContractsForChain(chainId) : null; } catch { /* unknown chain */ }
-  const tokens = chainId ? getTokensByChainId(chainId) : [];
 
   // ── Load pool data ───────────────────────────────────────────────────────
   const loadPools = useCallback(
@@ -216,6 +216,7 @@ export default function Analytics() {
       setIsLoading(true);
 
       try {
+        const tokens = await fetchTokensWithCommunity(chainId);
         const [rawV2, rawV3] = await Promise.all([
           fetchAllPools(contracts.v2.factory, chainId, tokens),
           fetchAllV3Pools(contracts.v3.factory, chainId, tokens),

@@ -1,4 +1,70 @@
 import { Token } from "@shared/schema";
+import { Contract, JsonRpcProvider } from "ethers";
+import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
+
+export interface CommunityToken extends Token {
+  community: true;
+  nativeAdded: string; // formatted USDC
+}
+
+const COMMUNITY_CACHE_TTL = 5 * 60 * 1000; // 5 min
+let _communityCache: { tokens: CommunityToken[]; ts: number } | null = null;
+
+// Ensure gateway URL is consistent, mimicking that of LaunchToken
+function getGatewayUrlFromCid(cidOrUrl: string): string {
+  if (!cidOrUrl) return "";
+  if (cidOrUrl.startsWith("http")) return cidOrUrl;
+  const match = cidOrUrl.match(/ipfs:\/\/([^/]+)(?:\/(.*))?/);
+  if (match) {
+    return `https://${match[1]}.ipfs.w3s.link${match[2] ? `/${match[2]}` : ""}`;
+  }
+  return `https://${cidOrUrl}.ipfs.w3s.link`;
+}
+
+export async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> {
+  // Only on Arc testnet
+  if (chainId !== 5042002) return [];
+
+  // Use cache if fresh
+  if (_communityCache && Date.now() - _communityCache.ts < COMMUNITY_CACHE_TTL) {
+    return _communityCache.tokens;
+  }
+
+  try {
+    const provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
+    const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
+
+    const [infos, liquidities] = await factory.getAllTokensLiquidity();
+
+    const result: CommunityToken[] = [];
+    for (let i = 0; i < infos.length; i++) {
+      const info = infos[i];
+      const liq = liquidities[i];
+      if (!liq.hasEnoughLiquidity) continue; // ≥500 USDC threshold
+
+      result.push({
+        address: info.tokenAddress,
+        name: info.name,
+        symbol: info.symbol,
+        decimals: 18,
+        logoURI: info.logoUrl ? getGatewayUrlFromCid(info.logoUrl) : "/img/logos/unknown-token.png",
+        verified: false,
+        chainId: 5042002,
+        community: true,
+        nativeAdded: parseFloat(
+          (Number(liq.nativeReserve) / 1e18).toFixed(2)
+        ).toString(),
+      });
+    }
+
+    _communityCache = { tokens: result, ts: Date.now() };
+    return result;
+  } catch (err) {
+    console.warn("[Tokens] Community fetch failed:", err);
+    return [];
+  }
+}
+
 
 // ARC Testnet tokens (Chain ID: 5042002)
 const arcTestnetTokens: Token[] = [
@@ -84,4 +150,14 @@ export const defaultTokens: Token[] = Object.values(tokensByChainId).flat();
 
 export function getTokensByChainId(chainId: number): Token[] {
   return tokensByChainId[chainId] || [];
+}
+
+export async function fetchTokensWithCommunity(chainId: number): Promise<Token[]> {
+  const defaults = getTokensByChainId(chainId);
+  const communities = await fetchCommunityTokens(chainId);
+  // combine, ensuring communities don't override defaults
+  const defaultsSet = new Set(defaults.map(t => t.address.toLowerCase()));
+  const filteredCommunities = communities.filter(t => !defaultsSet.has(t.address.toLowerCase()));
+
+  return [...defaults, ...filteredCommunities];
 }

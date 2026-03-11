@@ -1,11 +1,10 @@
 import { useState, useMemo, useEffect, useRef } from "react";
 import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users } from "lucide-react";
 import { useAccount, useBalance, useChainId } from "wagmi";
-import { isAddress, Contract, JsonRpcProvider } from "ethers";
+import { isAddress } from "ethers";
 import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
-import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
-import { getGatewayUrlFromCid } from "@/pages/LaunchToken";
+import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
 
 interface TokenSelectorProps {
   open: boolean;
@@ -13,60 +12,6 @@ interface TokenSelectorProps {
   onSelect: (token: Token) => void;
   tokens: Token[];
   onImport?: (address: string) => Promise<Token | null>;
-}
-
-// ─── Community token fetching ─────────────────────────────────────────────────
-
-interface CommunityToken extends Token {
-  community: true;
-  nativeAdded: string; // formatted USDC
-}
-
-const COMMUNITY_CACHE_TTL = 5 * 60 * 1000; // 5 min
-let _communityCache: { tokens: CommunityToken[]; ts: number } | null = null;
-
-async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> {
-  // Only on Arc testnet
-  if (chainId !== 5042002) return [];
-
-  // Use cache if fresh
-  if (_communityCache && Date.now() - _communityCache.ts < COMMUNITY_CACHE_TTL) {
-    return _communityCache.tokens;
-  }
-
-  try {
-    const provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
-    const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
-
-    const [infos, liquidities] = await factory.getAllTokensLiquidity();
-
-    const result: CommunityToken[] = [];
-    for (let i = 0; i < infos.length; i++) {
-      const info = infos[i];
-      const liq = liquidities[i];
-      if (!liq.hasEnoughLiquidity) continue; // ≥500 USDC threshold
-
-      result.push({
-        address: info.tokenAddress,
-        name: info.name,
-        symbol: info.symbol,
-        decimals: 18,
-        logoURI: info.logoUrl ? getGatewayUrlFromCid(info.logoUrl) : "/img/logos/unknown-token.png",
-        verified: false,
-        chainId: 5042002,
-        community: true,
-        nativeAdded: parseFloat(
-          (Number(liq.nativeReserve) / 1e18).toFixed(2)
-        ).toString(),
-      });
-    }
-
-    _communityCache = { tokens: result, ts: Date.now() };
-    return result;
-  } catch (err) {
-    console.warn("[TokenSelector] Community fetch failed:", err);
-    return [];
-  }
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────

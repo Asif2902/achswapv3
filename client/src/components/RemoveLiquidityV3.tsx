@@ -12,7 +12,8 @@ import { safeTokenInfo } from "@/lib/v3-pool-utils";
 import { NONFUNGIBLE_POSITION_MANAGER_ABI, V3_POOL_ABI, V3_FACTORY_ABI, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getTokensFromLiquidity } from "@/lib/v3-liquidity-math";
-import { getTokensByChainId, isWrappedToken } from "@/data/tokens";
+import { getTokensByChainId, fetchTokensWithCommunity, isWrappedToken } from "@/data/tokens";
+import type { Token } from "@shared/schema";
 import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign, Wallet, ChevronRight, Zap, ArrowDown } from "lucide-react";
 
 const MAX_UINT128 = 2n ** 128n - 1n;
@@ -171,11 +172,17 @@ export function RemoveLiquidityV3() {
   const chainId = useChainId();
   const { toast } = useToast();
 
+  const [tokens, setTokens] = useState<Token[]>([]);
+
   const contracts = chainId ? getContractsForChain(chainId) : null;
-  const knownTokens = getTokensByChainId(chainId);
+
+  useEffect(() => {
+    if (!chainId) return;
+    fetchTokensWithCommunity(chainId).then(setTokens);
+  }, [chainId]);
 
   const getTokenLogo = (symbol: string): string =>
-    knownTokens.find((t) => t.symbol === symbol)?.logoURI ??
+    tokens.find((t) => t.symbol === symbol)?.logoURI ??
     "/img/logos/unknown-token.png";
 
   // Display helpers: show wUSDC as "USDC" in the UI since we auto-unwrap
@@ -198,7 +205,7 @@ export function RemoveLiquidityV3() {
         provider,
       );
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
-      const knownTokenList = getTokensByChainId(chainId);
+      const knownTokenList = await fetchTokensWithCommunity(chainId);
 
       const position = await positionManager.positions(tokenId);
 
@@ -331,7 +338,7 @@ export function RemoveLiquidityV3() {
         provider,
       );
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
-      const knownTokenList = getTokensByChainId(chainId);
+      const knownTokenList = await fetchTokensWithCommunity(chainId);
 
       // Step 1: Get NFT balance
       const balance = await positionManager.balanceOf(address);

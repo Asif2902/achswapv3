@@ -6,7 +6,7 @@ import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
-import { getTokensByChainId, getWrappedAddress } from "@/data/tokens";
+import { getTokensByChainId, fetchTokensWithCommunity, getWrappedAddress } from "@/data/tokens";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -85,10 +85,8 @@ export function RemoveLiquidityV2() {
   const hasAutoSelected = useRef(false);
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
-  const knownTokens = getTokensByChainId(chainId);
-
   const getTokenLogo = (symbol: string): string =>
-    knownTokens.find((t) => t.symbol === symbol)?.logoURI ??
+    tokens.find((t) => t.symbol === symbol)?.logoURI ??
     "/img/logos/unknown-token.png";
 
   // FIX 7: Get wrapped native address from your existing utility instead of hardcoding
@@ -103,15 +101,16 @@ export function RemoveLiquidityV2() {
   // Load tokens
   useEffect(() => {
     if (!chainId) return;
-    const chainTokens = getTokensByChainId(chainId);
-    const imported = localStorage.getItem("importedTokens");
-    const importedTokens = imported ? JSON.parse(imported) : [];
-    const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
-    const processed = chainTokens.map((token) => ({
-      ...token,
-      logoURI: token.logoURI || "/img/logos/unknown-token.png",
-    }));
-    setTokens([...processed, ...chainImportedTokens]);
+    fetchTokensWithCommunity(chainId).then(chainTokens => {
+      const imported = localStorage.getItem("importedTokens");
+      const importedTokens = imported ? JSON.parse(imported) : [];
+      const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
+      const processed = chainTokens.map((token) => ({
+        ...token,
+        logoURI: token.logoURI || "/img/logos/unknown-token.png",
+      }));
+      setTokens([...processed, ...chainImportedTokens]);
+    });
   }, [chainId]);
 
   // FIX 5 + 6: useCallback with correct deps; stale selectedPosition replaced by ref
@@ -138,11 +137,9 @@ export function RemoveLiquidityV2() {
       const pairsToFetch = Math.min(Number(pairsLength), MAX_PAIRS);
 
       // Get pair addresses first (capped)
-      const pairAddresses: string[] = [];
-      for (let i = 0; i < pairsToFetch; i++) {
-        const pairAddr = await factory.allPairs(i);
-        pairAddresses.push(pairAddr);
-      }
+      const pairAddresses: string[] = await Promise.all(
+        Array.from({ length: pairsToFetch }, (_, i) => factory.allPairs(i))
+      );
 
       console.log("Got all pair addresses:", pairAddresses.length);
 
@@ -158,48 +155,55 @@ export function RemoveLiquidityV2() {
       const positionsWithBalance = pairAddresses.filter((_, i) => balances[i] > 0n);
       console.log("Pairs with balance:", positionsWithBalance.length);
 
-      const onChainPositions: V2Position[] = [];
+      const onChainPositionsOrNull = await Promise.all(
+        positionsWithBalance.map(async (pairAddress) => {
+          try {
+            const pair = new Contract(pairAddress, PAIR_ABI, provider);
+            const [token0Address, token1Address, reserves, totalSupply, liquidity] =
+              await Promise.all([
+                pair.token0(),
+                pair.token1(),
+                pair.getReserves(),
+                pair.totalSupply(),
+                pair.balanceOf(address),
+              ]);
 
-      for (const pairAddress of positionsWithBalance) {
-        const pair = new Contract(pairAddress, PAIR_ABI, provider);
-        const [token0Address, token1Address, reserves, totalSupply, liquidity] =
-          await Promise.all([
-            pair.token0(),
-            pair.token1(),
-            pair.getReserves(),
-            pair.totalSupply(),
-            pair.balanceOf(address),
-          ]);
+            const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
+            const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
 
-        const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
-        const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
+            const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
+              await Promise.all([
+                token0Contract.symbol(),
+                token0Contract.decimals(),
+                token1Contract.symbol(),
+                token1Contract.decimals(),
+              ]);
 
-        const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] =
-          await Promise.all([
-            token0Contract.symbol(),
-            token0Contract.decimals(),
-            token1Contract.symbol(),
-            token1Contract.decimals(),
-          ]);
+            const r0 = BigInt(reserves.reserve0);
+            const r1 = BigInt(reserves.reserve1);
+            const amount0 = (liquidity * r0) / totalSupply;
+            const amount1 = (liquidity * r1) / totalSupply;
 
-        const r0 = BigInt(reserves.reserve0);
-        const r1 = BigInt(reserves.reserve1);
-        const amount0 = (liquidity * r0) / totalSupply;
-        const amount1 = (liquidity * r1) / totalSupply;
-
-        onChainPositions.push({
-          pairAddress,
-          token0Address,
-          token0Symbol,
-          token0Decimals: Number(token0Decimals),
-          token1Address,
-          token1Symbol,
-          token1Decimals: Number(token1Decimals),
-          liquidity,
-          amount0,
-          amount1,
-        });
-      }
+            const pos: V2Position = {
+              pairAddress,
+              token0Address,
+              token0Symbol,
+              token0Decimals: Number(token0Decimals),
+              token1Address,
+              token1Symbol,
+              token1Decimals: Number(token1Decimals),
+              liquidity,
+              amount0,
+              amount1,
+            };
+            return pos;
+          } catch (e) {
+            console.warn(`Failed to process V2 pair ${pairAddress}:`, e);
+            return null;
+          }
+        })
+      );
+      const onChainPositions = onChainPositionsOrNull.filter((p): p is V2Position => p !== null);
 
       // FIX 1: Merge on-chain positions with imported ones (deduplicated)
       const merged = [
