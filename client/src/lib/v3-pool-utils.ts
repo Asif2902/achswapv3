@@ -204,10 +204,7 @@ export async function fetchAllV3Pools(
         const tokenI = knownTokens[i];
         const tokenJ = knownTokens[j];
 
-        // Optimization: Skip pairs where both tokens are community tokens with very low liquidity
-        // to reduce RPC calls while still finding most meaningful pools
-        if (!tokenI.verified && !tokenJ.verified && knownTokens.length > 10) continue;
-
+        // Check ALL pairs - the batch provider handles the load efficiently
         discoveryTasks.push(async () => {
           try {
             const poolAddress: string = await factory.getPool(
@@ -235,11 +232,10 @@ export async function fetchAllV3Pools(
     }
   }
 
-  // Run discovery with bounded concurrency.
-  // The batch provider packs concurrent eth_calls into a single HTTP request,
-  // so 5 concurrent = ~1 HTTP round-trip per batch.  18 combinations = ~4 HTTP requests.
+  // Run discovery with higher concurrency for faster results.
+  // The batch provider packs concurrent eth_calls into single HTTP requests.
   try {
-    await pAll(discoveryTasks, 5);
+    await pAll(discoveryTasks, 10);
   } catch (err) {
     console.error("[V3] Phase 1 discovery error:", err);
   }

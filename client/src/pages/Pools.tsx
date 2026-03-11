@@ -217,12 +217,18 @@ export default function Analytics() {
 
       try {
         const tokens = await fetchTokensWithCommunity(chainId);
+        console.log("[Pools] Tokens loaded:", tokens.length);
         const [rawV2, rawV3] = await Promise.all([
           fetchAllPools(contracts.v2.factory, chainId, tokens),
           fetchAllV3Pools(contracts.v3.factory, chainId, tokens),
         ]);
 
+        console.log("[Pools] Raw V2 pools:", rawV2.length);
+        console.log("[Pools] Raw V3 pools:", rawV3.length);
+
         const display = combine(normaliseV2(rawV2, tokens), normaliseV3(rawV3, tokens, chainId));
+        console.log("[Pools] Display pools:", display.length, "V2:", display.filter(p => p.version === "v2").length, "V3:", display.filter(p => p.version === "v3").length);
+        
         writeCache(chainId, display);
         setPools(display);
         setCacheTimestamp(Date.now());
