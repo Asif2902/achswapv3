@@ -8,7 +8,6 @@ import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
-import { getGasBufferAmount } from "@/hooks/use-gas-buffer";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import {
@@ -650,7 +649,7 @@ export function AddLiquidityV3Advanced() {
                 setAmountA(displayAmount);
                 let maxWei = balanceA;
                 if (tokenA.symbol === "USDC") {
-                  maxWei = getGasBufferAmount(balanceA);
+                  maxWei = (balanceA * 99n) / 100n;
                 }
                 maxAmountAWeiRef.current = maxWei;
               }}>
@@ -670,7 +669,7 @@ export function AddLiquidityV3Advanced() {
                   setAmountA(displayAmount);
                   let maxWei = balanceA;
                   if (tokenA.symbol === "USDC") {
-                    maxWei = getGasBufferAmount(balanceA);
+                    maxWei = (balanceA * 99n) / 100n;
                   }
                   maxAmountAWeiRef.current = maxWei;
                 }}>MAX</button>
@@ -701,7 +700,7 @@ export function AddLiquidityV3Advanced() {
                 setAmountB(displayAmount);
                 let maxWei = balanceB;
                 if (tokenB.symbol === "USDC") {
-                  maxWei = getGasBufferAmount(balanceB);
+                  maxWei = (balanceB * 99n) / 100n;
                 }
                 maxAmountBWeiRef.current = maxWei;
               }}>
@@ -721,7 +720,7 @@ export function AddLiquidityV3Advanced() {
                   setAmountB(displayAmount);
                   let maxWei = balanceB;
                   if (tokenB.symbol === "USDC") {
-                    maxWei = getGasBufferAmount(balanceB);
+                    maxWei = (balanceB * 99n) / 100n;
                   }
                   maxAmountBWeiRef.current = maxWei;
                 }}>MAX</button>

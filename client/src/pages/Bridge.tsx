@@ -25,8 +25,6 @@ import {
   removeTransfer,
   type PendingBridgeTransfer,
 } from "@/lib/bridge-transfers";
-import { getGasBufferAmount } from "@/hooks/use-gas-buffer";
-import { formatAmount } from "@/lib/decimal-utils";
 
 // ── Transfer status steps ────────────────────────────────────────────────────
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "complete" | "error";
@@ -1018,10 +1016,10 @@ export default function Bridge() {
                       <span>{sourceChain.shortName}</span>
                       <ChevronDown style={{ width: 14, height: 14, opacity: 0.5 }} />
                     </button>
-                    {isConnected && sourceBalanceRaw !== null && sourceBalanceRaw > 0n && (
+                    {isConnected && sourceBalance && (
                       <button
                         className="br-max-btn"
-                        onClick={() => setAmount(formatAmount(getGasBufferAmount(sourceBalanceRaw), 6))}
+                        onClick={() => setAmount(sourceBalance)}
                         disabled={isTransferring}
                       >MAX</button>
                     )}
