@@ -76,7 +76,7 @@ export function Header() {
         {/* Right side: wallet + hamburger */}
         <div className="flex items-center gap-2 md:gap-3">
 
-          {/* Prediction Markets Button */}
+          {/* Prediction Markets (Desktop) */}
           <a
             href="https://prediction.achswap.app"
             target="_blank"
@@ -159,21 +159,16 @@ export function Header() {
             }}
           </ConnectButton.Custom>
 
-          {/* Hamburger */}
-          <button
-            ref={toggleRef}
-            onClick={() => setMenuOpen(p => !p)}
-            aria-label="Toggle menu"
-            aria-expanded={menuOpen}
-            aria-controls="main-nav-menu"
-            data-testid="mobile-menu-toggle"
-            className="flex items-center justify-center w-9 h-9 rounded-lg bg-muted/50 border border-border/40 hover:bg-muted/70 transition-all duration-200"
+          {/* Hamburger - links to AchMarket (mobile only) */}
+          <a
+            href="https://prediction.achswap.app"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="AchMarket"
+            className="md:hidden flex items-center justify-center w-9 h-9 rounded-lg bg-muted/50 border border-border/40 hover:bg-muted/70 transition-all duration-200"
           >
-            {menuOpen
-              ? <X className="w-4 h-4 text-foreground/80" />
-              : <Menu className="w-4 h-4 text-foreground/80" />
-            }
-          </button>
+            <Menu className="w-4 h-4 text-foreground/80" />
+          </a>
         </div>
       </div>
 
