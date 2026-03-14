@@ -13,6 +13,7 @@ import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, JsonRpcProvider, getAddress } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
+import { getGasBufferAmount } from "@/hooks/use-gas-buffer";
 import { getContractsForChain } from "@/lib/contracts";
 import { getSmartRouteQuote, type SmartRoutingResult } from "@/lib/smart-routing";
 import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
@@ -641,7 +642,7 @@ export default function Swap() {
                         setFromAmount(displayAmount);
                         let maxWei = fromBalance.value;
                         if (fromToken.symbol === "USDC") {
-                          maxWei = (fromBalance.value * 99n) / 100n;
+                          maxWei = getGasBufferAmount(fromBalance.value);
                         }
                         maxAmountWeiRef.current = maxWei;
                       }}>
@@ -673,7 +674,7 @@ export default function Swap() {
                         // Store full precision balance for transaction
                         let maxWei = fromBalance.value;
                         if (fromToken.symbol === "USDC") {
-                          maxWei = (fromBalance.value * 99n) / 100n; // 1% gas buffer
+                          maxWei = getGasBufferAmount(fromBalance.value);
                         }
                         maxAmountWeiRef.current = maxWei;
                       }}>MAX</button>

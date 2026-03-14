@@ -9,6 +9,7 @@ import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
 import { defaultTokens, getTokensByChainId } from "@/data/tokens";
 import { formatAmount, parseAmount, calculateRatio, getMaxAmount } from "@/lib/decimal-utils";
+import { getGasBufferAmount } from "@/hooks/use-gas-buffer";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import { getRpcUrl, FALLBACK_RPC, fetchWithRetry } from "@/lib/config";
@@ -485,7 +486,7 @@ export function AddLiquidityV2() {
                   setAmountA(displayAmount);
                   let maxWei = balanceA.value;
                   if (tokenA.symbol === "USDC") {
-                    maxWei = (balanceA.value * 99n) / 100n;
+                    maxWei = getGasBufferAmount(balanceA.value);
                   }
                   maxAmountAWeiRef.current = maxWei;
                 }}>MAX</button>
@@ -544,7 +545,7 @@ export function AddLiquidityV2() {
                   setAmountB(displayAmount);
                   let maxWei = balanceB.value;
                   if (tokenB.symbol === "USDC") {
-                    maxWei = (balanceB.value * 99n) / 100n;
+                    maxWei = getGasBufferAmount(balanceB.value);
                   }
                   maxAmountBWeiRef.current = maxWei;
                 }}>MAX</button>
