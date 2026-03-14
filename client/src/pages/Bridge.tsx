@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   ArrowDownUp, ExternalLink, ChevronDown, AlertTriangle, Clock, Check,
   Loader2, Search, ArrowRight, Zap, Shield, Globe, RotateCcw, Bell, X, Trash2,
@@ -341,6 +342,12 @@ export default function Bridge() {
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifMounted, setNotifMounted] = useState(false);
 
+  // Manual claim state
+  const [manualClaimOpen, setManualClaimOpen] = useState(false);
+  const [manualClaimTxHash, setManualClaimTxHash] = useState("");
+  const [manualClaimDestChain, setManualClaimDestChain] = useState<CCTPChain | null>(null);
+  const [manualClaimLoading, setManualClaimLoading] = useState(false);
+
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
 
   // ── Load resumable transfers ───────────────────────────────────────────────
@@ -640,6 +647,98 @@ export default function Bridge() {
         variant: "warning",
       });
       // Don't re-throw — the transfer is recoverable, not lost
+    }
+  };
+
+  // ── Manual claim: fetch attestation and mint from burn tx hash ──────────────────
+  const handleManualClaim = async () => {
+    if (!manualClaimTxHash || !manualClaimDestChain || !window.ethereum || !address) {
+      toast({ title: "Missing required fields", variant: "destructive" });
+      return;
+    }
+
+    setManualClaimLoading(true);
+    try {
+      // Fetch attestation from Circle API
+      const url = `${CCTP_ATTESTATION_API}/v2/messages/${sourceChain.domain}?transactionHash=${manualClaimTxHash}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error("Failed to fetch attestation. Make sure the transaction is confirmed.");
+      }
+      const data = await response.json();
+      if (!data?.messages?.[0] || data.messages[0].status !== "complete" || !data.messages[0].attestation) {
+        throw new Error("Attestation not ready yet. Please wait for Circle to finalize the message.");
+      }
+
+      const attestation = {
+        message: data.messages[0].message,
+        attestation: data.messages[0].attestation,
+      };
+
+      // Switch to destination chain
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: "0x" + manualClaimDestChain.chainId.toString(16) }],
+        });
+      } catch (switchErr: any) {
+        if (switchErr.code === 4902) {
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: "0x" + manualClaimDestChain.chainId.toString(16),
+              chainName: manualClaimDestChain.name,
+              nativeCurrency: manualClaimDestChain.nativeCurrency,
+              rpcUrls: [manualClaimDestChain.rpcUrls[0]],
+              blockExplorerUrls: [manualClaimDestChain.explorerUrl],
+            }],
+          });
+        } else {
+          throw new Error(`Please switch to ${manualClaimDestChain.name} to claim USDC`);
+        }
+      }
+
+      await new Promise(r => setTimeout(r, 1500));
+
+      const destProvider = new BrowserProvider(window.ethereum);
+      const destSigner = await destProvider.getSigner();
+
+      toast({ title: "Claiming USDC...", description: `On ${manualClaimDestChain.name}` });
+
+      const messageTransmitter = new Contract(
+        manualClaimDestChain.messageTransmitterV2,
+        MESSAGE_TRANSMITTER_V2_ABI,
+        destSigner
+      );
+
+      const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
+        attestation.message,
+        attestation.attestation
+      );
+      const boostedGas = gasEstimate * 150n / 100n;
+
+      const mintTx = await messageTransmitter.receiveMessage(
+        attestation.message,
+        attestation.attestation,
+        { gasLimit: boostedGas }
+      );
+      const mintReceipt = await mintTx.wait();
+
+      toast({
+        title: "Claim Successful!",
+        description: `USDC claimed on ${manualClaimDestChain.shortName}`,
+      });
+
+      setManualClaimOpen(false);
+      setManualClaimTxHash("");
+      setManualClaimDestChain(null);
+      fetchBalance();
+
+    } catch (err: any) {
+      const msg = err?.message || "Manual claim failed";
+      toast({ title: "Claim Failed", description: msg, variant: "destructive" });
+    } finally {
+      setManualClaimLoading(false);
     }
   };
 
@@ -1284,6 +1383,18 @@ export default function Bridge() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setManualClaimOpen(true)}
+                    className="text-[11px] font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all"
+                    style={{
+                      color: "#60a5fa",
+                      background: "rgba(96,165,250,0.1)",
+                      border: "1px solid rgba(96,165,250,0.25)",
+                    }}
+                  >
+                    <Zap className="w-3 h-3" />
+                    Manual Claim
+                  </button>
                   {allTransfers.length > 0 && (
                     <button
                       onClick={() => {
@@ -1502,6 +1613,114 @@ export default function Bridge() {
         excludeChain={sourceChain}
         label="Select Destination Chain"
       />
+
+      {/* Manual Claim Modal */}
+      {manualClaimOpen && (
+        <>
+          {/* Backdrop */}
+          <div
+            onClick={() => setManualClaimOpen(false)}
+            className="fixed inset-0 z-50"
+            style={{ background: "rgba(0,0,0,0.72)", backdropFilter: "blur(8px)" }}
+          />
+          {/* Modal */}
+          <div className="fixed z-50 inset-0 flex items-center justify-center p-4">
+            <div
+              className="relative w-full max-w-md overflow-hidden"
+              style={{
+                background: "linear-gradient(160deg, #0f1117 0%, #0c0e13 100%)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                borderRadius: 20,
+                padding: 24,
+              }}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Manual Claim</h2>
+                  <p className="text-[11px] text-white/40 mt-1">Claim USDC using a burn transaction hash</p>
+                </div>
+                <button
+                  onClick={() => setManualClaimOpen(false)}
+                  className="w-8 h-8 rounded-xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/8 transition-all"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Form */}
+              <div className="space-y-4">
+                {/* Burn Tx Hash */}
+                <div>
+                  <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Burn Transaction Hash</label>
+                  <input
+                    type="text"
+                    value={manualClaimTxHash}
+                    onChange={(e) => setManualClaimTxHash(e.target.value)}
+                    placeholder="0x..."
+                    className="w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border border-white/10 focus:border-indigo-500/50 focus:outline-none placeholder:text-white/20"
+                  />
+                </div>
+
+                {/* Destination Chain */}
+                <div>
+                  <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Destination Chain</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {CCTP_TESTNET_CHAINS.filter(c => c.domain !== sourceChain.domain).map((chain) => (
+                      <button
+                        key={chain.domain}
+                        onClick={() => setManualClaimDestChain(chain)}
+                        className="p-2.5 rounded-xl text-left transition-all"
+                        style={{
+                          background: manualClaimDestChain?.domain === chain.domain ? "rgba(99,102,241,0.15)" : "rgba(255,255,255,0.03)",
+                          border: `1px solid ${manualClaimDestChain?.domain === chain.domain ? "rgba(99,102,241,0.4)" : "rgba(255,255,255,0.06)"}`,
+                        }}
+                      >
+                        <div className="flex items-center gap-2">
+                          {chain.logo && (
+                            <img src={chain.logo} alt={chain.shortName} className="w-5 h-5 rounded-full" />
+                          )}
+                          <span className="text-sm font-medium text-white/80">{chain.shortName}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Submit */}
+                <button
+                  onClick={handleManualClaim}
+                  disabled={!manualClaimTxHash || !manualClaimDestChain || manualClaimLoading || !address}
+                  className="w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
+                  style={{
+                    background: manualClaimTxHash && manualClaimDestChain && !manualClaimLoading && address
+                      ? "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
+                      : "rgba(99,102,241,0.3)",
+                    color: manualClaimTxHash && manualClaimDestChain && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
+                    cursor: manualClaimTxHash && manualClaimDestChain && !manualClaimLoading && address ? "pointer" : "not-allowed",
+                  }}
+                >
+                  {manualClaimLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Claiming...
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-4 h-4" />
+                      Claim USDC
+                    </>
+                  )}
+                </button>
+
+                {!address && (
+                  <p className="text-[11px] text-center text-amber-400">Connect wallet to claim</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }
