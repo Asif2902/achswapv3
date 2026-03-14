@@ -3,7 +3,7 @@ import { Link, useLocation } from "wouter";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
 import {
   ArrowLeftRight, Droplets, MinusCircle, BarChart3, Globe,
-  AlertTriangle, Menu, X, Rocket,
+  AlertTriangle, Menu, X, Rocket, TrendingUp,
 } from "lucide-react";
 
 export function Header() {
@@ -52,6 +52,7 @@ export function Header() {
     { href: "/analytics",        label: "Analytics", testId: "link-analytics",        icon: BarChart3 },
     { href: "/bridge",           label: "Bridge",    testId: "link-bridge",           icon: Globe },
     { href: "/launch",           label: "Launch Token", testId: "link-launch",        icon: Rocket },
+    { href: "https://prediction.achswap.app", label: "Prediction Markets", testId: "link-prediction", icon: TrendingUp, external: true },
   ];
 
   const isActive = (href: string) =>
@@ -184,6 +185,22 @@ export function Header() {
               {navItems.map(item => {
                 const Icon = item.icon;
                 const active = isActive(item.href);
+                const isExternal = item.external || item.href.startsWith("http");
+                if (isExternal) {
+                  return (
+                    <a
+                      key={item.href}
+                      href={item.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid={item.testId}
+                      className={`flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 text-foreground/80 hover:bg-accent/60 hover:text-accent-foreground border border-transparent`}
+                    >
+                      <Icon className="w-4 h-4 flex-shrink-0 text-foreground/40" />
+                      <span>{item.label}</span>
+                    </a>
+                  );
+                }
                 return (
                   <Link
                     key={item.href}
