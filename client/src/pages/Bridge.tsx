@@ -15,6 +15,7 @@ import {
   MESSAGE_TRANSMITTER_V2_ABI,
   getWorkingProvider,
   getChainByDomain,
+  getCCTPFeeRate,
   type CCTPChain,
 } from "@/lib/cctp-config";
 import {
@@ -654,8 +655,17 @@ export default function Bridge() {
     try {
       const decimals = sourceChain.usdcDecimals; // always 6 for CCTP operations
       const amountWei = parseUnits(amount, decimals);
-      const maxFee = amountWei * 5n / 10000n; // 0.05% max fee
-      const minFinalityThreshold = (useFastTransfer && sourceChain.supportsFastTransfer) ? 1000 : 2000;
+
+      const useFastTransferNow = useFastTransfer && sourceChain.supportsFastTransfer;
+      const minFinalityThreshold = useFastTransferNow ? 1000 : 2000;
+
+      let maxFee: bigint;
+      if (useFastTransferNow) {
+        const feeRateBps = await getCCTPFeeRate(sourceChain.domain, destChain.domain);
+        maxFee = amountWei * BigInt(feeRateBps) * 110n / 100n / 10000n;
+      } else {
+        maxFee = amountWei * 5n / 10000n;
+      }
 
       // ── Check connected network & prompt switch ─────────────────────────
       const preProvider = new BrowserProvider(window.ethereum);

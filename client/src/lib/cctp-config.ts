@@ -252,19 +252,32 @@ export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvi
   for (const rpcUrl of chain.rpcUrls) {
     try {
       const provider = new JsonRpcProvider(rpcUrl);
-      // Quick health check - get block number with 5s timeout
-      await Promise.race([
-        provider.getBlockNumber(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
-      ]);
+      await provider.getBlockNumber();
       return provider;
     } catch {
-      // Try next RPC
       continue;
     }
   }
-  // Fallback: return provider with first URL even if health check failed
-  return new JsonRpcProvider(chain.rpcUrls[0]);
+  throw new Error(`No working RPC for ${chain.name}`);
+}
+
+const CCTP_IRIS_API = "https://iris-api-sandbox.circle.com";
+
+export interface CircleFeeResponse {
+  minimumFee: number; // in basis points
+}
+
+export async function getCCTPFeeRate(sourceDomain: number, destinationDomain: number): Promise<number> {
+  const url = `${CCTP_IRIS_API}/v2/burn/USDC/fees?sourceDomain=${sourceDomain}&destinationDomain=${destinationDomain}`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch CCTP fee rate: ${response.status} ${response.statusText}`);
+  }
+  const data: CircleFeeResponse = await response.json();
+  if (typeof data.minimumFee !== 'number') {
+    throw new Error(`Invalid fee response: missing minimumFee`);
+  }
+  return data.minimumFee;
 }
 
 // ABI fragments needed for CCTP operations
