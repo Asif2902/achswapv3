@@ -1094,7 +1094,8 @@ export default function Bridge() {
       // Invalid input (e.g. trailing dot) — don't flag as insufficient
     }
   }
-  const canBridge = isConnected && amount && parsedAmount > 0 && !isTransferring && !insufficientBalance;
+  const isArcSource = sourceChain.name.includes("Arc");
+  const canBridge = isConnected && amount && parsedAmount > 0 && !isTransferring && !insufficientBalance && !isArcSource;
   const estimatedTime = (useFastTransfer && sourceChain.supportsFastTransfer) ? "~8-20 seconds" : "~15-19 minutes";
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1417,6 +1418,8 @@ export default function Bridge() {
                     <><span className="br-spin" />Bridging...</>
                   ) : insufficientBalance ? (
                     <><AlertTriangle style={{ width: 18, height: 18 }} />Insufficient USDC Balance</>
+                  ) : isArcSource ? (
+                    <><AlertTriangle style={{ width: 18, height: 18 }} />Arc CCTP is down, can't transfer</>
                   ) : transfer.step === "complete" ? (
                     <><Check style={{ width: 18, height: 18 }} />Bridge Again</>
                   ) : (
