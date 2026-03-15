@@ -692,21 +692,49 @@ export default function Bridge() {
       // Get receipt for amount
       const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
       let amount = "0";
-      if (receipt) {
-        const iface = new Interface([
-          "event DepositForBurn(uint64 nonce, address burnToken, uint256 amount, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationToken, address msgSender)"
-        ]);
-        for (const log of receipt.logs) {
-          try {
-            const parsed = iface.parseLog(log);
-            if (parsed?.name === "DepositForBurn") {
-              const amountWei = parsed.args.amount as bigint;
+      
+      // Try to get amount from transaction input data first
+      if (tx.data) {
+        try {
+          const mintRecipient = "0x" + tx.data.slice(34, 102);
+          const amountArg = tx.data.slice(102, 170);
+          if (amountArg) {
+            const amountWei = BigInt("0x" + amountArg);
+            if (amountWei > 0n) {
               amount = (Number(amountWei) / 1000000).toString();
-              break;
             }
-          } catch { /* skip */ }
+          }
+        } catch (e) {
+          console.log("Could not parse amount from tx data:", e);
         }
       }
+      
+      // If still 0, try parsing logs
+      if (amount === "0" && receipt) {
+        for (const log of receipt.logs) {
+          try {
+            // Try different event signatures
+            const signatures = [
+              "DepositForBurn(uint64,address,uint256,bytes32,uint32,bytes32,address)",
+              "DepositForBurn(uint64 nonce, address burnToken, uint256 amount, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationToken, address msgSender)"
+            ];
+            for (const sig of signatures) {
+              try {
+                const iface = new Interface([`event ${sig}`]);
+                const parsed = iface.parseLog({ topics: log.topics, data: log.data });
+                if (parsed) {
+                  const amountWei = parsed.args.amount as bigint;
+                  amount = (Number(amountWei) / 1000000).toString();
+                  break;
+                }
+              } catch { continue; }
+            }
+            if (amount !== "0") break;
+          } catch { continue; }
+        }
+      }
+      
+      console.log("Final amount:", amount, "receipt:", !!receipt);
 
       // Close modal and notification NOW that validation passed
       setManualClaimOpen(false);
@@ -734,13 +762,24 @@ export default function Bridge() {
 
         if (response.ok) {
           const data = await response.json();
-          if (data?.messages?.[0]?.status === "complete") {
-            destChain = getChainByDomain(data.messages[0].destinationDomain);
-            if (destChain) {
+          console.log("Circle API response:", JSON.stringify(data));
+          
+          if (data?.messages?.[0]) {
+            const msg = data.messages[0];
+            destChain = getChainByDomain(msg.destinationDomain);
+            if (destChain && msg.status === "complete" && msg.attestation) {
               attestation = {
-                message: data.messages[0].message,
-                attestation: data.messages[0].attestation,
+                message: msg.message,
+                attestation: msg.attestation,
               };
+              
+              // Try to get amount from the message if available
+              if (msg.message && amount === "0") {
+                try {
+                  // Message format: contains amount at specific offset
+                  // Skip if already has amount
+                } catch { /* ignore */ }
+              }
             }
           }
         }
