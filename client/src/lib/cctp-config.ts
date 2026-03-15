@@ -252,7 +252,13 @@ export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvi
   for (const rpcUrl of chain.rpcUrls) {
     try {
       const provider = new JsonRpcProvider(rpcUrl);
-      await provider.getBlockNumber();
+      const timedPromise = Promise.race([
+        provider.getBlockNumber(),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error("RPC request timed out")), 5000)
+        )
+      ]);
+      await timedPromise;
       return provider;
     } catch {
       continue;
@@ -261,23 +267,35 @@ export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvi
   throw new Error(`No working RPC for ${chain.name}`);
 }
 
-const CCTP_IRIS_API = "https://iris-api-sandbox.circle.com";
-
 export interface CircleFeeResponse {
   minimumFee: number; // in basis points
 }
 
 export async function getCCTPFeeRate(sourceDomain: number, destinationDomain: number): Promise<number> {
-  const url = `${CCTP_IRIS_API}/v2/burn/USDC/fees?sourceDomain=${sourceDomain}&destinationDomain=${destinationDomain}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch CCTP fee rate: ${response.status} ${response.statusText}`);
+  const url = `${CCTP_ATTESTATION_API}/v2/burn/USDC/fees?sourceDomain=${sourceDomain}&destinationDomain=${destinationDomain}`;
+  
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch CCTP fee rate: ${response.status} ${response.statusText}`);
+    }
+    const data: CircleFeeResponse = await response.json();
+    if (typeof data.minimumFee !== 'number') {
+      throw new Error(`Invalid fee response: missing minimumFee`);
+    }
+    return data.minimumFee;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`CCTP fee rate request timed out`);
+    }
+    throw err;
   }
-  const data: CircleFeeResponse = await response.json();
-  if (typeof data.minimumFee !== 'number') {
-    throw new Error(`Invalid fee response: missing minimumFee`);
-  }
-  return data.minimumFee;
 }
 
 // ABI fragments needed for CCTP operations

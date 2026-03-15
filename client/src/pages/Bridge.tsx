@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   ArrowDownUp, ExternalLink, ChevronDown, AlertTriangle, Clock, Check,
   Loader2, Search, ArrowRight, Zap, Shield, Globe, RotateCcw, Bell, X, Trash2,
@@ -621,6 +620,14 @@ export default function Bridge() {
       );
       const mintReceipt = await mintTx.wait();
 
+      if (!mintReceipt || mintReceipt.status !== 1) {
+        const errorMsg = mintReceipt ? "Mint transaction failed" : "Failed to get mint receipt";
+        updateTransferStatus(transferId, { status: "failed", mintTxHash: mintReceipt?.hash });
+        setTransfer(prev => ({ ...prev, step: "error", error: errorMsg }));
+        toast({ title: "Mint Failed", description: errorMsg, variant: "destructive" });
+        return;
+      }
+
       updateTransferStatus(transferId, { status: "complete", mintTxHash: mintReceipt.hash });
       setTransfer(prev => ({
         ...prev,
@@ -740,6 +747,10 @@ export default function Bridge() {
       );
       const mintReceipt = await mintTx.wait();
 
+      if (!mintReceipt || mintReceipt.status !== 1) {
+        throw new Error("Mint transaction failed");
+      }
+
       toast({
         title: "Claim Successful!",
         description: `USDC claimed on ${destChain.shortName}`,
@@ -775,7 +786,13 @@ export default function Bridge() {
 
       let maxFee: bigint;
       if (useFastTransferNow) {
-        const feeRateBps = await getCCTPFeeRate(sourceChain.domain, destChain.domain);
+        let feeRateBps: number;
+        try {
+          feeRateBps = await getCCTPFeeRate(sourceChain.domain, destChain.domain);
+        } catch (err) {
+          console.error("Failed to fetch CCTP fee rate, using fallback:", err);
+          feeRateBps = 5;
+        }
         maxFee = amountWei * BigInt(feeRateBps) * 110n / 100n / 10000n;
       } else {
         maxFee = amountWei * 5n / 10000n;
