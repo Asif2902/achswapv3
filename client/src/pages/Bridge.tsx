@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
-import { Contract, JsonRpcProvider, BrowserProvider, zeroPadValue, getAddress, parseUnits } from "ethers";
+import { Contract, JsonRpcProvider, BrowserProvider, zeroPadValue, getAddress, parseUnits, Interface } from "ethers";
 import {
   CCTP_TESTNET_CHAINS,
   CCTP_ATTESTATION_API,
@@ -674,13 +674,38 @@ export default function Bridge() {
         throw new Error("Please select the source chain where the burn transaction was made");
       }
 
-      // Close modal first - IMMEDIATELY update UI like resume does
+      // Close modal and notification first
       setManualClaimOpen(false);
+      setNotifOpen(false);
       setManualClaimTxHash("");
       setManualClaimSourceChain(null);
       setManualClaimStatus("idle");
 
-      // Try to get destination from API, but don't wait - just save with unknown dest for now
+      // Fetch amount from burn transaction receipt
+      let amount = "0";
+      try {
+        const provider = new JsonRpcProvider(manualClaimSourceChain.rpcUrls[0]);
+        const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
+        if (receipt) {
+          // Find the DepositForBurn event to get the amount
+          const iface = new Interface([
+            "event DepositForBurn(uint64 nonce, address burnToken, uint256 amount, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationToken, address msgSender)"
+          ]);
+          for (const log of receipt.logs) {
+            try {
+              const parsed = iface.parseLog(log);
+              if (parsed?.name === "DepositForBurn") {
+                amount = (parsed.args.amount / 1000000n).toString();
+                break;
+              }
+            } catch { /* skip */ }
+          }
+        }
+      } catch (err) {
+        console.log("Could not fetch amount from tx:", err);
+      }
+
+      // Try to get destination from API
       let destChain: CCTPChain | undefined;
       let attestation: { message: string; attestation: string } | undefined;
 
@@ -722,7 +747,7 @@ export default function Bridge() {
       // Update UI like resume system does - IMMEDIATELY
       setSourceChain(manualClaimSourceChain);
       setDestChain(destChain);
-      setAmount("0");
+      setAmount(amount);
       currentTransferIdRef.current = manualClaimTxHash;
       abortRef.current = false;
 
@@ -743,14 +768,14 @@ export default function Bridge() {
           sourceChainId: manualClaimSourceChain.chainId,
           destDomain: destChain.domain,
           destChainId: destChain.chainId,
-          amount: "0",
+          amount,
           userAddress: address,
           timestamp: Date.now(),
           status: "ready_to_mint",
           attestation,
         });
 
-        await executeMint(destChain, attestation, manualClaimTxHash, "0");
+        await executeMint(destChain, attestation, manualClaimTxHash, amount);
       } else {
         // No attestation yet - go to attesting and poll
         setTransfer({
@@ -768,7 +793,7 @@ export default function Bridge() {
           sourceChainId: manualClaimSourceChain.chainId,
           destDomain: destChain.domain,
           destChainId: destChain.chainId,
-          amount: "0",
+          amount,
           userAddress: address,
           timestamp: Date.now(),
           status: "attesting",
