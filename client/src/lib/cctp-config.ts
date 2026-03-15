@@ -252,19 +252,50 @@ export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvi
   for (const rpcUrl of chain.rpcUrls) {
     try {
       const provider = new JsonRpcProvider(rpcUrl);
-      // Quick health check - get block number with 5s timeout
-      await Promise.race([
+      const timedPromise = Promise.race([
         provider.getBlockNumber(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error("RPC request timed out")), 5000)
+        )
       ]);
+      await timedPromise;
       return provider;
     } catch {
-      // Try next RPC
       continue;
     }
   }
-  // Fallback: return provider with first URL even if health check failed
-  return new JsonRpcProvider(chain.rpcUrls[0]);
+  throw new Error(`No working RPC for ${chain.name}`);
+}
+
+export interface CircleFeeResponse {
+  minimumFee: number; // in basis points
+}
+
+export async function getCCTPFeeRate(sourceDomain: number, destinationDomain: number): Promise<number> {
+  const url = `${CCTP_ATTESTATION_API}/v2/burn/USDC/fees?sourceDomain=${sourceDomain}&destinationDomain=${destinationDomain}`;
+  
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch CCTP fee rate: ${response.status} ${response.statusText}`);
+    }
+    const data: CircleFeeResponse = await response.json();
+    if (typeof data.minimumFee !== 'number') {
+      throw new Error(`Invalid fee response: missing minimumFee`);
+    }
+    return data.minimumFee;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`CCTP fee rate request timed out`);
+    }
+    throw err;
+  }
 }
 
 // ABI fragments needed for CCTP operations

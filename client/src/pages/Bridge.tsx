@@ -15,6 +15,7 @@ import {
   MESSAGE_TRANSMITTER_V2_ABI,
   getWorkingProvider,
   getChainByDomain,
+  getCCTPFeeRate,
   type CCTPChain,
 } from "@/lib/cctp-config";
 import {
@@ -340,6 +341,12 @@ export default function Bridge() {
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifMounted, setNotifMounted] = useState(false);
 
+  // Manual claim state
+  const [manualClaimOpen, setManualClaimOpen] = useState(false);
+  const [manualClaimTxHash, setManualClaimTxHash] = useState("");
+  const [manualClaimLoading, setManualClaimLoading] = useState(false);
+  const [manualClaimTxHashValid, setManualClaimTxHashValid] = useState(false);
+
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
 
   // ── Load resumable transfers ───────────────────────────────────────────────
@@ -614,6 +621,14 @@ export default function Bridge() {
       );
       const mintReceipt = await mintTx.wait();
 
+      if (!mintReceipt || mintReceipt.status !== 1) {
+        const errorMsg = mintReceipt ? "Mint transaction failed" : "Failed to get mint receipt";
+        updateTransferStatus(transferId, { status: "failed", mintTxHash: mintReceipt?.hash });
+        setTransfer(prev => ({ ...prev, step: "error", error: errorMsg }));
+        toast({ title: "Mint Failed", description: errorMsg, variant: "destructive" });
+        return;
+      }
+
       updateTransferStatus(transferId, { status: "complete", mintTxHash: mintReceipt.hash });
       setTransfer(prev => ({
         ...prev,
@@ -642,6 +657,124 @@ export default function Bridge() {
     }
   };
 
+  // ── Manual claim: fetch attestation and mint from burn tx hash ──────────────────
+  const handleManualClaim = async () => {
+    if (!manualClaimTxHash || !window.ethereum || !address) {
+      toast({ title: "Missing required fields", variant: "destructive" });
+      return;
+    }
+
+    setManualClaimLoading(true);
+    try {
+      // Fetch attestation from Circle API - try each source domain
+      let attestationData: { message: string; attestation: string; destinationDomain: number } | null = null;
+
+      for (const chain of CCTP_TESTNET_CHAINS) {
+        try {
+          const url = `${CCTP_ATTESTATION_API}/v2/messages/${chain.domain}?transactionHash=${manualClaimTxHash}`;
+          const response = await fetch(url);
+          if (response.ok) {
+            const data = await response.json();
+            if (data?.messages?.[0]?.status === "complete" && data.messages[0].attestation) {
+              attestationData = {
+                message: data.messages[0].message,
+                attestation: data.messages[0].attestation,
+                destinationDomain: data.messages[0].destinationDomain,
+              };
+              break;
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      if (!attestationData) {
+        throw new Error("No attestation found. Make sure the transaction is confirmed on the source chain.");
+      }
+
+      // Get destination chain from attestation
+      const destChain = getChainByDomain(attestationData.destinationDomain);
+      if (!destChain) {
+        throw new Error(`Unknown destination domain: ${attestationData.destinationDomain}`);
+      }
+
+      // Switch to destination chain
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: "0x" + destChain.chainId.toString(16) }],
+        });
+      } catch (switchErr: any) {
+        if (switchErr.code === 4902) {
+          await window.ethereum.request({
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: "0x" + destChain.chainId.toString(16),
+              chainName: destChain.name,
+              nativeCurrency: destChain.nativeCurrency,
+              rpcUrls: [destChain.rpcUrls[0]],
+              blockExplorerUrls: [destChain.explorerUrl],
+            }],
+          });
+        } else {
+          throw new Error(`Please switch to ${destChain.name} to claim USDC`);
+        }
+      }
+
+      await new Promise(r => setTimeout(r, 1500));
+
+      const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+      const expectedChainId = "0x" + destChain.chainId.toString(16);
+      if (currentChainId !== expectedChainId) {
+        throw new Error(`Please switch to ${destChain.name} to claim USDC`);
+      }
+
+      const destProvider = new BrowserProvider(window.ethereum);
+      const destSigner = await destProvider.getSigner();
+
+      toast({ title: "Claiming USDC...", description: `On ${destChain.name}` });
+
+      const messageTransmitter = new Contract(
+        destChain.messageTransmitterV2,
+        MESSAGE_TRANSMITTER_V2_ABI,
+        destSigner
+      );
+
+      const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
+        attestationData.message,
+        attestationData.attestation
+      );
+      const boostedGas = gasEstimate * 150n / 100n;
+
+      const mintTx = await messageTransmitter.receiveMessage(
+        attestationData.message,
+        attestationData.attestation,
+        { gasLimit: boostedGas }
+      );
+      const mintReceipt = await mintTx.wait();
+
+      if (!mintReceipt || mintReceipt.status !== 1) {
+        throw new Error("Mint transaction failed");
+      }
+
+      toast({
+        title: "Claim Successful!",
+        description: `USDC claimed on ${destChain.shortName}`,
+      });
+
+      setManualClaimOpen(false);
+      setManualClaimTxHash("");
+      fetchBalance();
+
+    } catch (err: any) {
+      const msg = err?.message || "Manual claim failed";
+      toast({ title: "Claim Failed", description: msg, variant: "destructive" });
+    } finally {
+      setManualClaimLoading(false);
+    }
+  };
+
   // ── CCTP Bridge execution ──────────────────────────────────────────────────
   const handleBridge = async () => {
     if (!address || !window.ethereum || !amount || parseFloat(amount) <= 0) return;
@@ -654,8 +787,23 @@ export default function Bridge() {
     try {
       const decimals = sourceChain.usdcDecimals; // always 6 for CCTP operations
       const amountWei = parseUnits(amount, decimals);
-      const maxFee = amountWei * 5n / 10000n; // 0.05% max fee
-      const minFinalityThreshold = (useFastTransfer && sourceChain.supportsFastTransfer) ? 1000 : 2000;
+
+      const useFastTransferNow = useFastTransfer && sourceChain.supportsFastTransfer;
+      const minFinalityThreshold = useFastTransferNow ? 1000 : 2000;
+
+      let maxFee: bigint;
+      if (useFastTransferNow) {
+        let feeRateBps: number;
+        try {
+          feeRateBps = await getCCTPFeeRate(sourceChain.domain, destChain.domain);
+        } catch (err) {
+          console.error("Failed to fetch CCTP fee rate, using fallback:", err);
+          feeRateBps = 5;
+        }
+        maxFee = amountWei * BigInt(feeRateBps) * 110n / 100n / 10000n;
+      } else {
+        maxFee = amountWei * 5n / 10000n;
+      }
 
       // ── Check connected network & prompt switch ─────────────────────────
       const preProvider = new BrowserProvider(window.ethereum);
@@ -1274,6 +1422,18 @@ export default function Bridge() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setManualClaimOpen(true)}
+                    className="text-[11px] font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all"
+                    style={{
+                      color: "#60a5fa",
+                      background: "rgba(96,165,250,0.1)",
+                      border: "1px solid rgba(96,165,250,0.25)",
+                    }}
+                  >
+                    <Zap className="w-3 h-3" />
+                    Manual Claim
+                  </button>
                   {allTransfers.length > 0 && (
                     <button
                       onClick={() => {
@@ -1492,6 +1652,98 @@ export default function Bridge() {
         excludeChain={sourceChain}
         label="Select Destination Chain"
       />
+
+      {/* Manual Claim Modal */}
+      {manualClaimOpen && (
+        <>
+          {/* Backdrop */}
+          <div
+            onClick={() => setManualClaimOpen(false)}
+            className="fixed inset-0 z-50"
+            style={{ background: "rgba(0,0,0,0.72)", backdropFilter: "blur(8px)" }}
+          />
+          {/* Modal */}
+          <div className="fixed z-50 inset-0 flex items-center justify-center p-4">
+            <div
+              className="relative w-full max-w-md overflow-hidden"
+              style={{
+                background: "linear-gradient(160deg, #0f1117 0%, #0c0e13 100%)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                borderRadius: 20,
+                padding: 24,
+              }}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Manual Claim</h2>
+                  <p className="text-[11px] text-white/40 mt-1">Claim USDC using a burn transaction hash</p>
+                </div>
+                <button
+                  onClick={() => setManualClaimOpen(false)}
+                  className="w-8 h-8 rounded-xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/8 transition-all"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Form */}
+              <div className="space-y-4">
+                {/* Burn Tx Hash */}
+                <div>
+                  <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Burn Transaction Hash</label>
+                  <input
+                    type="text"
+                    value={manualClaimTxHash}
+                    onChange={(e) => {
+                      setManualClaimTxHash(e.target.value);
+                      setManualClaimTxHashValid(/^0x[a-fA-F0-9]{64}$/.test(e.target.value));
+                    }}
+                    placeholder="0x..."
+                    className={`w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border focus:outline-none placeholder:text-white/20 ${
+                      manualClaimTxHash && !manualClaimTxHashValid ? "border-red-500 focus:border-red-500" : "border-white/10 focus:border-indigo-500/50"
+                    }`}
+                  />
+                  {manualClaimTxHash && !manualClaimTxHashValid && (
+                    <p className="text-[10px] text-red-400 mt-1">Invalid transaction hash format</p>
+                  )}
+                </div>
+
+                {/* Submit */}
+                <button
+                  onClick={handleManualClaim}
+                  disabled={!manualClaimTxHash || !manualClaimTxHashValid || manualClaimLoading || !address}
+                  className="w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
+                  style={{
+                    background: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address
+                      ? "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
+                      : "rgba(99,102,241,0.3)",
+                    color: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
+                    cursor: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address ? "pointer" : "not-allowed",
+                  }}
+                >
+                  {manualClaimLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Detecting destination & claiming...
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-4 h-4" />
+                      Claim USDC
+                    </>
+                  )}
+                </button>
+
+                {!address && (
+                  <p className="text-[11px] text-center text-amber-400">Connect wallet to claim</p>
+                )}
+                <p className="text-[10px] text-center text-white/30">Destination chain is auto-detected from the attestation</p>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }
