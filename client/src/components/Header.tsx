@@ -194,7 +194,6 @@ export function Header() {
                       target="_blank"
                       rel="noopener noreferrer"
                       data-testid={item.testId}
-                      onClick={() => setMenuOpen(false)}
                       className={`flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 text-foreground/80 hover:bg-accent/60 hover:text-accent-foreground border border-transparent`}
                     >
                       <Icon className="w-4 h-4 flex-shrink-0 text-foreground/40" />
