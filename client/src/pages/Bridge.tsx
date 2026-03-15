@@ -696,7 +696,44 @@ export default function Bridge() {
       const data = await response.json();
       
       if (!data?.messages?.[0] || data.messages[0].status !== "complete") {
+        // Even if attestation not ready, save the transfer so user can resume later
         setManualClaimStatus("not_found");
+        
+        // Check if we can determine destination domain from response
+        const destDomainFromResponse = data?.messages?.[0]?.destinationDomain;
+        
+        if (destDomainFromResponse) {
+          const destChain = getChainByDomain(destDomainFromResponse);
+          if (destChain) {
+            // Save as attesting - user can resume later
+            savePendingTransfer({
+              id: manualClaimTxHash,
+              burnTxHash: manualClaimTxHash,
+              sourceDomain: manualClaimSourceChain.domain,
+              sourceChainId: manualClaimSourceChain.chainId,
+              destDomain: destChain.domain,
+              destChainId: destChain.chainId,
+              amount: "0",
+              userAddress: address,
+              timestamp: Date.now(),
+              status: "attesting",
+            });
+            refreshPendingTransfers();
+            toast({ 
+              title: "Transfer Saved", 
+              description: `Attestation not ready yet. Check from notifications panel in a few minutes.`,
+              duration: 6000,
+            });
+            setManualClaimOpen(false);
+            setManualClaimTxHash("");
+            setManualClaimSourceChain(null);
+            setManualClaimDestChain(null);
+            setManualClaimAttestation(null);
+            setManualClaimStatus("idle");
+            return;
+          }
+        }
+        
         throw new Error("No attestation found yet. Make sure the transaction is confirmed and enough time has passed (1-20 minutes).");
       }
 
@@ -714,7 +751,7 @@ export default function Bridge() {
       });
       setManualClaimStatus("ready");
 
-      // Persist the manual claim transfer for recovery
+      // Persist the manual claim transfer for recovery (like resume system)
       const transferId = manualClaimTxHash;
       savePendingTransfer({
         id: transferId,
@@ -733,51 +770,26 @@ export default function Bridge() {
         },
       });
 
-      // Now proceed with the actual claim since we have attestation
-      const destProvider = new BrowserProvider(window.ethereum);
-      const destSigner = await destProvider.getSigner();
+      // Refresh the pending transfers list
+      refreshPendingTransfers();
 
-      toast({ title: "Claiming USDC...", description: `On ${destChain.name}` });
-
-      const messageTransmitter = new Contract(
-        destChain.messageTransmitterV2,
-        MESSAGE_TRANSMITTER_V2_ABI,
-        destSigner
-      );
-
-      const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
-        data.messages[0].message,
-        data.messages[0].attestation
-      );
-      const boostedGas = gasEstimate * 150n / 100n;
-
-      const mintTx = await messageTransmitter.receiveMessage(
-        data.messages[0].message,
-        data.messages[0].attestation,
-        { gasLimit: boostedGas }
-      );
-      const mintReceipt = await mintTx.wait();
-
-      if (!mintReceipt || mintReceipt.status !== 1) {
-        throw new Error("Mint transaction failed");
-      }
-
-      toast({
-        title: "Claim Successful!",
-        description: `USDC claimed on ${destChain.shortName}`,
+      toast({ 
+        title: "Transfer Ready to Claim!", 
+        description: `Your USDC on ${destChain.name} is ready. Claim from the notifications panel.`,
+        duration: 6000,
       });
 
-      removeTransfer(manualClaimTxHash);
+      // Close modal and reset
       setManualClaimOpen(false);
       setManualClaimTxHash("");
       setManualClaimSourceChain(null);
       setManualClaimDestChain(null);
       setManualClaimAttestation(null);
       setManualClaimStatus("idle");
-      fetchBalance();
 
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
+      setManualClaimStatus("error");
       toast({ title: "Claim Failed", description: msg, variant: "destructive" });
     } finally {
       setManualClaimLoading(false);
@@ -1806,7 +1818,7 @@ export default function Bridge() {
                   ) : (
                     <>
                       <Zap className="w-4 h-4" />
-                      {manualClaimStatus === "ready" ? "Claim USDC" : "Check Status & Claim"}
+                      {manualClaimStatus === "ready" ? "Save & Claim from Notifications" : "Check & Save Transfer"}
                     </>
                   )}
                 </button>
