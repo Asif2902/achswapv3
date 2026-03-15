@@ -346,6 +346,10 @@ export default function Bridge() {
   const [manualClaimTxHash, setManualClaimTxHash] = useState("");
   const [manualClaimLoading, setManualClaimLoading] = useState(false);
   const [manualClaimTxHashValid, setManualClaimTxHashValid] = useState(false);
+  const [manualClaimSourceChain, setManualClaimSourceChain] = useState<CCTPChain | null>(null);
+  const [manualClaimDestChain, setManualClaimDestChain] = useState<CCTPChain | null>(null);
+  const [manualClaimAttestation, setManualClaimAttestation] = useState<{ message: string; attestation: string } | null>(null);
+  const [manualClaimStatus, setManualClaimStatus] = useState<"idle" | "fetching" | "ready" | "not_found" | "error">("idle");
 
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
 
@@ -665,57 +669,58 @@ export default function Bridge() {
     }
 
     setManualClaimLoading(true);
+    setManualClaimStatus("fetching");
+    setManualClaimDestChain(null);
+    setManualClaimAttestation(null);
     try {
-      // Fetch attestation from Circle API - try each source domain
-      let attestationData: { message: string; attestation: string; destinationDomain: number; sourceChain: CCTPChain } | null = null;
-      const FETCH_TIMEOUT_MS = 10_000;
-
-      for (const chain of CCTP_TESTNET_CHAINS) {
-        if (abortRef.current) return;
-        try {
-          const url = `${CCTP_ATTESTATION_API}/v2/messages/${chain.domain}?transactionHash=${manualClaimTxHash}`;
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-          let response: Response;
-          try {
-            response = await fetch(url, { signal: controller.signal });
-          } finally {
-            clearTimeout(timer);
-          }
-          if (response.ok) {
-            const data = await response.json();
-            if (data?.messages?.[0]?.status === "complete" && data.messages[0].attestation) {
-              attestationData = {
-                message: data.messages[0].message,
-                attestation: data.messages[0].attestation,
-                destinationDomain: data.messages[0].destinationDomain,
-                sourceChain: chain,
-              };
-              break;
-            }
-          }
-        } catch {
-          continue;
-        }
+      if (!manualClaimSourceChain) {
+        throw new Error("Please select the source chain where the burn transaction was made");
       }
 
-      if (!attestationData) {
-        throw new Error("No attestation found. Make sure the transaction is confirmed on the source chain.");
+      // Fetch attestation from the selected source chain
+      const url = `${CCTP_ATTESTATION_API}/v2/messages/${manualClaimSourceChain.domain}?transactionHash=${manualClaimTxHash}`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      
+      let response: Response;
+      try {
+        response = await fetch(url, { signal: controller.signal });
+      } finally {
+        clearTimeout(timer);
       }
 
-      // Get destination chain from attestation
-      const destChain = getChainByDomain(attestationData.destinationDomain);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch attestation: ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      if (!data?.messages?.[0] || data.messages[0].status !== "complete") {
+        setManualClaimStatus("not_found");
+        throw new Error("No attestation found yet. Make sure the transaction is confirmed and enough time has passed (1-20 minutes).");
+      }
+
+      const destinationDomain = data.messages[0].destinationDomain;
+      const destChain = getChainByDomain(destinationDomain);
+      
       if (!destChain) {
-        throw new Error(`Unknown destination domain: ${attestationData.destinationDomain}`);
+        throw new Error(`Unknown destination domain: ${destinationDomain}`);
       }
+
+      setManualClaimDestChain(destChain);
+      setManualClaimAttestation({
+        message: data.messages[0].message,
+        attestation: data.messages[0].attestation,
+      });
+      setManualClaimStatus("ready");
 
       // Persist the manual claim transfer for recovery
       const transferId = manualClaimTxHash;
       savePendingTransfer({
         id: transferId,
         burnTxHash: manualClaimTxHash,
-        sourceDomain: attestationData.sourceChain.domain,
-        sourceChainId: attestationData.sourceChain.chainId,
+        sourceDomain: manualClaimSourceChain.domain,
+        sourceChainId: manualClaimSourceChain.chainId,
         destDomain: destChain.domain,
         destChainId: destChain.chainId,
         amount: "0",
@@ -723,42 +728,12 @@ export default function Bridge() {
         timestamp: Date.now(),
         status: "ready_to_mint",
         attestation: {
-          message: attestationData.message,
-          attestation: attestationData.attestation,
+          message: data.messages[0].message,
+          attestation: data.messages[0].attestation,
         },
       });
 
-      // Switch to destination chain
-      try {
-        await window.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x" + destChain.chainId.toString(16) }],
-        });
-      } catch (switchErr: any) {
-        if (switchErr.code === 4902) {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: "0x" + destChain.chainId.toString(16),
-              chainName: destChain.name,
-              nativeCurrency: destChain.nativeCurrency,
-              rpcUrls: [destChain.rpcUrls[0]],
-              blockExplorerUrls: [destChain.explorerUrl],
-            }],
-          });
-        } else {
-          throw new Error(`Please switch to ${destChain.name} to claim USDC`);
-        }
-      }
-
-      await new Promise(r => setTimeout(r, 1500));
-
-      const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
-      const expectedChainId = "0x" + destChain.chainId.toString(16);
-      if (currentChainId !== expectedChainId) {
-        throw new Error(`Please switch to ${destChain.name} to claim USDC`);
-      }
-
+      // Now proceed with the actual claim since we have attestation
       const destProvider = new BrowserProvider(window.ethereum);
       const destSigner = await destProvider.getSigner();
 
@@ -771,14 +746,14 @@ export default function Bridge() {
       );
 
       const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
-        attestationData.message,
-        attestationData.attestation
+        data.messages[0].message,
+        data.messages[0].attestation
       );
       const boostedGas = gasEstimate * 150n / 100n;
 
       const mintTx = await messageTransmitter.receiveMessage(
-        attestationData.message,
-        attestationData.attestation,
+        data.messages[0].message,
+        data.messages[0].attestation,
         { gasLimit: boostedGas }
       );
       const mintReceipt = await mintTx.wait();
@@ -795,6 +770,10 @@ export default function Bridge() {
       removeTransfer(manualClaimTxHash);
       setManualClaimOpen(false);
       setManualClaimTxHash("");
+      setManualClaimSourceChain(null);
+      setManualClaimDestChain(null);
+      setManualClaimAttestation(null);
+      setManualClaimStatus("idle");
       fetchBalance();
 
     } catch (err: any) {
@@ -1688,7 +1667,14 @@ export default function Bridge() {
         <>
           {/* Backdrop */}
           <div
-            onClick={() => setManualClaimOpen(false)}
+            onClick={() => {
+              setManualClaimOpen(false);
+              setManualClaimTxHash("");
+              setManualClaimSourceChain(null);
+              setManualClaimDestChain(null);
+              setManualClaimAttestation(null);
+              setManualClaimStatus("idle");
+            }}
             className="fixed inset-0 z-50"
             style={{ background: "rgba(0,0,0,0.72)", backdropFilter: "blur(8px)" }}
           />
@@ -1710,7 +1696,14 @@ export default function Bridge() {
                   <p className="text-[11px] text-white/40 mt-1">Claim USDC using a burn transaction hash</p>
                 </div>
                 <button
-                  onClick={() => setManualClaimOpen(false)}
+                  onClick={() => {
+              setManualClaimOpen(false);
+              setManualClaimTxHash("");
+              setManualClaimSourceChain(null);
+              setManualClaimDestChain(null);
+              setManualClaimAttestation(null);
+              setManualClaimStatus("idle");
+            }}
                   className="w-8 h-8 rounded-xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/8 transition-all"
                 >
                   <X className="w-4 h-4" />
@@ -1719,6 +1712,27 @@ export default function Bridge() {
 
               {/* Form */}
               <div className="space-y-4">
+                {/* Source Chain Selector */}
+                <div>
+                  <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Source Chain (where you burned USDC)</label>
+                  <select
+                    value={manualClaimSourceChain?.domain || ""}
+                    onChange={(e) => {
+                      const chain = CCTP_TESTNET_CHAINS.find(c => c.domain === Number(e.target.value));
+                      setManualClaimSourceChain(chain || null);
+                      setManualClaimStatus("idle");
+                      setManualClaimDestChain(null);
+                      setManualClaimAttestation(null);
+                    }}
+                    className="w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border border-white/10 focus:border-indigo-500/50 focus:outline-none"
+                  >
+                    <option value="">Select source chain</option>
+                    {CCTP_TESTNET_CHAINS.map(chain => (
+                      <option key={chain.domain} value={chain.domain}>{chain.name}</option>
+                    ))}
+                  </select>
+                </div>
+
                 {/* Burn Tx Hash */}
                 <div>
                   <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Burn Transaction Hash</label>
@@ -1728,6 +1742,9 @@ export default function Bridge() {
                     onChange={(e) => {
                       setManualClaimTxHash(e.target.value);
                       setManualClaimTxHashValid(/^0x[a-fA-F0-9]{64}$/.test(e.target.value));
+                      setManualClaimStatus("idle");
+                      setManualClaimDestChain(null);
+                      setManualClaimAttestation(null);
                     }}
                     placeholder="0x..."
                     className={`w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border focus:outline-none placeholder:text-white/20 ${
@@ -1739,28 +1756,57 @@ export default function Bridge() {
                   )}
                 </div>
 
+                {/* Detected Info */}
+                {manualClaimStatus === "ready" && manualClaimDestChain && (
+                  <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
+                    <p className="text-[11px] text-indigo-300 font-medium mb-1">✓ Attestation Ready</p>
+                    <p className="text-[11px] text-white/60">
+                      Destination: <span className="text-white">{manualClaimDestChain.name}</span>
+                    </p>
+                    <p className="text-[10px] text-white/40 mt-1">Your USDC is ready to be claimed on {manualClaimDestChain.name}</p>
+                  </div>
+                )}
+
+                {manualClaimStatus === "not_found" && (
+                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                    <p className="text-[11px] text-amber-300 font-medium mb-1">⏳ Attestation Not Ready</p>
+                    <p className="text-[10px] text-white/60">
+                      The attestation may still be processing. Circle typically completes attestations within 1-20 minutes after the burn transaction.
+                    </p>
+                  </div>
+                )}
+
+                {manualClaimStatus === "fetching" && (
+                  <div className="p-3 rounded-xl bg-white/5 border border-white/10">
+                    <p className="text-[11px] text-white/60 flex items-center gap-2">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Checking attestation status...
+                    </p>
+                  </div>
+                )}
+
                 {/* Submit */}
                 <button
                   onClick={handleManualClaim}
-                  disabled={!manualClaimTxHash || !manualClaimTxHashValid || manualClaimLoading || !address}
+                  disabled={!manualClaimTxHash || !manualClaimTxHashValid || !manualClaimSourceChain || manualClaimLoading || !address}
                   className="w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
                   style={{
-                    background: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address
+                    background: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address
                       ? "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
                       : "rgba(99,102,241,0.3)",
-                    color: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
-                    cursor: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address ? "pointer" : "not-allowed",
+                    color: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
+                    cursor: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "pointer" : "not-allowed",
                   }}
                 >
                   {manualClaimLoading ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Detecting destination & claiming...
+                      {manualClaimStatus === "fetching" ? "Checking attestation..." : "Claiming USDC..."}
                     </>
                   ) : (
                     <>
                       <Zap className="w-4 h-4" />
-                      Claim USDC
+                      {manualClaimStatus === "ready" ? "Claim USDC" : "Check Status & Claim"}
                     </>
                   )}
                 </button>
@@ -1768,7 +1814,9 @@ export default function Bridge() {
                 {!address && (
                   <p className="text-[11px] text-center text-amber-400">Connect wallet to claim</p>
                 )}
-                <p className="text-[10px] text-center text-white/30">Destination chain is auto-detected from the attestation</p>
+                {manualClaimSourceChain && (
+                  <p className="text-[10px] text-center text-white/30">Select the chain where you initiated the burn transaction</p>
+                )}
               </div>
             </div>
           </div>
