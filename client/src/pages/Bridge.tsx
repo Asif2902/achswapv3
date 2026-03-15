@@ -674,51 +674,46 @@ export default function Bridge() {
         throw new Error("Please select the source chain where the burn transaction was made");
       }
 
-      // Close modal and notification first
+      // Validate and fetch tx info BEFORE closing modal
+      const provider = new JsonRpcProvider(manualClaimSourceChain.rpcUrls[0]);
+      
+      // Get transaction to verify sender
+      const tx = await provider.getTransaction(manualClaimTxHash);
+      if (!tx) {
+        throw new Error("Transaction not found on the selected chain. Make sure you selected the correct source chain.");
+      }
+      
+      // Check if the transaction was made by the connected wallet
+      const txSender = tx.from.toLowerCase();
+      if (txSender !== address.toLowerCase()) {
+        throw new Error(`Transaction was not made by your connected wallet. Please use the wallet that made the burn transaction.`);
+      }
+
+      // Get receipt for amount
+      const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
+      let amount = "0";
+      if (receipt) {
+        const iface = new Interface([
+          "event DepositForBurn(uint64 nonce, address burnToken, uint256 amount, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationToken, address msgSender)"
+        ]);
+        for (const log of receipt.logs) {
+          try {
+            const parsed = iface.parseLog(log);
+            if (parsed?.name === "DepositForBurn") {
+              const amountWei = parsed.args.amount as bigint;
+              amount = (Number(amountWei) / 1000000).toString();
+              break;
+            }
+          } catch { /* skip */ }
+        }
+      }
+
+      // Close modal and notification NOW that validation passed
       setManualClaimOpen(false);
       setNotifOpen(false);
       setManualClaimTxHash("");
       setManualClaimSourceChain(null);
       setManualClaimStatus("idle");
-
-      // Fetch amount and verify sender from burn transaction receipt
-      let amount = "0";
-      let txSender = "";
-      try {
-        const provider = new JsonRpcProvider(manualClaimSourceChain.rpcUrls[0]);
-        const tx = await provider.getTransaction(manualClaimTxHash);
-        if (tx) {
-          txSender = tx.from.toLowerCase();
-          
-          // Check if the transaction was made by the connected wallet
-          if (txSender !== address.toLowerCase()) {
-            throw new Error(`Transaction was not made by your connected wallet. Expected: ${address}, Got: ${txSender}`);
-          }
-        }
-
-        const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
-        if (receipt) {
-          // Find the DepositForBurn event to get the amount
-          const iface = new Interface([
-            "event DepositForBurn(uint64 nonce, address burnToken, uint256 amount, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationToken, address msgSender)"
-          ]);
-          for (const log of receipt.logs) {
-            try {
-              const parsed = iface.parseLog(log);
-              if (parsed?.name === "DepositForBurn") {
-                // Amount is in 6 decimals (USDC), convert to human readable
-                const amountWei = parsed.args.amount as bigint;
-                amount = (Number(amountWei) / 1000000).toString();
-                break;
-              }
-            } catch { /* skip */ }
-          }
-        }
-      } catch (err: any) {
-        toast({ title: "Error", description: err.message || "Could not verify transaction", variant: "destructive" });
-        setManualClaimLoading(false);
-        return;
-      }
 
       // Try to get destination from API
       let destChain: CCTPChain | undefined;
