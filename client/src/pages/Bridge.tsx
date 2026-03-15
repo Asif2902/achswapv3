@@ -1438,7 +1438,7 @@ export default function Bridge() {
                 }}>
                   <AlertTriangle style={{ width: 14, height: 14, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
                   <span style={{ fontSize: 11, color: "#fbbf24", lineHeight: 1.5 }}>
-                    Arc Testnet CCTP is currently down. You can bridge from other chains to Arc, but not from Arc to other chains. We're working to restore it.
+                    Arc Testnet CCTP is currently down. You can bridge from other chains to Arc, but not from Arc to other chains. Circle team is working to restore it.
                   </span>
                 </div>
               )}
