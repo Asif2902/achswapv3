@@ -693,15 +693,19 @@ export default function Bridge() {
       const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
       let amount = "0";
       
-      // Try to get amount from transaction input data first
-      if (tx.data) {
+      // Try to get amount from transaction input data first (depositForBurn function)
+      if (tx.data && tx.data.length > 10) {
         try {
-          const mintRecipient = "0x" + tx.data.slice(34, 102);
-          const amountArg = tx.data.slice(102, 170);
-          if (amountArg) {
-            const amountWei = BigInt("0x" + amountArg);
-            if (amountWei > 0n) {
-              amount = (Number(amountWei) / 1000000).toString();
+          // depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)
+          // Function selector (4 bytes) + encoded params
+          const funcSig = tx.data.slice(0, 10);
+          if (funcSig === "0x1b3e3db4") { // depositForBurn
+            const amountArg = tx.data.slice(10, 74); // 64 bytes for uint256
+            if (amountArg && amountArg !== "0x" && amountArg.length === 64) {
+              const amountWei = BigInt(amountArg);
+              if (amountWei > 0n) {
+                amount = (Number(amountWei) / 1000000).toString();
+              }
             }
           }
         } catch (e) {
@@ -709,32 +713,30 @@ export default function Bridge() {
         }
       }
       
-      // If still 0, try parsing logs
-      if (amount === "0" && receipt) {
+      // If still 0, try parsing logs for USDC Transfer (Transfer single from ERC1155 or Transfer from ERC20)
+      if (amount === "0" && receipt && receipt.logs) {
+        // Try USDC ERC20 Transfer event
+        const usdcIface = new Interface([
+          "event Transfer(address indexed from, address indexed to, uint256 value)"
+        ]);
+        // USDC on testnet typically at a known address, but we can try any Transfer to 0 address (burn)
         for (const log of receipt.logs) {
-          try {
-            // Try different event signatures
-            const signatures = [
-              "DepositForBurn(uint64,address,uint256,bytes32,uint32,bytes32,address)",
-              "DepositForBurn(uint64 nonce, address burnToken, uint256 amount, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationToken, address msgSender)"
-            ];
-            for (const sig of signatures) {
-              try {
-                const iface = new Interface([`event ${sig}`]);
-                const parsed = iface.parseLog({ topics: log.topics, data: log.data });
-                if (parsed) {
-                  const amountWei = parsed.args.amount as bigint;
-                  amount = (Number(amountWei) / 1000000).toString();
-                  break;
-                }
-              } catch { continue; }
-            }
-            if (amount !== "0") break;
-          } catch { continue; }
+          if (log.topics && log.topics.length >= 3) {
+            // Transfer(address,address,uint256) - topic[0] is signature
+            // Check if it's a burn (to address is 0)
+            try {
+              const parsed = usdcIface.parseLog({ topics: log.topics, data: log.data });
+              if (parsed && parsed.args.to === "0x0000000000000000000000000000000000000000") {
+                const amountWei = parsed.args.value as bigint;
+                amount = (Number(amountWei) / 1000000).toString();
+                break;
+              }
+            } catch { continue; }
+          }
         }
       }
       
-      console.log("Final amount:", amount, "receipt:", !!receipt);
+      console.log("Final amount:", amount, "receipt:", !!receipt, "logs:", receipt?.logs?.length);
 
       // Close modal and notification NOW that validation passed
       setManualClaimOpen(false);
