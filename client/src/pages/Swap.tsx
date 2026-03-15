@@ -18,6 +18,7 @@ import { getSmartRouteQuote, type SmartRoutingResult } from "@/lib/smart-routing
 import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
 import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
 import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
+import { createAlchemyProvider, FALLBACK_RPC } from "@/lib/config";
 import { getErrorForToast } from "@/lib/error-utils";
 
 const ERC20_ABI = [
@@ -134,6 +135,9 @@ export default function Swap() {
 
   // ── Quote fetching ─────────────────────────────────────────────────────────
   useEffect(() => {
+    // Clear max amount ref when amount changes (user edited manually after clicking max)
+    maxAmountWeiRef.current = null;
+    
     if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
     if (abortControllerRef.current) abortControllerRef.current.abort();
     debounceTimeoutRef.current = setTimeout(() => {
@@ -161,11 +165,22 @@ export default function Swap() {
     setIsLoadingQuote(true);
     let provider;
     try {
+      // Always use alchemy provider first
+      provider = createAlchemyProvider(chainId);
+      // Guard with timeout to avoid hanging
+      await Promise.race([
+        provider.getBlockNumber(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Alchemy timeout")), 3000))
+      ]);
+    } catch {
+      // Fallback to wallet RPC if alchemy fails or times out
       if (window.ethereum) {
         provider = new BrowserProvider(window.ethereum);
       } else {
-        provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
+        provider = new JsonRpcProvider(FALLBACK_RPC);
       }
+    }
+    try {
       const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
       if (!wrappedTokenData) throw new Error("wUSDC not found");
       const amountIn = parseAmount(fromAmount, fromToken.decimals);
@@ -260,6 +275,14 @@ export default function Swap() {
       if (!address || !window.ethereum) throw new Error("Please connect your wallet");
       if (!contracts) throw new Error("Chain contracts not configured");
       if (!smartRoutingResult?.bestQuote) throw new Error("No valid quote available");
+      
+      // Verify the quote matches current amount
+      const currentAmountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
+      if ((smartRoutingResult as SmartRoutingResult).inputAmount !== currentAmountIn) {
+        toast({ title: "Quote mismatch", description: "Amount changed. Please wait for a fresh quote.", variant: "destructive" });
+        setIsSwapping(false); return;
+      }
+      
       if (Date.now() - (smartRoutingResult.timestamp || 0) > 30000) {
         toast({ title: "Stale quote", description: "Price may have changed. Please wait for a fresh quote.", variant: "destructive" });
         setIsSwapping(false); return;
@@ -267,7 +290,7 @@ export default function Swap() {
       const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
       const bestQuote = smartRoutingResult.bestQuote;
       // Use max balance in wei if MAX button was clicked, otherwise parse from string
-      const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
+      const amountIn = currentAmountIn;
       // Clear max amount ref after use
       maxAmountWeiRef.current = null;
       const slippageBps = BigInt(Math.floor(slippage * 100));

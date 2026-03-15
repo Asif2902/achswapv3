@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
-import { Contract, JsonRpcProvider, BrowserProvider, zeroPadValue, getAddress, parseUnits } from "ethers";
+import { Contract, JsonRpcProvider, BrowserProvider, zeroPadValue, getAddress, parseUnits, Interface } from "ethers";
 import {
   CCTP_TESTNET_CHAINS,
   CCTP_ATTESTATION_API,
@@ -15,6 +15,7 @@ import {
   MESSAGE_TRANSMITTER_V2_ABI,
   getWorkingProvider,
   getChainByDomain,
+  getCCTPFeeRate,
   type CCTPChain,
 } from "@/lib/cctp-config";
 import {
@@ -340,6 +341,16 @@ export default function Bridge() {
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifMounted, setNotifMounted] = useState(false);
 
+  // Manual claim state
+  const [manualClaimOpen, setManualClaimOpen] = useState(false);
+  const [manualClaimTxHash, setManualClaimTxHash] = useState("");
+  const [manualClaimLoading, setManualClaimLoading] = useState(false);
+  const [manualClaimTxHashValid, setManualClaimTxHashValid] = useState(false);
+  const [manualClaimSourceChain, setManualClaimSourceChain] = useState<CCTPChain | null>(null);
+  const [manualClaimDestChain, setManualClaimDestChain] = useState<CCTPChain | null>(null);
+  const [manualClaimAttestation, setManualClaimAttestation] = useState<{ message: string; attestation: string } | null>(null);
+  const [manualClaimStatus, setManualClaimStatus] = useState<"idle" | "fetching" | "ready" | "not_found" | "error">("idle");
+
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
 
   // ── Load resumable transfers ───────────────────────────────────────────────
@@ -614,6 +625,14 @@ export default function Bridge() {
       );
       const mintReceipt = await mintTx.wait();
 
+      if (!mintReceipt || mintReceipt.status !== 1) {
+        const errorMsg = mintReceipt ? "Mint transaction failed" : "Failed to get mint receipt";
+        updateTransferStatus(transferId, { status: "failed", mintTxHash: mintReceipt?.hash });
+        setTransfer(prev => ({ ...prev, step: "error", error: errorMsg }));
+        toast({ title: "Mint Failed", description: errorMsg, variant: "destructive" });
+        return;
+      }
+
       updateTransferStatus(transferId, { status: "complete", mintTxHash: mintReceipt.hash });
       setTransfer(prev => ({
         ...prev,
@@ -642,6 +661,219 @@ export default function Bridge() {
     }
   };
 
+  // ── Manual claim: fetch attestation and mint from burn tx hash ──────────────────
+  const handleManualClaim = async () => {
+    if (!manualClaimTxHash || !window.ethereum || !address) {
+      toast({ title: "Missing required fields", variant: "destructive" });
+      return;
+    }
+
+    setManualClaimLoading(true);
+    try {
+      if (!manualClaimSourceChain) {
+        throw new Error("Please select the source chain where the burn transaction was made");
+      }
+
+      // Validate and fetch tx info BEFORE closing modal
+      const provider = new JsonRpcProvider(manualClaimSourceChain.rpcUrls[0]);
+      
+      // Get transaction to verify sender
+      const tx = await provider.getTransaction(manualClaimTxHash);
+      if (!tx) {
+        throw new Error("Transaction not found on the selected chain. Make sure you selected the correct source chain.");
+      }
+      
+      // Check if the transaction was made by the connected wallet
+      const txSender = tx.from.toLowerCase();
+      if (txSender !== address.toLowerCase()) {
+        throw new Error(`Transaction was not made by your connected wallet. Please use the wallet that made the burn transaction.`);
+      }
+
+      // Get receipt for amount
+      const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
+      let amount = "0";
+      
+      // Try to get amount from transaction input data first (depositForBurn function)
+      if (tx.data && tx.data.length > 10) {
+        try {
+          // depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)
+          // Function selector (4 bytes) + encoded params
+          const funcSig = tx.data.slice(0, 10);
+          if (funcSig === "0x1b3e3db4") { // depositForBurn
+            const amountArg = tx.data.slice(10, 74); // 64 bytes for uint256
+            if (amountArg && amountArg.length === 64) {
+              const amountWei = BigInt('0x' + amountArg);
+              if (amountWei > 0n) {
+                amount = (Number(amountWei) / 1000000).toString();
+              }
+            }
+          }
+        } catch (e) {
+          console.log("Could not parse amount from tx data:", e);
+        }
+      }
+      
+      // If still 0, try parsing logs for USDC Transfer (Transfer single from ERC1155 or Transfer from ERC20)
+      if (amount === "0" && receipt && receipt.logs) {
+        // Try USDC ERC20 Transfer event
+        const usdcIface = new Interface([
+          "event Transfer(address indexed from, address indexed to, uint256 value)"
+        ]);
+        // USDC on testnet typically at a known address, but we can try any Transfer to 0 address (burn)
+        for (const log of receipt.logs) {
+          if (log.topics && log.topics.length >= 3) {
+            // Transfer(address,address,uint256) - topic[0] is signature
+            // Check if it's a burn (to address is 0)
+            try {
+              const parsed = usdcIface.parseLog({ topics: log.topics, data: log.data });
+              if (parsed && parsed.args.to === "0x0000000000000000000000000000000000000000") {
+                const amountWei = parsed.args.value as bigint;
+                amount = (Number(amountWei) / 1000000).toString();
+                break;
+              }
+            } catch { continue; }
+          }
+        }
+      }
+      
+      console.log("Final amount:", amount, "receipt:", !!receipt, "logs:", receipt?.logs?.length);
+
+      // Close modal and notification NOW that validation passed
+      setManualClaimOpen(false);
+      setNotifOpen(false);
+      setManualClaimTxHash("");
+      setManualClaimSourceChain(null);
+      setManualClaimStatus("idle");
+
+      // Try to get destination from API
+      let destChain: CCTPChain | undefined;
+      let attestation: { message: string; attestation: string } | undefined;
+
+      try {
+        // Fetch attestation
+        const url = `${CCTP_ATTESTATION_API}/v2/messages/${manualClaimSourceChain.domain}?transactionHash=${manualClaimTxHash}`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10000);
+        
+        let response: Response;
+        try {
+          response = await fetch(url, { signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
+        }
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log("Circle API response:", JSON.stringify(data));
+          
+          if (data?.messages?.[0]) {
+            const msg = data.messages[0];
+            destChain = getChainByDomain(msg.destinationDomain);
+            if (destChain && msg.status === "complete" && msg.attestation) {
+              attestation = {
+                message: msg.message,
+                attestation: msg.attestation,
+              };
+              
+              // Try to get amount from the message if available
+              if (msg.message && amount === "0") {
+                try {
+                  // Message format: contains amount at specific offset
+                  // Skip if already has amount
+                } catch { /* ignore */ }
+              }
+            }
+          }
+        }
+      } catch (apiErr) {
+        console.log("API fetch failed, will poll for attestation:", apiErr);
+      }
+
+      // Set chains - if destChain unknown, use first available as placeholder
+      if (!destChain) {
+        const allChains = CCTP_TESTNET_CHAINS.filter(c => c.domain !== manualClaimSourceChain.domain);
+        destChain = allChains[0];
+      }
+
+      // Update UI like resume system does - IMMEDIATELY
+      setSourceChain(manualClaimSourceChain);
+      setDestChain(destChain);
+      setAmount(amount);
+      currentTransferIdRef.current = manualClaimTxHash;
+      abortRef.current = false;
+
+      if (attestation) {
+        // Has attestation - go to minting
+        setTransfer({
+          step: "minting",
+          burnTxHash: manualClaimTxHash,
+          mintTxHash: null,
+          attestation: attestation,
+          error: null,
+        });
+
+        savePendingTransfer({
+          id: manualClaimTxHash,
+          burnTxHash: manualClaimTxHash,
+          sourceDomain: manualClaimSourceChain.domain,
+          sourceChainId: manualClaimSourceChain.chainId,
+          destDomain: destChain.domain,
+          destChainId: destChain.chainId,
+          amount,
+          userAddress: address,
+          timestamp: Date.now(),
+          status: "ready_to_mint",
+          attestation,
+        });
+
+        await executeMint(destChain, attestation, manualClaimTxHash, amount);
+      } else {
+        // No attestation yet - go to attesting and poll
+        setTransfer({
+          step: "attesting",
+          burnTxHash: manualClaimTxHash,
+          mintTxHash: null,
+          attestation: null,
+          error: null,
+        });
+
+        savePendingTransfer({
+          id: manualClaimTxHash,
+          burnTxHash: manualClaimTxHash,
+          sourceDomain: manualClaimSourceChain.domain,
+          sourceChainId: manualClaimSourceChain.chainId,
+          destDomain: destChain.domain,
+          destChainId: destChain.chainId,
+          amount,
+          userAddress: address,
+          timestamp: Date.now(),
+          status: "attesting",
+        });
+
+        toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
+        
+        const fetchedAttestation = await pollForAttestation(manualClaimSourceChain.domain, manualClaimTxHash);
+        
+        if (abortRef.current) return;
+        
+        updateTransferStatus(manualClaimTxHash, { status: "ready_to_mint", attestation: fetchedAttestation });
+        
+        // Use the destination chain we already determined
+        setDestChain(destChain);
+        
+        setTransfer(prev => ({ ...prev, step: "minting", attestation: fetchedAttestation }));
+        
+        await executeMint(destChain, fetchedAttestation, manualClaimTxHash, "0");
+      }
+
+    } catch (err: any) {
+      const msg = err?.message || "Manual claim failed";
+      toast({ title: "Claim Failed", description: msg, variant: "destructive" });
+    } finally {
+      setManualClaimLoading(false);
+    }
+  };
+
   // ── CCTP Bridge execution ──────────────────────────────────────────────────
   const handleBridge = async () => {
     if (!address || !window.ethereum || !amount || parseFloat(amount) <= 0) return;
@@ -654,8 +886,23 @@ export default function Bridge() {
     try {
       const decimals = sourceChain.usdcDecimals; // always 6 for CCTP operations
       const amountWei = parseUnits(amount, decimals);
-      const maxFee = amountWei * 5n / 10000n; // 0.05% max fee
-      const minFinalityThreshold = (useFastTransfer && sourceChain.supportsFastTransfer) ? 1000 : 2000;
+
+      const useFastTransferNow = useFastTransfer && sourceChain.supportsFastTransfer;
+      const minFinalityThreshold = useFastTransferNow ? 1000 : 2000;
+
+      let maxFee: bigint;
+      if (useFastTransferNow) {
+        let feeRateBps: number;
+        try {
+          feeRateBps = await getCCTPFeeRate(sourceChain.domain, destChain.domain);
+        } catch (err) {
+          console.error("Failed to fetch CCTP fee rate, using fallback:", err);
+          feeRateBps = 5;
+        }
+        maxFee = amountWei * BigInt(feeRateBps) * 110n / 100n / 10000n;
+      } else {
+        maxFee = amountWei * 5n / 10000n;
+      }
 
       // ── Check connected network & prompt switch ─────────────────────────
       const preProvider = new BrowserProvider(window.ethereum);
@@ -1274,6 +1521,18 @@ export default function Bridge() {
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setManualClaimOpen(true)}
+                    className="text-[11px] font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all"
+                    style={{
+                      color: "#60a5fa",
+                      background: "rgba(96,165,250,0.1)",
+                      border: "1px solid rgba(96,165,250,0.25)",
+                    }}
+                  >
+                    <Zap className="w-3 h-3" />
+                    Manual Claim
+                  </button>
                   {allTransfers.length > 0 && (
                     <button
                       onClick={() => {
@@ -1492,6 +1751,134 @@ export default function Bridge() {
         excludeChain={sourceChain}
         label="Select Destination Chain"
       />
+
+      {/* Manual Claim Modal */}
+      {manualClaimOpen && (
+        <>
+          {/* Backdrop */}
+          <div
+            onClick={() => {
+              setManualClaimOpen(false);
+              setManualClaimTxHash("");
+              setManualClaimSourceChain(null);
+              setManualClaimDestChain(null);
+              setManualClaimAttestation(null);
+              setManualClaimStatus("idle");
+            }}
+            className="fixed inset-0 z-50"
+            style={{ background: "rgba(0,0,0,0.72)", backdropFilter: "blur(8px)" }}
+          />
+          {/* Modal */}
+          <div className="fixed z-50 inset-0 flex items-center justify-center p-4">
+            <div
+              className="relative w-full max-w-md overflow-hidden"
+              style={{
+                background: "linear-gradient(160deg, #0f1117 0%, #0c0e13 100%)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                borderRadius: 20,
+                padding: 24,
+              }}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Manual Claim</h2>
+                  <p className="text-[11px] text-white/40 mt-1">Claim USDC using a burn transaction hash</p>
+                </div>
+                <button
+                  onClick={() => {
+              setManualClaimOpen(false);
+              setManualClaimTxHash("");
+              setManualClaimSourceChain(null);
+              setManualClaimDestChain(null);
+              setManualClaimAttestation(null);
+              setManualClaimStatus("idle");
+            }}
+                  className="w-8 h-8 rounded-xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/8 transition-all"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Form */}
+              <div className="space-y-4">
+                {/* Source Chain Selector */}
+                <div>
+                  <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Source Chain (where you burned USDC)</label>
+                  <select
+                    value={String(manualClaimSourceChain?.domain ?? "")}
+                    onChange={(e) => {
+                      if (e.target.value === "") {
+                        setManualClaimSourceChain(null);
+                      } else {
+                        const chain = CCTP_TESTNET_CHAINS.find(c => c.domain === Number(e.target.value));
+                        setManualClaimSourceChain(chain || null);
+                      }
+                    }}
+                    className="w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border border-white/10 focus:border-indigo-500/50 focus:outline-none"
+                  >
+                    <option value="">Select source chain</option>
+                    {CCTP_TESTNET_CHAINS.map(chain => (
+                      <option key={chain.domain} value={chain.domain}>{chain.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Burn Tx Hash */}
+                <div>
+                  <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Burn Transaction Hash</label>
+                  <input
+                    type="text"
+                    value={manualClaimTxHash}
+                    onChange={(e) => {
+                      setManualClaimTxHash(e.target.value);
+                      setManualClaimTxHashValid(/^0x[a-fA-F0-9]{64}$/.test(e.target.value));
+                    }}
+                    placeholder="0x..."
+                    className={`w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border focus:outline-none placeholder:text-white/20 ${
+                      manualClaimTxHash && !manualClaimTxHashValid ? "border-red-500 focus:border-red-500" : "border-white/10 focus:border-indigo-500/50"
+                    }`}
+                  />
+                  {manualClaimTxHash && !manualClaimTxHashValid && (
+                    <p className="text-[10px] text-red-400 mt-1">Invalid transaction hash format</p>
+                  )}
+                </div>
+
+                {/* Submit */}
+                <button
+                  onClick={handleManualClaim}
+                  disabled={!manualClaimTxHash || !manualClaimTxHashValid || !manualClaimSourceChain || manualClaimLoading || !address}
+                  className="w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
+                  style={{
+                    background: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address
+                      ? "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
+                      : "rgba(99,102,241,0.3)",
+                    color: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
+                    cursor: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "pointer" : "not-allowed",
+                  }}
+                >
+                  {manualClaimLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Processing...
+                    </>
+                  ) : (
+                    <>
+                      <Zap className="w-4 h-4" />
+                      Resume Transfer
+                    </>
+                  )}
+                </button>
+
+                {!address && (
+                  <p className="text-[11px] text-center text-amber-400">Connect wallet to claim</p>
+                )}
+                <p className="text-[10px] text-center text-white/30">Enter the burn tx hash to resume your transfer</p>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 }

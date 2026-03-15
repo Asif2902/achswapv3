@@ -52,6 +52,7 @@ export function Header() {
     { href: "/analytics",        label: "Analytics", testId: "link-analytics",        icon: BarChart3 },
     { href: "/bridge",           label: "Bridge",    testId: "link-bridge",           icon: Globe },
     { href: "/launch",           label: "Launch Token", testId: "link-launch",        icon: Rocket },
+    { href: "https://prediction.achswap.app", label: "Prediction Markets", testId: "link-prediction", icon: TrendingUp, external: true },
   ];
 
   const isActive = (href: string) =>
@@ -75,17 +76,6 @@ export function Header() {
 
         {/* Right side: wallet + hamburger */}
         <div className="flex items-center gap-2 md:gap-3">
-
-          {/* Prediction Markets Button */}
-          <a
-            href="https://prediction.achswap.app"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hidden md:flex items-center gap-2 px-3 py-2 text-sm font-semibold rounded-lg bg-gradient-to-r from-emerald-500 to-teal-600 text-white hover:opacity-90 transition-all duration-200 shadow-md hover:shadow-lg"
-          >
-            <TrendingUp className="w-4 h-4" />
-            Prediction Markets
-          </a>
 
           {/* Wallet / chain buttons */}
           <ConnectButton.Custom>
@@ -195,6 +185,23 @@ export function Header() {
               {navItems.map(item => {
                 const Icon = item.icon;
                 const active = isActive(item.href);
+                const isExternal = item.external || item.href.startsWith("http");
+                if (isExternal) {
+                  return (
+                    <a
+                      key={item.href}
+                      href={item.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      data-testid={item.testId}
+                      onClick={() => setMenuOpen(false)}
+                      className={`flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 text-foreground/80 hover:bg-accent/60 hover:text-accent-foreground border border-transparent`}
+                    >
+                      <Icon className="w-4 h-4 flex-shrink-0 text-foreground/40" />
+                      <span>{item.label}</span>
+                    </a>
+                  );
+                }
                 return (
                   <Link
                     key={item.href}
@@ -212,19 +219,6 @@ export function Header() {
                   </Link>
                 );
               })}
-              {/* External: Prediction Markets */}
-              <a
-                href="https://prediction.achswap.app"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-200 text-foreground/80 hover:bg-accent/60 hover:text-accent-foreground border border-transparent"
-              >
-                <TrendingUp className="w-4 h-4 flex-shrink-0 text-emerald-500" />
-                <span>Prediction Markets</span>
-                <svg className="w-3 h-3 ml-auto text-foreground/40" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                </svg>
-              </a>
             </div>
           </div>
         </nav>
