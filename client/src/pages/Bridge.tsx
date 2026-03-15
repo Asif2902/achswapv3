@@ -345,7 +345,6 @@ export default function Bridge() {
   // Manual claim state
   const [manualClaimOpen, setManualClaimOpen] = useState(false);
   const [manualClaimTxHash, setManualClaimTxHash] = useState("");
-  const [manualClaimDestChain, setManualClaimDestChain] = useState<CCTPChain | null>(null);
   const [manualClaimLoading, setManualClaimLoading] = useState(false);
 
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
@@ -652,49 +651,66 @@ export default function Bridge() {
 
   // ── Manual claim: fetch attestation and mint from burn tx hash ──────────────────
   const handleManualClaim = async () => {
-    if (!manualClaimTxHash || !manualClaimDestChain || !window.ethereum || !address) {
+    if (!manualClaimTxHash || !window.ethereum || !address) {
       toast({ title: "Missing required fields", variant: "destructive" });
       return;
     }
 
     setManualClaimLoading(true);
     try {
-      // Fetch attestation from Circle API
-      const url = `${CCTP_ATTESTATION_API}/v2/messages/${sourceChain.domain}?transactionHash=${manualClaimTxHash}`;
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error("Failed to fetch attestation. Make sure the transaction is confirmed.");
-      }
-      const data = await response.json();
-      if (!data?.messages?.[0] || data.messages[0].status !== "complete" || !data.messages[0].attestation) {
-        throw new Error("Attestation not ready yet. Please wait for Circle to finalize the message.");
+      // Fetch attestation from Circle API - try each source domain
+      let attestationData: { message: string; attestation: string; destinationDomain: number } | null = null;
+
+      for (const chain of CCTP_TESTNET_CHAINS) {
+        try {
+          const url = `${CCTP_ATTESTATION_API}/v2/messages/${chain.domain}?transactionHash=${manualClaimTxHash}`;
+          const response = await fetch(url);
+          if (response.ok) {
+            const data = await response.json();
+            if (data?.messages?.[0]?.status === "complete" && data.messages[0].attestation) {
+              attestationData = {
+                message: data.messages[0].message,
+                attestation: data.messages[0].attestation,
+                destinationDomain: data.messages[0].destinationDomain,
+              };
+              break;
+            }
+          }
+        } catch {
+          continue;
+        }
       }
 
-      const attestation = {
-        message: data.messages[0].message,
-        attestation: data.messages[0].attestation,
-      };
+      if (!attestationData) {
+        throw new Error("No attestation found. Make sure the transaction is confirmed on the source chain.");
+      }
+
+      // Get destination chain from attestation
+      const destChain = getChainByDomain(attestationData.destinationDomain);
+      if (!destChain) {
+        throw new Error(`Unknown destination domain: ${attestationData.destinationDomain}`);
+      }
 
       // Switch to destination chain
       try {
         await window.ethereum.request({
           method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x" + manualClaimDestChain.chainId.toString(16) }],
+          params: [{ chainId: "0x" + destChain.chainId.toString(16) }],
         });
       } catch (switchErr: any) {
         if (switchErr.code === 4902) {
           await window.ethereum.request({
             method: "wallet_addEthereumChain",
             params: [{
-              chainId: "0x" + manualClaimDestChain.chainId.toString(16),
-              chainName: manualClaimDestChain.name,
-              nativeCurrency: manualClaimDestChain.nativeCurrency,
-              rpcUrls: [manualClaimDestChain.rpcUrls[0]],
-              blockExplorerUrls: [manualClaimDestChain.explorerUrl],
+              chainId: "0x" + destChain.chainId.toString(16),
+              chainName: destChain.name,
+              nativeCurrency: destChain.nativeCurrency,
+              rpcUrls: [destChain.rpcUrls[0]],
+              blockExplorerUrls: [destChain.explorerUrl],
             }],
           });
         } else {
-          throw new Error(`Please switch to ${manualClaimDestChain.name} to claim USDC`);
+          throw new Error(`Please switch to ${destChain.name} to claim USDC`);
         }
       }
 
@@ -703,35 +719,34 @@ export default function Bridge() {
       const destProvider = new BrowserProvider(window.ethereum);
       const destSigner = await destProvider.getSigner();
 
-      toast({ title: "Claiming USDC...", description: `On ${manualClaimDestChain.name}` });
+      toast({ title: "Claiming USDC...", description: `On ${destChain.name}` });
 
       const messageTransmitter = new Contract(
-        manualClaimDestChain.messageTransmitterV2,
+        destChain.messageTransmitterV2,
         MESSAGE_TRANSMITTER_V2_ABI,
         destSigner
       );
 
       const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
-        attestation.message,
-        attestation.attestation
+        attestationData.message,
+        attestationData.attestation
       );
       const boostedGas = gasEstimate * 150n / 100n;
 
       const mintTx = await messageTransmitter.receiveMessage(
-        attestation.message,
-        attestation.attestation,
+        attestationData.message,
+        attestationData.attestation,
         { gasLimit: boostedGas }
       );
       const mintReceipt = await mintTx.wait();
 
       toast({
         title: "Claim Successful!",
-        description: `USDC claimed on ${manualClaimDestChain.shortName}`,
+        description: `USDC claimed on ${destChain.shortName}`,
       });
 
       setManualClaimOpen(false);
       setManualClaimTxHash("");
-      setManualClaimDestChain(null);
       fetchBalance();
 
     } catch (err: any) {
@@ -1662,48 +1677,23 @@ export default function Bridge() {
                   />
                 </div>
 
-                {/* Destination Chain */}
-                <div>
-                  <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Destination Chain</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {CCTP_TESTNET_CHAINS.filter(c => c.domain !== sourceChain.domain).map((chain) => (
-                      <button
-                        key={chain.domain}
-                        onClick={() => setManualClaimDestChain(chain)}
-                        className="p-2.5 rounded-xl text-left transition-all"
-                        style={{
-                          background: manualClaimDestChain?.domain === chain.domain ? "rgba(99,102,241,0.15)" : "rgba(255,255,255,0.03)",
-                          border: `1px solid ${manualClaimDestChain?.domain === chain.domain ? "rgba(99,102,241,0.4)" : "rgba(255,255,255,0.06)"}`,
-                        }}
-                      >
-                        <div className="flex items-center gap-2">
-                          {chain.logo && (
-                            <img src={chain.logo} alt={chain.shortName} className="w-5 h-5 rounded-full" />
-                          )}
-                          <span className="text-sm font-medium text-white/80">{chain.shortName}</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
                 {/* Submit */}
                 <button
                   onClick={handleManualClaim}
-                  disabled={!manualClaimTxHash || !manualClaimDestChain || manualClaimLoading || !address}
+                  disabled={!manualClaimTxHash || manualClaimLoading || !address}
                   className="w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
                   style={{
-                    background: manualClaimTxHash && manualClaimDestChain && !manualClaimLoading && address
+                    background: manualClaimTxHash && !manualClaimLoading && address
                       ? "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
                       : "rgba(99,102,241,0.3)",
-                    color: manualClaimTxHash && manualClaimDestChain && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
-                    cursor: manualClaimTxHash && manualClaimDestChain && !manualClaimLoading && address ? "pointer" : "not-allowed",
+                    color: manualClaimTxHash && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
+                    cursor: manualClaimTxHash && !manualClaimLoading && address ? "pointer" : "not-allowed",
                   }}
                 >
                   {manualClaimLoading ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      Claiming...
+                      Detecting destination & claiming...
                     </>
                   ) : (
                     <>
@@ -1716,6 +1706,7 @@ export default function Bridge() {
                 {!address && (
                   <p className="text-[11px] text-center text-amber-400">Connect wallet to claim</p>
                 )}
+                <p className="text-[10px] text-center text-white/30">Destination chain is auto-detected from the attestation</p>
               </div>
             </div>
           </div>
