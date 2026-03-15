@@ -669,122 +669,130 @@ export default function Bridge() {
     }
 
     setManualClaimLoading(true);
-    setManualClaimStatus("fetching");
-    setManualClaimDestChain(null);
-    setManualClaimAttestation(null);
     try {
       if (!manualClaimSourceChain) {
         throw new Error("Please select the source chain where the burn transaction was made");
       }
 
-      // Fetch attestation from the selected source chain
-      const url = `${CCTP_ATTESTATION_API}/v2/messages/${manualClaimSourceChain.domain}?transactionHash=${manualClaimTxHash}`;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000);
-      
-      let response: Response;
-      try {
-        response = await fetch(url, { signal: controller.signal });
-      } finally {
-        clearTimeout(timer);
-      }
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch attestation: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      if (!data?.messages?.[0] || data.messages[0].status !== "complete") {
-        // Even if attestation not ready, we can save and resume later
-        const destDomainFromResponse = data?.messages?.[0]?.destinationDomain;
-        if (destDomainFromResponse) {
-          const destChain = getChainByDomain(destDomainFromResponse);
-          if (destChain) {
-            // Save transfer for later resume
-            savePendingTransfer({
-              id: manualClaimTxHash,
-              burnTxHash: manualClaimTxHash,
-              sourceDomain: manualClaimSourceChain.domain,
-              sourceChainId: manualClaimSourceChain.chainId,
-              destDomain: destChain.domain,
-              destChainId: destChain.chainId,
-              amount: "0",
-              userAddress: address,
-              timestamp: Date.now(),
-              status: "attesting",
-            });
-            refreshPendingTransfers();
-            setManualClaimOpen(false);
-            setManualClaimTxHash("");
-            setManualClaimSourceChain(null);
-            setManualClaimStatus("idle");
-            toast({ 
-              title: "Transfer Saved", 
-              description: "Attestation not ready yet. Check notifications panel in a few minutes.",
-              duration: 6000,
-            });
-            return;
-          }
-        }
-        throw new Error("No attestation found yet. Make sure the transaction is confirmed and enough time has passed (1-20 minutes).");
-      }
-
-      const attestation = {
-        message: data.messages[0].message,
-        attestation: data.messages[0].attestation,
-      };
-      
-      const destinationDomain = data.messages[0].destinationDomain;
-      const destChain = getChainByDomain(destinationDomain);
-      
-      if (!destChain) {
-        throw new Error(`Unknown destination domain: ${destinationDomain}`);
-      }
-
-      // Close modal first
+      // Close modal first - IMMEDIATELY update UI like resume does
       setManualClaimOpen(false);
       setManualClaimTxHash("");
       setManualClaimSourceChain(null);
       setManualClaimStatus("idle");
 
-      // Update UI like resume system does
+      // Try to get destination from API, but don't wait - just save with unknown dest for now
+      let destChain: CCTPChain | undefined;
+      let attestation: { message: string; attestation: string } | undefined;
+
+      try {
+        // Fetch attestation
+        const url = `${CCTP_ATTESTATION_API}/v2/messages/${manualClaimSourceChain.domain}?transactionHash=${manualClaimTxHash}`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10000);
+        
+        let response: Response;
+        try {
+          response = await fetch(url, { signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
+        }
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data?.messages?.[0]?.status === "complete") {
+            destChain = getChainByDomain(data.messages[0].destinationDomain);
+            if (destChain) {
+              attestation = {
+                message: data.messages[0].message,
+                attestation: data.messages[0].attestation,
+              };
+            }
+          }
+        }
+      } catch (apiErr) {
+        console.log("API fetch failed, will poll for attestation:", apiErr);
+      }
+
+      // Set chains - if destChain unknown, use first available as placeholder
+      if (!destChain) {
+        const allChains = CCTP_TESTNET_CHAINS.filter(c => c.domain !== manualClaimSourceChain.domain);
+        destChain = allChains[0];
+      }
+
+      // Update UI like resume system does - IMMEDIATELY
       setSourceChain(manualClaimSourceChain);
       setDestChain(destChain);
       setAmount("0");
       currentTransferIdRef.current = manualClaimTxHash;
       abortRef.current = false;
 
-      // Set transfer to minting step
-      setTransfer({
-        step: "minting",
-        burnTxHash: manualClaimTxHash,
-        mintTxHash: null,
-        attestation: attestation,
-        error: null,
-      });
+      if (attestation) {
+        // Has attestation - go to minting
+        setTransfer({
+          step: "minting",
+          burnTxHash: manualClaimTxHash,
+          mintTxHash: null,
+          attestation: attestation,
+          error: null,
+        });
 
-      // Save transfer for recovery
-      savePendingTransfer({
-        id: manualClaimTxHash,
-        burnTxHash: manualClaimTxHash,
-        sourceDomain: manualClaimSourceChain.domain,
-        sourceChainId: manualClaimSourceChain.chainId,
-        destDomain: destChain.domain,
-        destChainId: destChain.chainId,
-        amount: "0",
-        userAddress: address,
-        timestamp: Date.now(),
-        status: "ready_to_mint",
-        attestation,
-      });
+        savePendingTransfer({
+          id: manualClaimTxHash,
+          burnTxHash: manualClaimTxHash,
+          sourceDomain: manualClaimSourceChain.domain,
+          sourceChainId: manualClaimSourceChain.chainId,
+          destDomain: destChain.domain,
+          destChainId: destChain.chainId,
+          amount: "0",
+          userAddress: address,
+          timestamp: Date.now(),
+          status: "ready_to_mint",
+          attestation,
+        });
 
-      // Proceed to mint
-      await executeMint(destChain, attestation, manualClaimTxHash, "0");
+        await executeMint(destChain, attestation, manualClaimTxHash, "0");
+      } else {
+        // No attestation yet - go to attesting and poll
+        setTransfer({
+          step: "attesting",
+          burnTxHash: manualClaimTxHash,
+          mintTxHash: null,
+          attestation: null,
+          error: null,
+        });
+
+        savePendingTransfer({
+          id: manualClaimTxHash,
+          burnTxHash: manualClaimTxHash,
+          sourceDomain: manualClaimSourceChain.domain,
+          sourceChainId: manualClaimSourceChain.chainId,
+          destDomain: destChain.domain,
+          destChainId: destChain.chainId,
+          amount: "0",
+          userAddress: address,
+          timestamp: Date.now(),
+          status: "attesting",
+        });
+
+        toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
+        
+        const fetchedAttestation = await pollForAttestation(manualClaimSourceChain.domain, manualClaimTxHash);
+        
+        if (abortRef.current) return;
+        
+        updateTransferStatus(manualClaimTxHash, { status: "ready_to_mint", attestation: fetchedAttestation });
+        
+        // Get actual destination from attestation
+        const actualDestChain = getChainByDomain(manualClaimSourceChain.domain + 1) || destChain;
+        setDestChain(actualDestChain);
+        
+        setTransfer(prev => ({ ...prev, step: "minting", attestation: fetchedAttestation }));
+        
+        await executeMint(actualDestChain, fetchedAttestation, manualClaimTxHash, "0");
+      }
 
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
-      setManualClaimStatus("error");
       toast({ title: "Claim Failed", description: msg, variant: "destructive" });
     } finally {
       setManualClaimLoading(false);
@@ -1727,9 +1735,6 @@ export default function Bridge() {
                     onChange={(e) => {
                       const chain = CCTP_TESTNET_CHAINS.find(c => c.domain === Number(e.target.value));
                       setManualClaimSourceChain(chain || null);
-                      setManualClaimStatus("idle");
-                      setManualClaimDestChain(null);
-                      setManualClaimAttestation(null);
                     }}
                     className="w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border border-white/10 focus:border-indigo-500/50 focus:outline-none"
                   >
@@ -1749,9 +1754,6 @@ export default function Bridge() {
                     onChange={(e) => {
                       setManualClaimTxHash(e.target.value);
                       setManualClaimTxHashValid(/^0x[a-fA-F0-9]{64}$/.test(e.target.value));
-                      setManualClaimStatus("idle");
-                      setManualClaimDestChain(null);
-                      setManualClaimAttestation(null);
                     }}
                     placeholder="0x..."
                     className={`w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border focus:outline-none placeholder:text-white/20 ${
@@ -1762,35 +1764,6 @@ export default function Bridge() {
                     <p className="text-[10px] text-red-400 mt-1">Invalid transaction hash format</p>
                   )}
                 </div>
-
-                {/* Detected Info */}
-                {manualClaimStatus === "ready" && manualClaimDestChain && (
-                  <div className="p-3 rounded-xl bg-indigo-500/10 border border-indigo-500/20">
-                    <p className="text-[11px] text-indigo-300 font-medium mb-1">✓ Attestation Ready</p>
-                    <p className="text-[11px] text-white/60">
-                      Destination: <span className="text-white">{manualClaimDestChain.name}</span>
-                    </p>
-                    <p className="text-[10px] text-white/40 mt-1">Your USDC is ready to be claimed on {manualClaimDestChain.name}</p>
-                  </div>
-                )}
-
-                {manualClaimStatus === "not_found" && (
-                  <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20">
-                    <p className="text-[11px] text-amber-300 font-medium mb-1">⏳ Attestation Not Ready</p>
-                    <p className="text-[10px] text-white/60">
-                      The attestation may still be processing. Circle typically completes attestations within 1-20 minutes after the burn transaction.
-                    </p>
-                  </div>
-                )}
-
-                {manualClaimStatus === "fetching" && (
-                  <div className="p-3 rounded-xl bg-white/5 border border-white/10">
-                    <p className="text-[11px] text-white/60 flex items-center gap-2">
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                      Checking attestation status...
-                    </p>
-                  </div>
-                )}
 
                 {/* Submit */}
                 <button
@@ -1808,12 +1781,12 @@ export default function Bridge() {
                   {manualClaimLoading ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin" />
-                      {manualClaimStatus === "fetching" ? "Checking attestation..." : "Claiming USDC..."}
+                      Processing...
                     </>
                   ) : (
                     <>
                       <Zap className="w-4 h-4" />
-                      Check & Claim
+                      Resume Transfer
                     </>
                   )}
                 </button>
@@ -1821,9 +1794,7 @@ export default function Bridge() {
                 {!address && (
                   <p className="text-[11px] text-center text-amber-400">Connect wallet to claim</p>
                 )}
-                {manualClaimSourceChain && (
-                  <p className="text-[10px] text-center text-white/30">Select the chain where you initiated the burn transaction</p>
-                )}
+                <p className="text-[10px] text-center text-white/30">Enter the burn tx hash to resume your transfer</p>
               </div>
             </div>
           </div>
