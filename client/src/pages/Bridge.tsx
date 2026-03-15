@@ -667,12 +667,21 @@ export default function Bridge() {
     setManualClaimLoading(true);
     try {
       // Fetch attestation from Circle API - try each source domain
-      let attestationData: { message: string; attestation: string; destinationDomain: number } | null = null;
+      let attestationData: { message: string; attestation: string; destinationDomain: number; sourceChain: CCTPChain } | null = null;
+      const FETCH_TIMEOUT_MS = 10_000;
 
       for (const chain of CCTP_TESTNET_CHAINS) {
+        if (abortRef.current) return;
         try {
           const url = `${CCTP_ATTESTATION_API}/v2/messages/${chain.domain}?transactionHash=${manualClaimTxHash}`;
-          const response = await fetch(url);
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+          let response: Response;
+          try {
+            response = await fetch(url, { signal: controller.signal });
+          } finally {
+            clearTimeout(timer);
+          }
           if (response.ok) {
             const data = await response.json();
             if (data?.messages?.[0]?.status === "complete" && data.messages[0].attestation) {
@@ -680,6 +689,7 @@ export default function Bridge() {
                 message: data.messages[0].message,
                 attestation: data.messages[0].attestation,
                 destinationDomain: data.messages[0].destinationDomain,
+                sourceChain: chain,
               };
               break;
             }
@@ -698,6 +708,25 @@ export default function Bridge() {
       if (!destChain) {
         throw new Error(`Unknown destination domain: ${attestationData.destinationDomain}`);
       }
+
+      // Persist the manual claim transfer for recovery
+      const transferId = manualClaimTxHash;
+      savePendingTransfer({
+        id: transferId,
+        burnTxHash: manualClaimTxHash,
+        sourceDomain: attestationData.sourceChain.domain,
+        sourceChainId: attestationData.sourceChain.chainId,
+        destDomain: destChain.domain,
+        destChainId: destChain.chainId,
+        amount: "0",
+        userAddress: address,
+        timestamp: Date.now(),
+        status: "ready_to_mint",
+        attestation: {
+          message: attestationData.message,
+          attestation: attestationData.attestation,
+        },
+      });
 
       // Switch to destination chain
       try {
@@ -763,6 +792,7 @@ export default function Bridge() {
         description: `USDC claimed on ${destChain.shortName}`,
       });
 
+      removeTransfer(manualClaimTxHash);
       setManualClaimOpen(false);
       setManualClaimTxHash("");
       fetchBalance();
