@@ -701,8 +701,8 @@ export default function Bridge() {
           const funcSig = tx.data.slice(0, 10);
           if (funcSig === "0x1b3e3db4") { // depositForBurn
             const amountArg = tx.data.slice(10, 74); // 64 bytes for uint256
-            if (amountArg && amountArg !== "0x" && amountArg.length === 64) {
-              const amountWei = BigInt(amountArg);
+            if (amountArg && amountArg.length === 64) {
+              const amountWei = BigInt('0x' + amountArg);
               if (amountWei > 0n) {
                 amount = (Number(amountWei) / 1000000).toString();
               }
@@ -858,13 +858,12 @@ export default function Bridge() {
         
         updateTransferStatus(manualClaimTxHash, { status: "ready_to_mint", attestation: fetchedAttestation });
         
-        // Get actual destination from attestation
-        const actualDestChain = getChainByDomain(manualClaimSourceChain.domain + 1) || destChain;
-        setDestChain(actualDestChain);
+        // Use the destination chain we already determined
+        setDestChain(destChain);
         
         setTransfer(prev => ({ ...prev, step: "minting", attestation: fetchedAttestation }));
         
-        await executeMint(actualDestChain, fetchedAttestation, manualClaimTxHash, "0");
+        await executeMint(destChain, fetchedAttestation, manualClaimTxHash, "0");
       }
 
     } catch (err: any) {
@@ -1807,10 +1806,14 @@ export default function Bridge() {
                 <div>
                   <label className="text-[11px] font-medium text-white/60 mb-1.5 block">Source Chain (where you burned USDC)</label>
                   <select
-                    value={manualClaimSourceChain?.domain || ""}
+                    value={String(manualClaimSourceChain?.domain ?? "")}
                     onChange={(e) => {
-                      const chain = CCTP_TESTNET_CHAINS.find(c => c.domain === Number(e.target.value));
-                      setManualClaimSourceChain(chain || null);
+                      if (e.target.value === "") {
+                        setManualClaimSourceChain(null);
+                      } else {
+                        const chain = CCTP_TESTNET_CHAINS.find(c => c.domain === Number(e.target.value));
+                        setManualClaimSourceChain(chain || null);
+                      }
                     }}
                     className="w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border border-white/10 focus:border-indigo-500/50 focus:outline-none"
                   >

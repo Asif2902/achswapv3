@@ -164,10 +164,18 @@ export default function Swap() {
     try {
       // Always use alchemy provider first
       provider = createAlchemyProvider(chainId);
-      await provider.getBlockNumber();
+      // Guard with timeout to avoid hanging
+      await Promise.race([
+        provider.getBlockNumber(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Alchemy timeout")), 3000))
+      ]);
     } catch {
-      // Fallback to public RPC if alchemy fails
-      provider = new JsonRpcProvider(FALLBACK_RPC);
+      // Fallback to wallet RPC if alchemy fails or times out
+      if (window.ethereum) {
+        provider = new BrowserProvider(window.ethereum);
+      } else {
+        provider = new JsonRpcProvider(FALLBACK_RPC);
+      }
     }
     try {
       const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
