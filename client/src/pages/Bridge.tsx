@@ -696,16 +696,12 @@ export default function Bridge() {
       const data = await response.json();
       
       if (!data?.messages?.[0] || data.messages[0].status !== "complete") {
-        // Even if attestation not ready, save the transfer so user can resume later
-        setManualClaimStatus("not_found");
-        
-        // Check if we can determine destination domain from response
+        // Even if attestation not ready, we can save and resume later
         const destDomainFromResponse = data?.messages?.[0]?.destinationDomain;
-        
         if (destDomainFromResponse) {
           const destChain = getChainByDomain(destDomainFromResponse);
           if (destChain) {
-            // Save as attesting - user can resume later
+            // Save transfer for later resume
             savePendingTransfer({
               id: manualClaimTxHash,
               burnTxHash: manualClaimTxHash,
@@ -719,24 +715,26 @@ export default function Bridge() {
               status: "attesting",
             });
             refreshPendingTransfers();
-            toast({ 
-              title: "Transfer Saved", 
-              description: `Attestation not ready yet. Check from notifications panel in a few minutes.`,
-              duration: 6000,
-            });
             setManualClaimOpen(false);
             setManualClaimTxHash("");
             setManualClaimSourceChain(null);
-            setManualClaimDestChain(null);
-            setManualClaimAttestation(null);
             setManualClaimStatus("idle");
+            toast({ 
+              title: "Transfer Saved", 
+              description: "Attestation not ready yet. Check notifications panel in a few minutes.",
+              duration: 6000,
+            });
             return;
           }
         }
-        
         throw new Error("No attestation found yet. Make sure the transaction is confirmed and enough time has passed (1-20 minutes).");
       }
 
+      const attestation = {
+        message: data.messages[0].message,
+        attestation: data.messages[0].attestation,
+      };
+      
       const destinationDomain = data.messages[0].destinationDomain;
       const destChain = getChainByDomain(destinationDomain);
       
@@ -744,17 +742,31 @@ export default function Bridge() {
         throw new Error(`Unknown destination domain: ${destinationDomain}`);
       }
 
-      setManualClaimDestChain(destChain);
-      setManualClaimAttestation({
-        message: data.messages[0].message,
-        attestation: data.messages[0].attestation,
-      });
-      setManualClaimStatus("ready");
+      // Close modal first
+      setManualClaimOpen(false);
+      setManualClaimTxHash("");
+      setManualClaimSourceChain(null);
+      setManualClaimStatus("idle");
 
-      // Persist the manual claim transfer for recovery (like resume system)
-      const transferId = manualClaimTxHash;
+      // Update UI like resume system does
+      setSourceChain(manualClaimSourceChain);
+      setDestChain(destChain);
+      setAmount("0");
+      currentTransferIdRef.current = manualClaimTxHash;
+      abortRef.current = false;
+
+      // Set transfer to minting step
+      setTransfer({
+        step: "minting",
+        burnTxHash: manualClaimTxHash,
+        mintTxHash: null,
+        attestation: attestation,
+        error: null,
+      });
+
+      // Save transfer for recovery
       savePendingTransfer({
-        id: transferId,
+        id: manualClaimTxHash,
         burnTxHash: manualClaimTxHash,
         sourceDomain: manualClaimSourceChain.domain,
         sourceChainId: manualClaimSourceChain.chainId,
@@ -764,28 +776,11 @@ export default function Bridge() {
         userAddress: address,
         timestamp: Date.now(),
         status: "ready_to_mint",
-        attestation: {
-          message: data.messages[0].message,
-          attestation: data.messages[0].attestation,
-        },
+        attestation,
       });
 
-      // Refresh the pending transfers list
-      refreshPendingTransfers();
-
-      toast({ 
-        title: "Transfer Ready to Claim!", 
-        description: `Your USDC on ${destChain.name} is ready. Claim from the notifications panel.`,
-        duration: 6000,
-      });
-
-      // Close modal and reset
-      setManualClaimOpen(false);
-      setManualClaimTxHash("");
-      setManualClaimSourceChain(null);
-      setManualClaimDestChain(null);
-      setManualClaimAttestation(null);
-      setManualClaimStatus("idle");
+      // Proceed to mint
+      await executeMint(destChain, attestation, manualClaimTxHash, "0");
 
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
@@ -1818,7 +1813,7 @@ export default function Bridge() {
                   ) : (
                     <>
                       <Zap className="w-4 h-4" />
-                      {manualClaimStatus === "ready" ? "Save & Claim from Notifications" : "Check & Save Transfer"}
+                      Check & Claim
                     </>
                   )}
                 </button>
