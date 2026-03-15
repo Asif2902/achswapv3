@@ -135,6 +135,9 @@ export default function Swap() {
 
   // ── Quote fetching ─────────────────────────────────────────────────────────
   useEffect(() => {
+    // Clear max amount ref when amount changes (user edited manually after clicking max)
+    maxAmountWeiRef.current = null;
+    
     if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
     if (abortControllerRef.current) abortControllerRef.current.abort();
     debounceTimeoutRef.current = setTimeout(() => {
