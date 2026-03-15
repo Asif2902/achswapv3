@@ -345,6 +345,7 @@ export default function Bridge() {
   const [manualClaimOpen, setManualClaimOpen] = useState(false);
   const [manualClaimTxHash, setManualClaimTxHash] = useState("");
   const [manualClaimLoading, setManualClaimLoading] = useState(false);
+  const [manualClaimTxHashValid, setManualClaimTxHashValid] = useState(false);
 
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
 
@@ -722,6 +723,12 @@ export default function Bridge() {
       }
 
       await new Promise(r => setTimeout(r, 1500));
+
+      const currentChainId = await window.ethereum.request({ method: 'eth_chainId' });
+      const expectedChainId = "0x" + destChain.chainId.toString(16);
+      if (currentChainId !== expectedChainId) {
+        throw new Error(`Please switch to ${destChain.name} to claim USDC`);
+      }
 
       const destProvider = new BrowserProvider(window.ethereum);
       const destSigner = await destProvider.getSigner();
@@ -1688,23 +1695,31 @@ export default function Bridge() {
                   <input
                     type="text"
                     value={manualClaimTxHash}
-                    onChange={(e) => setManualClaimTxHash(e.target.value)}
+                    onChange={(e) => {
+                      setManualClaimTxHash(e.target.value);
+                      setManualClaimTxHashValid(/^0x[a-fA-F0-9]{64}$/.test(e.target.value));
+                    }}
                     placeholder="0x..."
-                    className="w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border border-white/10 focus:border-indigo-500/50 focus:outline-none placeholder:text-white/20"
+                    className={`w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border focus:outline-none placeholder:text-white/20 ${
+                      manualClaimTxHash && !manualClaimTxHashValid ? "border-red-500 focus:border-red-500" : "border-white/10 focus:border-indigo-500/50"
+                    }`}
                   />
+                  {manualClaimTxHash && !manualClaimTxHashValid && (
+                    <p className="text-[10px] text-red-400 mt-1">Invalid transaction hash format</p>
+                  )}
                 </div>
 
                 {/* Submit */}
                 <button
                   onClick={handleManualClaim}
-                  disabled={!manualClaimTxHash || manualClaimLoading || !address}
+                  disabled={!manualClaimTxHash || !manualClaimTxHashValid || manualClaimLoading || !address}
                   className="w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
                   style={{
-                    background: manualClaimTxHash && !manualClaimLoading && address
+                    background: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address
                       ? "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
                       : "rgba(99,102,241,0.3)",
-                    color: manualClaimTxHash && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
-                    cursor: manualClaimTxHash && !manualClaimLoading && address ? "pointer" : "not-allowed",
+                    color: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
+                    cursor: manualClaimTxHash && manualClaimTxHashValid && !manualClaimLoading && address ? "pointer" : "not-allowed",
                   }}
                 >
                   {manualClaimLoading ? (
