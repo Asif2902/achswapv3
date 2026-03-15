@@ -1430,6 +1430,19 @@ export default function Bridge() {
                 <button disabled className="br-submit off">Connect Wallet to Bridge</button>
               )}
 
+              {isArcSource && (
+                <div style={{
+                  marginTop: 10, padding: "10px 14px", borderRadius: 12,
+                  background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)",
+                  display: "flex", alignItems: "flex-start", gap: 8,
+                }}>
+                  <AlertTriangle style={{ width: 14, height: 14, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
+                  <span style={{ fontSize: 11, color: "#fbbf24", lineHeight: 1.5 }}>
+                    Arc Testnet CCTP is currently down. You can bridge from other chains to Arc, but not from Arc to other chains. We're working to restore it.
+                  </span>
+                </div>
+              )}
+
               {/* Error message */}
               {transfer.step === "error" && transfer.error && (
                 <div style={{
