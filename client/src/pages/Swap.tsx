@@ -275,6 +275,14 @@ export default function Swap() {
       if (!address || !window.ethereum) throw new Error("Please connect your wallet");
       if (!contracts) throw new Error("Chain contracts not configured");
       if (!smartRoutingResult?.bestQuote) throw new Error("No valid quote available");
+      
+      // Verify the quote matches current amount
+      const currentAmountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
+      if ((smartRoutingResult as SmartRoutingResult).inputAmount !== currentAmountIn) {
+        toast({ title: "Quote mismatch", description: "Amount changed. Please wait for a fresh quote.", variant: "destructive" });
+        setIsSwapping(false); return;
+      }
+      
       if (Date.now() - (smartRoutingResult.timestamp || 0) > 30000) {
         toast({ title: "Stale quote", description: "Price may have changed. Please wait for a fresh quote.", variant: "destructive" });
         setIsSwapping(false); return;
@@ -282,7 +290,7 @@ export default function Swap() {
       const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
       const bestQuote = smartRoutingResult.bestQuote;
       // Use max balance in wei if MAX button was clicked, otherwise parse from string
-      const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
+      const amountIn = currentAmountIn;
       // Clear max amount ref after use
       maxAmountWeiRef.current = null;
       const slippageBps = BigInt(Math.floor(slippage * 100));

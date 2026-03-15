@@ -40,6 +40,7 @@ export interface SmartRoutingResult {
   v3Quote?: QuoteResult;
   alternativeQuotes?: QuoteResult[]; // For fallback when best quote fails
   timestamp: number; // For freshness check
+  inputAmount: bigint; // To verify quote matches current input
 }
 
 /**
@@ -347,7 +348,8 @@ export async function getSmartRouteQuote(
       v2Quote: v2Quote || undefined,
       v3Quote: v3Quote || undefined,
       alternativeQuotes,
-      timestamp: Date.now(), // Add timestamp for freshness check
+      timestamp: Date.now(),
+      inputAmount: amountIn,
     };
   } catch (error) {
     console.error("Smart routing failed:", error);
