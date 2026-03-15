@@ -18,6 +18,7 @@ import { getSmartRouteQuote, type SmartRoutingResult } from "@/lib/smart-routing
 import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
 import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
 import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
+import { createAlchemyProvider, FALLBACK_RPC } from "@/lib/config";
 import { getErrorForToast } from "@/lib/error-utils";
 
 const ERC20_ABI = [
@@ -161,17 +162,12 @@ export default function Swap() {
     setIsLoadingQuote(true);
     let provider;
     try {
-      // Always use alchemy RPC first
-      provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
-      // Test if alchemy is working
+      // Always use alchemy provider first
+      provider = createAlchemyProvider(chainId);
       await provider.getBlockNumber();
     } catch {
-      // Fallback to wallet RPC if alchemy fails
-      if (window.ethereum) {
-        provider = new BrowserProvider(window.ethereum);
-      } else {
-        throw new Error("No RPC available");
-      }
+      // Fallback to public RPC if alchemy fails
+      provider = new JsonRpcProvider(FALLBACK_RPC);
     }
     try {
       const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
