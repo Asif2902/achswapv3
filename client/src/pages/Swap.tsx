@@ -161,11 +161,19 @@ export default function Swap() {
     setIsLoadingQuote(true);
     let provider;
     try {
+      // Always use alchemy RPC first
+      provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
+      // Test if alchemy is working
+      await provider.getBlockNumber();
+    } catch {
+      // Fallback to wallet RPC if alchemy fails
       if (window.ethereum) {
         provider = new BrowserProvider(window.ethereum);
       } else {
-        provider = new JsonRpcProvider("https://rpc.testnet.arc.network");
+        throw new Error("No RPC available");
       }
+    }
+    try {
       const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
       if (!wrappedTokenData) throw new Error("wUSDC not found");
       const amountIn = parseAmount(fromAmount, fromToken.decimals);
