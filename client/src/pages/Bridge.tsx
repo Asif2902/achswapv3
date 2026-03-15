@@ -681,10 +681,21 @@ export default function Bridge() {
       setManualClaimSourceChain(null);
       setManualClaimStatus("idle");
 
-      // Fetch amount from burn transaction receipt
+      // Fetch amount and verify sender from burn transaction receipt
       let amount = "0";
+      let txSender = "";
       try {
         const provider = new JsonRpcProvider(manualClaimSourceChain.rpcUrls[0]);
+        const tx = await provider.getTransaction(manualClaimTxHash);
+        if (tx) {
+          txSender = tx.from.toLowerCase();
+          
+          // Check if the transaction was made by the connected wallet
+          if (txSender !== address.toLowerCase()) {
+            throw new Error(`Transaction was not made by your connected wallet. Expected: ${address}, Got: ${txSender}`);
+          }
+        }
+
         const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
         if (receipt) {
           // Find the DepositForBurn event to get the amount
@@ -695,14 +706,18 @@ export default function Bridge() {
             try {
               const parsed = iface.parseLog(log);
               if (parsed?.name === "DepositForBurn") {
-                amount = (parsed.args.amount / 1000000n).toString();
+                // Amount is in 6 decimals (USDC), convert to human readable
+                const amountWei = parsed.args.amount as bigint;
+                amount = (Number(amountWei) / 1000000).toString();
                 break;
               }
             } catch { /* skip */ }
           }
         }
-      } catch (err) {
-        console.log("Could not fetch amount from tx:", err);
+      } catch (err: any) {
+        toast({ title: "Error", description: err.message || "Could not verify transaction", variant: "destructive" });
+        setManualClaimLoading(false);
+        return;
       }
 
       // Try to get destination from API
