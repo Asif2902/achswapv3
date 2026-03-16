@@ -140,8 +140,6 @@ export async function submitToRelayer(
   },
   signature: string
 ): Promise<{ txHash: string }> {
-  console.log("[GASLESS] Submitting to relayer:", { request, signature: signature.slice(0, 20) + "..." });
-  
   const response = await fetch(GASLESS_CONFIG.relayerUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -33,10 +33,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "missing request or signature" });
     }
 
-    console.log("Request:", JSON.stringify(request));
-
     const selector = request.data?.slice(0, 10);
-    console.log("Selector:", selector);
     if (!ALLOWED_SELECTORS.includes(selector)) {
       return res.status(400).json({ error: "function not allowed" });
     }
@@ -60,7 +57,6 @@ export default async function handler(req, res) {
 
     res.json({ txHash: tx.hash });
   } catch (err) {
-    console.error("Relay error:", err);
     res.status(500).json({ error: err.message });
   }
 }

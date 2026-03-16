@@ -344,15 +344,10 @@ export default function Swap() {
       }
       
       // ── GASLESS SWAP PATH ───────────────────────────────────────────────────
-      console.log("[GASLESS] Starting swap. gaslessMode =", gaslessMode, "permit2Approved =", permit2Approved, "fromToken =", fromToken?.address);
-      
-      // Handle native token for gasless - need to wrap first
       const fromNative = isNativeToken(fromToken.address);
       
       if (gaslessMode && permit2Approved) {
         try {
-          console.log("[GASLESS] Entering gasless swap path");
-          
           // For native tokens, gasless not supported yet
           if (fromNative) {
             toast({ 
@@ -380,14 +375,6 @@ export default function Swap() {
           // Check protocol based on user settings
           const useV2 = bestQuote.protocol === "V2" || (!v3Enabled && bestQuote.route.length > 1);
           const useV3 = bestQuote.protocol === "V3" && bestQuote.route.length === 1;
-          
-          console.log("[GASLESS] Quote info:", {
-            protocol: bestQuote.protocol,
-            routeLength: bestQuote.route.length,
-            route: bestQuote.route,
-            fromToken: fromToken.address,
-            toToken: toToken.address
-          });
           
           if (useV2 && v2Enabled) {
             const path: string[] = [];
@@ -425,7 +412,6 @@ export default function Swap() {
           setIsSwapping(false);
           return;
         } catch (gaslessError: any) {
-          console.error("[GASLESS] Error:", gaslessError);
           const errorMsg = gaslessError?.message || "Unknown error";
           toast({ 
             title: "Gasless swap failed", 
