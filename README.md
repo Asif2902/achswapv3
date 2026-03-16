@@ -5,6 +5,7 @@ A modern decentralized exchange (DEX) frontend built with React, Vite, and Web3 
 ## Features
 
 - **Token Swaps**: Swap tokens with smart routing across V2 and V3 pools
+- **Gasless Swaps**: Relayer-powered swaps using Permit2 - users sign once, relayer pays gas
 - **V2 Liquidity**: Add/remove liquidity from V2 style AMM pools
 - **V3 Liquidity**: Concentrated liquidity with price range selection (Basic & Advanced modes)
 - **V2 to V3 Migration**: Migrate existing V2 LP positions to V3
@@ -70,6 +71,12 @@ VITE_ALCHEMY_KEY=your_alchemy_key_here
 
 ### Contract Addresses
 
+#### Gasless Swap
+| Contract | Address |
+|---------|---------|
+| AchSwapGasless | `0x28021558B4f60d90A97bE77D9462f06EAf92A1b9` |
+| Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
+
 #### V2 Contracts
 | Contract | Address |
 |----------|---------|
@@ -89,11 +96,12 @@ VITE_ALCHEMY_KEY=your_alchemy_key_here
 
 ### Supported Tokens
 
-| Token | Symbol | Address |
-|-------|--------|---------|
-| USDC (Native) | USDC | `0x0000000000000000000000000000000000000000` |
-| Wrapped USDC | wUSDC | `0xDe5DB9049a8dd344dC1B7Bbb098f9da60930A6dA` |
-| Achswap Token | ACHS | `0x45Bb5425f293bdd209c894364C462421FF5FfA48` |
+| Token | Symbol | Address | Decimals |
+|-------|--------|---------|----------|
+| USDC (Native) | USDC | `0x0000000000000000000000000000000000000000` | 18 |
+| USDC (ERC20) | USDC | `0x3600000000000000000000000000000000000000` | 6 |
+| Wrapped USDC | wUSDC | `0xDe5DB9049a8dd344dC1B7Bbb098f9da60930A6dA` | 18 |
+| Achswap Token | ACHS | `0x45Bb5425f293bdd209c894364C462421FF5FfA48` | 18 |
 
 ---
 
@@ -181,6 +189,14 @@ The swap interface automatically finds the best route across V2 and V3 pools:
 - View all V2 LP positions
 - One-click migration to V3
 - Automatic approval and liquidity management
+
+### Gasless Swaps
+- Users can enable "Zap" mode for gasless swaps
+- Uses Permit2 for token approvals - one-time approval, then unlimited swaps
+- Relayer executes the transaction, user pays no gas
+- Native USDC (0x0000...) is auto-wrapped via contract
+- Works with V2 and V3 single-hop routes
+- Gasless preference is saved in localStorage
 
 ---
 
