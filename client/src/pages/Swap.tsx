@@ -352,7 +352,13 @@ export default function Swap() {
       }
       
       // ── GASLESS SWAP PATH ───────────────────────────────────────────────────
-      if (gaslessMode && !isNativeToken(fromToken.address)) {
+      if (gaslessMode) {
+        if (!permit2Approved) {
+          toast({ title: "Permit2 not approved", description: "Please enable Permit2 first", variant: "destructive" });
+          setIsSwapping(false);
+          return;
+        }
+        
         const provider = new BrowserProvider(window.ethereum);
         const signer = await provider.getSigner();
         const bestQuote = smartRoutingResult.bestQuote;
@@ -402,7 +408,10 @@ export default function Swap() {
           setIsSwapping(false);
           return;
         } catch (gaslessError: any) {
-          toast({ title: "Gasless failed, trying regular swap...", description: gaslessError.message });
+          console.error("Gasless swap error:", gaslessError);
+          toast({ title: "Gasless failed", description: gaslessError.message, variant: "destructive" });
+          setIsSwapping(false);
+          return;
         }
       }
       
@@ -766,11 +775,11 @@ export default function Swap() {
                 <span className="sw-hdr-title">Swap</span>
               </div>
               <div className="sw-hdr-btns">
-                {isConnected && fromToken && !isNativeToken(fromToken.address) && (
+                {isConnected && (
                   <button 
                     className={`sw-hdr-btn ${gaslessMode ? 'sw-gasless-active' : ''}`} 
                     onClick={() => setGaslessMode(!gaslessMode)} 
-                    title={gaslessMode ? "Gasless mode ON" : "Gasless mode OFF"}
+                    title={gaslessMode ? "Gasless mode ON - click to disable" : "Gasless mode OFF - click to enable"}
                     style={gaslessMode ? { background: 'rgba(34,197,94,0.2)', borderColor: 'rgba(34,197,94,0.4)', color: '#4ade80' } : {}}
                   >
                     {gaslessMode ? <Zap style={{ width: 15, height: 15 }} /> : <ZapOff style={{ width: 15, height: 15 }} />}
