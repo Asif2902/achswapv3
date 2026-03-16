@@ -5,5 +5,8 @@
   "functions": {
     "api/relay.js": { "maxDuration": 10 },
     "api/nonce.js": { "maxDuration": 10 }
-  }
+  },
+  "rewrites": [
+    { "source": "/((?!api/).*)", "destination": "/index.html" }
+  ]
 }
