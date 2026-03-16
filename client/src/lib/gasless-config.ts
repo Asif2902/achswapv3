@@ -1,80 +1,61 @@
 export const GASLESS_CONFIG = {
-  contractAddress: "0x4bde23d3094334a9ebBc3733178ec1414F5332Bb",
+  contractAddress: "0x9D86AdBEB9a6a7649cCFeCD14B164E7052669CeD",
   permit2Address: "0x000000000022D473030F116dDEE9F6B43aC78BA3",
   relayerUrl: "https://preview.achswapfi.xyz/api/relay",
   nonceUrl: "https://preview.achswapfi.xyz/api/nonce",
 };
 
-export const NATIVE_TOKEN_WRAPPER = "0x3600000000000000000000000000000000000000";
-export const NATIVE_TOKEN_WRAPPER_DECIMALS = 18;
+export const NATIVE_TOKEN = "0x3600000000000000000000000000000000000000"; // USDC_NATIVE - ERC20 on Arc
 
 export const GASLESS_ABI = [
-  {
-    type: "function",
-    name: "getNonce",
-    stateMutability: "view",
-    inputs: [{ name: "from", type: "address" }],
-    outputs: [{ name: "", type: "uint256" }]
-  },
   {
     type: "function",
     name: "execute",
     stateMutability: "nonpayable",
     inputs: [
-      {
-        name: "req",
-        type: "tuple",
-        components: [
-          { name: "from", type: "address" },
-          { name: "nonce", type: "uint256" },
-          { name: "gas", type: "uint256" },
-          { name: "data", type: "bytes" }
-        ]
-      },
-      { name: "signature", type: "bytes" }
-    ],
-    outputs: [{ name: "returndata", type: "bytes" }]
-  },
-  {
-    type: "function",
-    name: "swapV2",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "amountIn", type: "uint256" },
-      { name: "amountOutMin", type: "uint256" },
-      { name: "path", type: "address[]" },
-      { name: "deadline", type: "uint256" }
-    ],
-    outputs: []
-  },
-  {
-    type: "function",
-    name: "swapV3",
-    stateMutability: "nonpayable",
-    inputs: [
+      { name: "user", type: "address" },
       { name: "tokenIn", type: "address" },
-      { name: "tokenOut", type: "address" },
-      { name: "fee", type: "uint24" },
-      { name: "amountIn", type: "uint256" },
-      { name: "amountOutMin", type: "uint256" },
-      { name: "deadline", type: "uint256" }
-    ],
-    outputs: []
-  },
-  {
-    type: "function",
-    name: "swapV3MultiHop",
-    stateMutability: "nonpayable",
-    inputs: [
-      { name: "path", type: "bytes" },
-      { name: "amountIn", type: "uint256" },
-      { name: "amountOutMin", type: "uint256" },
-      { name: "deadline", type: "uint256" },
+      { name: "totalAmountIn", type: "uint256" },
       { name: "permitNonce", type: "uint256" },
       { name: "permitDeadline", type: "uint256" },
-      { name: "permitSig", type: "bytes" }
+      { name: "permitSig", type: "bytes" },
+      {
+        name: "segment",
+        type: "tuple",
+        components: [
+          { name: "kind", type: "uint8" },
+          { name: "amountIn", type: "uint256" },
+          { name: "amountOutMin", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+          { name: "params", type: "bytes" }
+        ]
+      }
     ],
     outputs: []
+  },
+  {
+    type: "function",
+    name: "executeSplit",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "tokenIn", type: "address" },
+      { name: "totalAmountIn", type: "uint256" },
+      { name: "permitNonce", type: "uint256" },
+      { name: "permitDeadline", type: "uint256" },
+      { name: "permitSig", type: "bytes" },
+      {
+        name: "segments",
+        type: "tuple[]",
+        components: [
+          { name: "kind", type: "uint8" },
+          { name: "amountIn", type: "uint256" },
+          { name: "amountOutMin", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+          { name: "params", type: "bytes" }
+        ]
+      }
+    ]
   }
 ];
 

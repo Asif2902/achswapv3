@@ -1,5 +1,8 @@
 import { ethers, Contract, BrowserProvider, Interface } from "ethers";
-import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID } from "./gasless-config";
+
+const AddressArrayIface = new Interface(["function foo(address[]) view returns (address[])"]);
+const AddressUint24Iface = new Interface(["function foo(address,uint24) view returns (address,uint24)"]);
+import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID, NATIVE_TOKEN } from "./gasless-config";
 
 export function decodeExecutionError(data: string): string {
   if (!data || data === "0x") return "Unknown error";
@@ -25,7 +28,7 @@ export function decodeExecutionError(data: string): string {
 }
 
 function getSwapDeadline(): number {
-  return Math.floor(Date.now() / 1000) + 1800; // 30 minutes
+  return Math.floor(Date.now() / 1000) + 1800;
 }
 
 export async function fetchNonce(userAddress: string): Promise<number> {
@@ -48,6 +51,7 @@ const PERMIT2_ABI = [
   "function approve(address token, address spender, uint160 amount, uint48 expiration)",
   "function transferFrom(address from, address to, uint160 amount, address token)",
   "function allowance(address user, address token, address spender) view returns (uint160)",
+  "function permitTransferFrom((address,uint256,uint256,uint256),(address,uint256),address,bytes) external",
 ];
 
 export async function checkPermit2Approval(
@@ -101,49 +105,55 @@ export async function approvePermit2(
   await permitTx.wait();
 }
 
-export async function signForwardRequest(
+export async function signPermit2(
   signer: any,
-  request: {
-    from: string;
-    nonce: number;
-    gas: number;
-    data: string;
-  }
+  tokenIn: string,
+  amount: bigint,
+  nonce: number,
+  deadline: number
 ): Promise<string> {
-  const signature = await signer.signTypedData(
-    {
-      name: "AchSwapGasless",
-      version: "1",
-      chainId: CHAIN_ID,
-      verifyingContract: GASLESS_CONFIG.contractAddress,
+  const user = await signer.getAddress();
+  
+  const domain = {
+    name: "Permit2",
+    chainId: CHAIN_ID,
+    verifyingContract: GASLESS_CONFIG.permit2Address,
+  };
+  
+  const types = {
+    PermitTransferFrom: [
+      { name: "permitted", type: "TokenPermissions" },
+      { name: "spender", type: "address" },
+      { name: "nonce", type: "uint256" },
+      { name: "deadline", type: "uint256" },
+    ],
+    TokenPermissions: [
+      { name: "token", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+  };
+  
+  const values = {
+    permitted: {
+      token: tokenIn,
+      amount: amount,
     },
-    {
-      ForwardRequest: [
-        { name: "from", type: "address" },
-        { name: "nonce", type: "uint256" },
-        { name: "gas", type: "uint256" },
-        { name: "data", type: "bytes" },
-      ],
-    },
-    request
-  );
-
+    spender: GASLESS_CONFIG.contractAddress,
+    nonce: nonce,
+    deadline: deadline,
+  };
+  
+  const signature = await signer.signTypedData(domain, types, values);
   return signature;
 }
 
 export async function submitToRelayer(
-  request: {
-    from: string;
-    nonce: number;
-    gas: number;
-    data: string;
-  },
-  signature: string
+  request: any
 ): Promise<{ txHash: string }> {
   const response = await fetch(GASLESS_CONFIG.relayerUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ request, signature }),
+    body: JSON.stringify(request),
   });
 
   const text = await response.text();
@@ -201,34 +211,35 @@ export async function executeGaslessSwapV2(
 ): Promise<{ txHash: string; receipt: any }> {
   const provider = signer.provider;
   const user = await signer.getAddress();
-  const iface = new Interface([
-    "function swapV2(uint256 amountIn, uint256 amountOutMin, address[] path, uint256 deadline)"
-  ]);
-
-  const swapDeadline = getSwapDeadline();
-
-  const swapCalldata = iface.encodeFunctionData("swapV2", [
-    amountIn,
-    amountOutMin,
-    path,
-    swapDeadline,
-  ]);
-
+  
+  const tokenForPermit2 = tokenIn;
   const nonce = await fetchNonce(user);
-
-  const request = {
-    from: user,
-    nonce: nonce,
-    gas: 500000,
-    data: swapCalldata,
+  const deadline = getSwapDeadline();
+  
+  const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
+  
+  const segment = {
+    kind: 0,
+    amountIn: amountIn,
+    amountOutMin: amountOutMin,
+    deadline: deadline,
+    params: AddressArrayIface.encodeFunctionData("foo", [path]),
   };
-
-  const forwarderSig = await signForwardRequest(signer, request);
-
-  const { txHash } = await submitToRelayer(request, forwarderSig);
-
+  
+  const request = {
+    user: user,
+    tokenIn: tokenIn,
+    totalAmountIn: amountIn,
+    permitNonce: nonce,
+    permitDeadline: deadline,
+    permitSig: permitSig,
+    segment: segment,
+  };
+  
+  const { txHash } = await submitToRelayer(request);
+  
   const receipt = await waitForTransaction(provider, txHash);
-
+  
   return { txHash, receipt };
 }
 
@@ -242,74 +253,75 @@ export async function executeGaslessSwapV3(
 ): Promise<{ txHash: string; receipt: any }> {
   const provider = signer.provider;
   const user = await signer.getAddress();
-  const iface = new Interface([
-    "function swapV3(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint256 amountOutMin, uint256 deadline)"
-  ]);
-
-  const swapDeadline = getSwapDeadline();
-
-  const swapCalldata = iface.encodeFunctionData("swapV3", [
-    tokenIn,
-    tokenOut,
-    fee,
-    amountIn,
-    amountOutMin,
-    swapDeadline,
-  ]);
-
+  
+  const tokenForPermit2 = tokenIn;
   const nonce = await fetchNonce(user);
-
-  const request = {
-    from: user,
-    nonce: nonce,
-    gas: 500000,
-    data: swapCalldata,
+  const deadline = getSwapDeadline();
+  
+  const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
+  
+  const segment = {
+    kind: 1,
+    amountIn: amountIn,
+    amountOutMin: amountOutMin,
+    deadline: deadline,
+    params: AddressUint24Iface.encodeFunctionData("foo", [tokenOut, fee]),
   };
-
-  const forwarderSig = await signForwardRequest(signer, request);
-
-  const { txHash } = await submitToRelayer(request, forwarderSig);
-
+  
+  const request = {
+    user: user,
+    tokenIn: tokenIn,
+    totalAmountIn: amountIn,
+    permitNonce: nonce,
+    permitDeadline: deadline,
+    permitSig: permitSig,
+    segment: segment,
+  };
+  
+  const { txHash } = await submitToRelayer(request);
+  
   const receipt = await waitForTransaction(provider, txHash);
-
+  
   return { txHash, receipt };
 }
 
 export async function executeGaslessSwapV3MultiHop(
   signer: any,
+  tokenIn: string,
   path: string,
   amountIn: bigint,
   amountOutMin: bigint
 ): Promise<{ txHash: string; receipt: any }> {
   const provider = signer.provider;
   const user = await signer.getAddress();
-  const iface = new Interface([
-    "function swapV3MultiHop(bytes path, uint256 amountIn, uint256 amountOutMin, uint256 deadline)"
-  ]);
-
-  const swapDeadline = getSwapDeadline();
-
-  const swapCalldata = iface.encodeFunctionData("swapV3MultiHop", [
-    path,
-    amountIn,
-    amountOutMin,
-    swapDeadline,
-  ]);
-
+  
+  const tokenForPermit2 = tokenIn;
   const nonce = await fetchNonce(user);
-
-  const request = {
-    from: user,
-    nonce: nonce,
-    gas: 500000,
-    data: swapCalldata,
+  const deadline = getSwapDeadline();
+  
+  const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
+  
+  const segment = {
+    kind: 2,
+    amountIn: amountIn,
+    amountOutMin: amountOutMin,
+    deadline: deadline,
+    params: path,
   };
-
-  const forwarderSig = await signForwardRequest(signer, request);
-
-  const { txHash } = await submitToRelayer(request, forwarderSig);
-
+  
+  const request = {
+    user: user,
+    tokenIn: tokenIn,
+    totalAmountIn: amountIn,
+    permitNonce: nonce,
+    permitDeadline: deadline,
+    permitSig: permitSig,
+    segment: segment,
+  };
+  
+  const { txHash } = await submitToRelayer(request);
+  
   const receipt = await waitForTransaction(provider, txHash);
-
+  
   return { txHash, receipt };
 }

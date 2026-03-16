@@ -26,7 +26,7 @@ import {
   executeGaslessSwapV2,
   executeGaslessSwapV3,
 } from "@/lib/gasless-swap";
-import { GASLESS_CONFIG, NATIVE_TOKEN_WRAPPER, NATIVE_TOKEN_WRAPPER_DECIMALS } from "@/lib/gasless-config";
+import { GASLESS_CONFIG, NATIVE_TOKEN } from "@/lib/gasless-config";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -108,11 +108,11 @@ export default function Swap() {
   }, [gaslessMode, address, fromToken?.address]);
 
   const getGaslessTokenAddress = (tokenAddress: string) => {
-    return isNativeToken(tokenAddress) ? NATIVE_TOKEN_WRAPPER : tokenAddress;
+    return isNativeToken(tokenAddress) ? NATIVE_TOKEN : tokenAddress;
   };
 
   const getGaslessTokenDecimals = (tokenAddress: string) => {
-    return isNativeToken(tokenAddress) ? NATIVE_TOKEN_WRAPPER_DECIMALS : (fromToken?.decimals || 18);
+    return fromToken?.decimals || 18;
   };
 
   const checkPermit2 = async () => {
@@ -364,7 +364,7 @@ export default function Swap() {
           const amountIn = currentAmountIn;
           maxAmountWeiRef.current = null;
           
-          // Use NATIVE_TOKEN_WRAPPER (wUSDC) for native token - contract handles wrap
+          // Use NATIVE_TOKEN (0x3600...) - contract handles auto-wrap
           const tokenInAddress = getGaslessTokenAddress(fromToken.address);
           
           const slippageBps = BigInt(Math.floor(slippage * 100));
