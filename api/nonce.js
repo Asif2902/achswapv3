@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 
 const RPC_URL = "https://rpc.testnet.arc.network";
-const CONTRACT_ADDRESS = "0x4bde23d3094334a9ebBc3733178ec1414F5332Bb";
+const CONTRACT_ADDRESS = "0xD65B535A6cd27657C19720759F7C6f3F89eEf734";
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const contract = new ethers.Contract(
