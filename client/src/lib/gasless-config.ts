@@ -5,6 +5,8 @@ export const GASLESS_CONFIG = {
   nonceUrl: "https://preview.achswapfi.xyz/api/nonce",
 };
 
+export const NATIVE_TOKEN_WRAPPER = "0x3600000000000000000000000000000000000000";
+
 export const GASLESS_ABI = [
   {
     type: "function",

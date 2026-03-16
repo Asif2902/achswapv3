@@ -26,7 +26,7 @@ import {
   executeGaslessSwapV2,
   executeGaslessSwapV3,
 } from "@/lib/gasless-swap";
-import { GASLESS_CONFIG } from "@/lib/gasless-config";
+import { GASLESS_CONFIG, NATIVE_TOKEN_WRAPPER } from "@/lib/gasless-config";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -107,13 +107,18 @@ export default function Swap() {
     checkPermit2();
   }, [gaslessMode, address, fromToken?.address]);
 
+  const getGaslessTokenAddress = (tokenAddress: string) => {
+    return isNativeToken(tokenAddress) ? NATIVE_TOKEN_WRAPPER : tokenAddress;
+  };
+
   const checkPermit2 = async () => {
-    if (!address || !window.ethereum || !fromToken || isNativeToken(fromToken.address)) return;
+    if (!address || !window.ethereum || !fromToken) return;
     setIsCheckingPermit2(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const approved = await checkPermit2Approval(signer, fromToken.address);
+      const tokenForPermit2 = getGaslessTokenAddress(fromToken.address);
+      const approved = await checkPermit2Approval(signer, tokenForPermit2);
       setPermit2Approved(approved);
     } catch (e) {
       console.error("Error checking Permit2 approval:", e);
@@ -130,7 +135,8 @@ export default function Swap() {
       const signer = await provider.getSigner();
       toast({ title: "Approving Permit2..." });
       
-      await approvePermit2(signer, fromToken.address);
+      const tokenForPermit2 = getGaslessTokenAddress(fromToken.address);
+      await approvePermit2(signer, tokenForPermit2);
       
       setPermit2Approved(true);
       toast({ title: "Permit2 approved!", description: "You can now use gasless swaps" });
@@ -348,22 +354,14 @@ export default function Swap() {
       
       if (gaslessMode && permit2Approved) {
         try {
-          // For native tokens, gasless not supported yet
-          if (fromNative) {
-            toast({ 
-              title: "Native token selected", 
-              description: "Gasless swaps require wrapped tokens. Please use regular swap for native USDC.", 
-              variant: "destructive" 
-            });
-            setIsSwapping(false);
-            return;
-          }
-          
           const provider = new BrowserProvider(window.ethereum);
           const signer = await provider.getSigner();
           const bestQuote = smartRoutingResult.bestQuote;
           const amountIn = currentAmountIn;
           maxAmountWeiRef.current = null;
+          
+          // Use NATIVE_TOKEN_WRAPPER for native token
+          const tokenInAddress = getGaslessTokenAddress(fromToken.address);
           
           const slippageBps = BigInt(Math.floor(slippage * 100));
           const minAmountOut = (bestQuote.outputAmount * (10000n - slippageBps)) / 10000n;
@@ -386,13 +384,13 @@ export default function Swap() {
               const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
               if (o !== path[path.length - 1]) path.push(o);
             }
-            result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path);
+            result = await executeGaslessSwapV2(signer, tokenInAddress, amountIn, minAmountOut, path);
           } else if (useV3 && v3Enabled && bestQuote.route.length === 1) {
             // For V3, use wUSDC as tokenOut - contract auto-unwraps to native USDC
             const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
             const tokenOutV3 = isNativeToken(toToken.address) && wrappedAddr ? wrappedAddr : toToken.address;
             const fee = bestQuote.route[0].fee || 3000;
-            result = await executeGaslessSwapV3(signer, fromToken.address, tokenOutV3, fee, amountIn, minAmountOut);
+            result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountIn, minAmountOut);
           } else {
             throw new Error("Selected protocol not available. Try regular swap.");
           }
@@ -821,11 +819,7 @@ export default function Swap() {
             {/* Gasless Mode Notice */}
             {gaslessMode && isConnected && (
               <div className="sw-gasless-notice">
-                {isNativeToken(fromToken?.address || "") ? (
-                  <span style={{ color: '#fb923c', fontSize: 11, fontWeight: 600 }}>
-                    ⚠ Native token - Use regular swap
-                  </span>
-                ) : isCheckingPermit2 ? (
+                {isCheckingPermit2 ? (
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <Loader2 className="sw-spin" style={{ width: 12, height: 12 }} />
                     Checking Permit2 approval...
