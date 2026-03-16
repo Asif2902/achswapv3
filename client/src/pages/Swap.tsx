@@ -381,6 +381,14 @@ export default function Swap() {
           const useV2 = bestQuote.protocol === "V2" || (!v3Enabled && bestQuote.route.length > 1);
           const useV3 = bestQuote.protocol === "V3" && bestQuote.route.length === 1;
           
+          console.log("[GASLESS] Quote info:", {
+            protocol: bestQuote.protocol,
+            routeLength: bestQuote.route.length,
+            route: bestQuote.route,
+            fromToken: fromToken.address,
+            toToken: toToken.address
+          });
+          
           if (useV2 && v2Enabled) {
             const path: string[] = [];
             const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
@@ -393,6 +401,13 @@ export default function Swap() {
             }
             result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path);
           } else if (useV3 && v3Enabled && bestQuote.route.length === 1) {
+            console.log("[GASLESS] V3 swap params:", {
+              tokenIn: fromToken.address,
+              tokenOut: toToken.address,
+              fee: bestQuote.route[0].fee,
+              amountIn,
+              minAmountOut
+            });
             const fee = bestQuote.route[0].fee || 3000;
             result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut);
           } else {
