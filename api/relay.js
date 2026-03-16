@@ -5,7 +5,7 @@ const ABI = [
 ];
 
 const RPC_URL = "https://rpc.testnet.arc.network";
-const CONTRACT_ADDRESS = "0x9D86AdBEB9a6a7649cCFeCD14B164E7052669CeD";
+const CONTRACT_ADDRESS = "0x64f7e5Dc74194C48c79BE20303996d15Cbe2868d";
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 const relayerWallet = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
