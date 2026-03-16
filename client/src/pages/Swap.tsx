@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  ArrowDownUp, AlertTriangle, ExternalLink, ChevronDown, Bell, Zap, Settings, ZapOff, Loader2,
+  ArrowDownUp, AlertTriangle, ExternalLink, ChevronDown, Bell, Zap, Settings, ZapOff, Loader2, Copy,
 } from "lucide-react";
 import { TokenSelector } from "@/components/TokenSelector";
 import { SwapSettings } from "@/components/SwapSettings";
@@ -352,58 +352,96 @@ export default function Swap() {
       }
       
       // ── GASLESS SWAP PATH ───────────────────────────────────────────────────
-      console.log("[GASLESS] Starting swap. gaslessMode =", gaslessMode, "permit2Approved =", permit2Approved);
+      console.log("[GASLESS] Starting swap. gaslessMode =", gaslessMode, "permit2Approved =", permit2Approved, "fromToken =", fromToken?.address);
+      
+      // Handle native token for gasless - need to wrap first
+      const fromNative = isNativeToken(fromToken.address);
       
       if (gaslessMode && permit2Approved) {
-        console.log("[GASLESS] Entering gasless swap path");
-        
-        const provider = new BrowserProvider(window.ethereum);
-        const signer = await provider.getSigner();
-        const bestQuote = smartRoutingResult.bestQuote;
-        const amountIn = currentAmountIn;
-        maxAmountWeiRef.current = null;
-        
-        const slippageBps = BigInt(Math.floor(slippage * 100));
-        const minAmountOut = (bestQuote.outputAmount * (10000n - slippageBps)) / 10000n;
-        
-        toast({ title: "Initiating gasless swap...", description: "Please sign the permit and request" });
-        
-        let result: { txHash: string; receipt: any };
-        
-        if (bestQuote.protocol === "V2") {
-          const path: string[] = [];
-          const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
-          if (!wrappedAddr) throw new Error("Wrapped token address not found");
-          for (let i = 0; i < bestQuote.route.length; i++) {
-            const hop = bestQuote.route[i];
-            if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
-            const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
-            if (o !== path[path.length - 1]) path.push(o);
+        try {
+          console.log("[GASLESS] Entering gasless swap path");
+          
+          // For native tokens, gasless not supported yet
+          if (fromNative) {
+            toast({ 
+              title: "Native token selected", 
+              description: "Gasless swaps require wrapped tokens. Please use regular swap for native USDC.", 
+              variant: "destructive" 
+            });
+            setIsSwapping(false);
+            return;
           }
-          result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path, permit2Approved);
-        } else {
-          if (bestQuote.route.length === 1) {
-            const fee = bestQuote.route[0].fee || 3000;
-            result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut, permit2Approved);
+          
+          const provider = new BrowserProvider(window.ethereum);
+          const signer = await provider.getSigner();
+          const bestQuote = smartRoutingResult.bestQuote;
+          const amountIn = currentAmountIn;
+          maxAmountWeiRef.current = null;
+          
+          const slippageBps = BigInt(Math.floor(slippage * 100));
+          const minAmountOut = (bestQuote.outputAmount * (10000n - slippageBps)) / 10000n;
+          
+          toast({ title: "Initiating gasless swap...", description: "Please sign the permit and request" });
+          
+          let result: { txHash: string; receipt: any };
+          
+          if (bestQuote.protocol === "V2") {
+            const path: string[] = [];
+            const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+            if (!wrappedAddr) throw new Error("Wrapped token address not found");
+            for (let i = 0; i < bestQuote.route.length; i++) {
+              const hop = bestQuote.route[i];
+              if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
+              const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
+              if (o !== path[path.length - 1]) path.push(o);
+            }
+            result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path, permit2Approved);
           } else {
-            throw new Error("Multi-hop gasless swaps not yet supported");
+            if (bestQuote.route.length === 1) {
+              const fee = bestQuote.route[0].fee || 3000;
+              result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut, permit2Approved);
+            } else {
+              throw new Error("Multi-hop gasless swaps not yet supported");
+            }
           }
+          
+          saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
+          await Promise.all([refetchFromBalance(), refetchToBalance()]);
+          setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
+          toast({
+            title: "Gasless swap successful!",
+            description: (
+              <div className="flex items-center gap-2">
+                <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toToken.symbol}</span>
+                <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
+              </div>
+            ),
+          });
+          setIsSwapping(false);
+          return;
+        } catch (gaslessError: any) {
+          console.error("[GASLESS] Error:", gaslessError);
+          const errorMsg = gaslessError?.message || "Unknown error";
+          toast({ 
+            title: "Gasless swap failed", 
+            description: (
+              <div className="flex flex-col gap-2">
+                <span className="text-sm">{errorMsg}</span>
+                <Button 
+                  size="sm" 
+                  variant="outline" 
+                  className="w-fit h-7 text-xs"
+                  onClick={() => { navigator.clipboard.writeText(errorMsg); }}
+                >
+                  <Copy className="w-3 h-3 mr-1" /> Copy error
+                </Button>
+              </div>
+            ),
+            variant: "destructive" 
+          });
+          setIsSwapping(false);
+          return;
         }
-        
-        saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
-        await Promise.all([refetchFromBalance(), refetchToBalance()]);
-        setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
-        toast({
-          title: "Gasless swap successful!",
-          description: (
-            <div className="flex items-center gap-2">
-              <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toToken.symbol}</span>
-              <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
-            </div>
-          ),
-        });
-        setIsSwapping(false);
-        return; // EXIT HERE - do NOT fall through to regular swap
       } else if (gaslessMode && !permit2Approved) {
         toast({ title: "Permit2 not approved", description: "Please enable Permit2 first", variant: "destructive" });
         setIsSwapping(false);
@@ -792,7 +830,11 @@ export default function Swap() {
             {/* Gasless Mode Notice */}
             {gaslessMode && isConnected && (
               <div className="sw-gasless-notice">
-                {isCheckingPermit2 ? (
+                {isNativeToken(fromToken?.address || "") ? (
+                  <span style={{ color: '#fb923c', fontSize: 11, fontWeight: 600 }}>
+                    ⚠ Native token - Use regular swap
+                  </span>
+                ) : isCheckingPermit2 ? (
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <Loader2 className="sw-spin" style={{ width: 12, height: 12 }} />
                     Checking Permit2 approval...

@@ -54,10 +54,16 @@ export async function fetchNonce(userAddress: string): Promise<number> {
   const url = `${GASLESS_CONFIG.nonceUrl}?address=${userAddress}`;
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Failed to fetch nonce: ${response.statusText}`);
+    const text = await response.text();
+    throw new Error(`Nonce API error (${response.status}): ${text.slice(0, 100)}`);
   }
-  const data = await response.json();
-  return parseInt(data.nonce, 10);
+  const text = await response.text();
+  try {
+    const data = JSON.parse(text);
+    return parseInt(data.nonce, 10);
+  } catch {
+    throw new Error(`Invalid nonce response: ${text.slice(0, 100)}`);
+  }
 }
 
 export async function checkAndApprovePermit2(
@@ -134,12 +140,21 @@ export async function submitToRelayer(
     body: JSON.stringify({ request, signature }),
   });
 
+  const text = await response.text();
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || "Relayer request failed");
+    try {
+      const error = JSON.parse(text);
+      throw new Error(error.error || `Relayer failed (${response.status})`);
+    } catch {
+      throw new Error(`Relayer error (${response.status}): ${text.slice(0, 200)}`);
+    }
   }
 
-  return response.json();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid relayer response: ${text.slice(0, 100)}`);
+  }
 }
 
 export async function waitForTransaction(
