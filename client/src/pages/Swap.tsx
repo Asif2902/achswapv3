@@ -401,15 +401,18 @@ export default function Swap() {
             }
             result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path);
           } else if (useV3 && v3Enabled && bestQuote.route.length === 1) {
+            const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+            // For V3, always use wrapped token as tokenOut (router handles unwrap internally)
+            const tokenOutV3 = isNativeToken(toToken.address) && wrappedAddr ? wrappedAddr : toToken.address;
             console.log("[GASLESS] V3 swap params:", {
               tokenIn: fromToken.address,
-              tokenOut: toToken.address,
+              tokenOut: tokenOutV3,
               fee: bestQuote.route[0].fee,
               amountIn,
               minAmountOut
             });
             const fee = bestQuote.route[0].fee || 3000;
-            result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut);
+            result = await executeGaslessSwapV3(signer, fromToken.address, tokenOutV3, fee, amountIn, minAmountOut);
           } else {
             throw new Error("Selected protocol not available. Try regular swap.");
           }
