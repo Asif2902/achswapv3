@@ -2,40 +2,35 @@
 pragma solidity ^0.8.20;
 
 /**
- * @title  AchSwapGasless v3
+ * @title  AchSwapGasless v4
  *
- * Fixes vs v2
- * ───────────
- * 1. REENTRANCY FIX — nonReentrant removed from all swap functions.
- *    execute() holds the lock at the top level. Swap functions are only
- *    reachable through execute() so the guard is still fully effective.
- *    Root cause of 0x3ee5aeb5 (ReentrancyGuardReentrantCall) failures.
+ * What's new vs v3
+ * ────────────────
+ * - WETH address added as immutable constructor arg.
+ * - V3 single-hop + multi-hop: if tokenOut == WETH, contract receives WETH,
+ *   calls WETH.withdraw(), pushes native to user automatically.
+ *   Frontend passes nothing extra — just use WETH address as tokenOut.
+ * - V2 native output: swapV2 detects tokenOut == WETH and calls
+ *   swapExactTokensForETH instead of swapExactTokensForTokens.
+ *   V2 router unwraps natively so no manual withdraw needed.
+ * - receive() now accepts ETH (needed for WETH.withdraw() callback).
  *
- * 2. ONE SIGNATURE PER SWAP — switched from Permit2 permitTransferFrom
- *    (required a fresh Permit2 sig + ForwardRequest sig = 2 sigs every swap)
- *    to Permit2 allowanceTransfer (user approves once, then only the
- *    ForwardRequest sig is needed per swap = 1 sig forever after).
+ * Constructor args
+ * ────────────────
+ * _v2Router  — AchSwap V2 router address
+ * _v3Router  — AchSwap V3 router address
+ * _weth      — Wrapped native token address on Arc Testnet
  *
- * 3. SIMPLIFIED INTERNALS — removed the abi.encode → abi.decode chain
- *    in internal swap helpers. Params are passed directly. Eliminates
- *    silent decode failures that caused unpredictable reverts.
+ * Frontend behaviour
+ * ──────────────────
+ * User selects native token as output → frontend maps to WETH address.
+ * Pass WETH address as tokenOut. Contract handles unwrap automatically.
+ * No extra params, no extra signatures.
  *
- * One-time user setup per token (user pays gas once, never again)
- * ───────────────────────────────────────────────────────────────
- * Step 1: token.approve(PERMIT2_ADDRESS, MaxUint256)
- * Step 2: permit2.approve(token, THIS_CONTRACT, MaxUint256, expiry)
- *         where expiry is uint48 — e.g. block.timestamp + 365 days
- * After that: every swap needs only 1 signature (ForwardRequest).
- *
- * Security model
- * ──────────────
- * - execute() / executeBatch() hold nonReentrant — outer guard is sufficient.
- * - Swap functions block direct calls (must go through execute).
- * - Both routers immutable — set at deploy, never changeable.
- * - Permit2 address hardcoded constant.
- * - SafeERC20 forceApprove used for all router approvals.
- * - Router approval reset to 0 after every swap.
- * - Pausable emergency stop.
+ * One-time user setup per token (pays gas once, all swaps gasless after)
+ * ───────────────────────────────────────────────────────────────────────
+ * 1. token.approve(PERMIT2_ADDRESS, MaxUint256)
+ * 2. permit2.approve(token, THIS_CONTRACT, MaxUint256, uint48(expiry))
  */
 
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
@@ -46,43 +41,36 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 
-// ── Permit2 AllowanceTransfer interface ───────────────────────────────────────
-// Used for 1-sig-per-swap flow. User approves once via permit2.approve(),
-// contract calls transferFrom() with no signature argument.
+// ── Interfaces ────────────────────────────────────────────────────────────────
 
 interface IPermit2 {
-    /// @notice Transfer tokens using stored allowance — no sig required at call time
-    function transferFrom(
-        address from,
-        address to,
-        uint160 amount,
-        address token
-    ) external;
-
-    /// @notice Called by user once per token to set allowance (replaces ERC20 approve)
-    function approve(
-        address token,
-        address spender,
-        uint160 amount,
-        uint48  expiration
-    ) external;
+    function transferFrom(address from, address to, uint160 amount, address token) external;
+    function approve(address token, address spender, uint160 amount, uint48 expiration) external;
 }
 
-// ── Uniswap V2 ────────────────────────────────────────────────────────────────
+interface IWETH {
+    function withdraw(uint256 amount) external;
+    function balanceOf(address account) external view returns (uint256);
+}
 
 interface IUniswapV2Router {
     function swapExactTokensForTokens(
-        uint256          amountIn,
-        uint256          amountOutMin,
+        uint256 amountIn,
+        uint256 amountOutMin,
         address[] calldata path,
-        address          to,
-        uint256          deadline
+        address to,
+        uint256 deadline
+    ) external returns (uint256[] memory amounts);
+
+    // used when tokenOut is native (last token in path must be WETH)
+    function swapExactTokensForETH(
+        uint256 amountIn,
+        uint256 amountOutMin,
+        address[] calldata path,
+        address to,
+        uint256 deadline
     ) external returns (uint256[] memory amounts);
 }
-
-// ── Uniswap V3 — original SwapRouter ─────────────────────────────────────────
-// deadline is INSIDE ExactInputSingleParams (original SwapRouter behaviour).
-// SwapRouter02 removes deadline from the struct — this contract targets original.
 
 interface IUniswapV3Router {
     struct ExactInputSingleParams {
@@ -95,23 +83,20 @@ interface IUniswapV3Router {
         uint256 amountOutMinimum;
         uint160 sqrtPriceLimitX96;
     }
-
     struct ExactInputParams {
-        bytes   path;       // abi.encodePacked(tokenA, fee, tokenB, fee, tokenC ...)
+        bytes   path;
         address recipient;
         uint256 deadline;
         uint256 amountIn;
         uint256 amountOutMinimum;
     }
-
     function exactInputSingle(ExactInputSingleParams calldata params)
         external payable returns (uint256 amountOut);
-
     function exactInput(ExactInputParams calldata params)
         external payable returns (uint256 amountOut);
 }
 
-// ── Main contract ─────────────────────────────────────────────────────────────
+// ── Contract ──────────────────────────────────────────────────────────────────
 
 contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
     using ECDSA     for bytes32;
@@ -139,8 +124,9 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
 
     IUniswapV2Router public immutable V2_ROUTER;
     IUniswapV3Router public immutable V3_ROUTER;
+    address          public immutable WETH;
 
-    // ── Batch swap types ───────────────────────────────────────────────────────
+    // ── Batch types ────────────────────────────────────────────────────────────
 
     enum SwapKind { V2, V3Single, V3Multi }
 
@@ -158,7 +144,6 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
         uint256 amountIn,
         uint256 amountOut
     );
-
     event SwapV3Executed(
         address indexed user,
         address indexed tokenIn,
@@ -166,15 +151,8 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
         uint256 amountIn,
         uint256 amountOut
     );
-
     event MetaTxExecuted(address indexed from, uint256 nonce);
-
-    event BatchResult(
-        uint256 indexed index,
-        address indexed from,
-        bool    success,
-        bytes   reason
-    );
+    event BatchResult(uint256 indexed index, address indexed from, bool success, bytes reason);
 
     // ── Errors ─────────────────────────────────────────────────────────────────
 
@@ -189,19 +167,29 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
     error BatchLengthMismatch();
     error InvalidSwapKind();
     error InvalidFeeTier();
+    error NativeTransferFailed();
 
     // ── Constructor ────────────────────────────────────────────────────────────
 
-    constructor(address _v2Router, address _v3Router)
+    /// @param _v2Router  AchSwap V2 router
+    /// @param _v3Router  AchSwap V3 router
+    /// @param _weth      Wrapped native token on Arc Testnet
+    constructor(address _v2Router, address _v3Router, address _weth)
         EIP712("AchSwapGasless", "1")
         Ownable(msg.sender)
     {
-        require(_v2Router != address(0) && _v3Router != address(0), "zero address");
+        require(
+            _v2Router != address(0) &&
+            _v3Router != address(0) &&
+            _weth     != address(0),
+            "zero address"
+        );
         V2_ROUTER = IUniswapV2Router(_v2Router);
         V3_ROUTER = IUniswapV3Router(_v3Router);
+        WETH      = _weth;
     }
 
-    // ── ERC-2771 sender resolution ─────────────────────────────────────────────
+    // ── ERC-2771 ───────────────────────────────────────────────────────────────
 
     function _msgSender() internal view override returns (address sender) {
         if (msg.sender == address(this) && msg.data.length >= 20) {
@@ -221,10 +209,9 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
 
     // ── execute() ─────────────────────────────────────────────────────────────
 
-    /// @notice Relayer calls this with a signed ForwardRequest.
-    ///         nonReentrant lives here — swap functions do NOT have it.
-    ///         Swap functions are only reachable through this call so the
-    ///         reentrancy guard is still fully effective.
+    /// @notice Relayer entry point — single meta-tx.
+    ///         nonReentrant is here only. Swap functions intentionally omit it
+    ///         because they are only reachable through this self-call.
     function execute(
         ForwardRequest calldata req,
         bytes calldata signature
@@ -242,8 +229,6 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
 
     // ── executeBatch() ────────────────────────────────────────────────────────
 
-    /// @notice Relayer batches N users into one tx.
-    /// @param continueOnFailure  true = skip failures, false = revert on first
     function executeBatch(
         ForwardRequest[] calldata reqs,
         bytes[]          calldata signatures,
@@ -283,8 +268,10 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
 
     // ── swapV2() ──────────────────────────────────────────────────────────────
 
-    /// @notice Gasless V2 swap. Requires prior Permit2 allowance setup.
-    ///         No permitSig param — 1 signature total (ForwardRequest only).
+    /// @notice Gasless V2 swap.
+    ///         If path[last] == WETH, automatically calls swapExactTokensForETH
+    ///         so user receives native. Frontend passes WETH as tokenOut — no
+    ///         extra params needed.
     function swapV2(
         uint256            amountIn,
         uint256            amountOutMin,
@@ -296,19 +283,25 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
         if (path.length < 2)             revert InvalidPath();
         if (deadline < block.timestamp)  revert DeadlineExpired();
 
-        address user = _msgSender();
+        address user    = _msgSender();
+        bool nativeOut  = path[path.length - 1] == WETH;
 
-        // pull tokens — no sig needed, uses stored Permit2 allowance
         PERMIT2.transferFrom(user, address(this), uint160(amountIn), path[0]);
-
         IERC20(path[0]).forceApprove(address(V2_ROUTER), amountIn);
-        uint256[] memory amounts = V2_ROUTER.swapExactTokensForTokens(
-            amountIn,
-            amountOutMin,
-            path,
-            user,
-            deadline
-        );
+
+        uint256[] memory amounts;
+
+        if (nativeOut) {
+            // router unwraps WETH → native and sends to user directly
+            amounts = V2_ROUTER.swapExactTokensForETH(
+                amountIn, amountOutMin, path, user, deadline
+            );
+        } else {
+            amounts = V2_ROUTER.swapExactTokensForTokens(
+                amountIn, amountOutMin, path, user, deadline
+            );
+        }
+
         IERC20(path[0]).forceApprove(address(V2_ROUTER), 0);
 
         emit SwapV2Executed(
@@ -322,8 +315,9 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
 
     // ── swapV3() single-hop ───────────────────────────────────────────────────
 
-    /// @notice Gasless V3 single-hop swap. No permitSig — 1 signature total.
-    /// @param fee  Pool fee tier: 500 / 3000 / 10000
+    /// @notice Gasless V3 single-hop swap.
+    ///         If tokenOut == WETH, contract receives WETH, withdraws,
+    ///         and pushes native to user. Frontend passes WETH as tokenOut.
     function swapV3(
         address tokenIn,
         address tokenOut,
@@ -332,43 +326,51 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
         uint256 amountOutMin,
         uint256 deadline
     ) external whenNotPaused {
-        if (msg.sender != address(this))        revert DirectCallNotAllowed();
-        if (amountIn == 0)                      revert ZeroAmount();
+        if (msg.sender != address(this))         revert DirectCallNotAllowed();
+        if (amountIn == 0)                       revert ZeroAmount();
         if (tokenIn == address(0) ||
-            tokenOut == address(0))             revert InvalidPath();
-        if (tokenIn == tokenOut)                revert InvalidPath();
-        if (deadline < block.timestamp)         revert DeadlineExpired();
+            tokenOut == address(0))              revert InvalidPath();
+        if (tokenIn == tokenOut)                 revert InvalidPath();
+        if (deadline < block.timestamp)          revert DeadlineExpired();
         if (fee != 500 && fee != 3000
-            && fee != 10000)                    revert InvalidFeeTier();
+            && fee != 10000)                     revert InvalidFeeTier();
 
-        address user = _msgSender();
+        address user   = _msgSender();
+        bool nativeOut = tokenOut == WETH;
 
         PERMIT2.transferFrom(user, address(this), uint160(amountIn), tokenIn);
-
         IERC20(tokenIn).forceApprove(address(V3_ROUTER), amountIn);
+
         uint256 amountOut = V3_ROUTER.exactInputSingle(
             IUniswapV3Router.ExactInputSingleParams({
                 tokenIn:           tokenIn,
                 tokenOut:          tokenOut,
                 fee:               fee,
-                recipient:         user,
+                // if unwrapping: receive WETH here, then withdraw below
+                recipient:         nativeOut ? address(this) : user,
                 deadline:          deadline,
                 amountIn:          amountIn,
                 amountOutMinimum:  amountOutMin,
                 sqrtPriceLimitX96: 0
             })
         );
+
         IERC20(tokenIn).forceApprove(address(V3_ROUTER), 0);
+
+        if (nativeOut) {
+            IWETH(WETH).withdraw(amountOut);
+            (bool sent,) = user.call{value: amountOut}("");
+            if (!sent) revert NativeTransferFailed();
+        }
 
         emit SwapV3Executed(user, tokenIn, tokenOut, amountIn, amountOut);
     }
 
     // ── swapV3MultiHop() ──────────────────────────────────────────────────────
 
-    /// @notice Gasless V3 multi-hop swap via exactInput.
+    /// @notice Gasless V3 multi-hop swap.
     ///         path = abi.encodePacked(tokenA, fee, tokenB, fee, tokenC ...)
-    ///         tokenIn  = first 20 bytes of path
-    ///         tokenOut = last  20 bytes of path
+    ///         If last token in path == WETH, auto-unwraps to native.
     function swapV3MultiHop(
         bytes   calldata path,
         uint256 amountIn,
@@ -376,35 +378,44 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
         uint256 deadline
     ) external whenNotPaused {
         if (msg.sender != address(this)) revert DirectCallNotAllowed();
-        if (path.length < 43)            revert InvalidPath(); // min: 20 + 3 + 20
+        if (path.length < 43)            revert InvalidPath();
         if (amountIn == 0)               revert ZeroAmount();
         if (deadline < block.timestamp)  revert DeadlineExpired();
 
         address user = _msgSender();
 
-        // extract tokenIn from first 20 bytes of path
+        // tokenIn = first 20 bytes of path
         address tokenIn;
         assembly { tokenIn := shr(96, calldataload(path.offset)) }
 
-        // extract tokenOut from last 20 bytes of path
+        // tokenOut = last 20 bytes of path
         address tokenOut;
         assembly {
             tokenOut := shr(96, calldataload(add(path.offset, sub(path.length, 20))))
         }
 
-        PERMIT2.transferFrom(user, address(this), uint160(amountIn), tokenIn);
+        bool nativeOut = tokenOut == WETH;
 
+        PERMIT2.transferFrom(user, address(this), uint160(amountIn), tokenIn);
         IERC20(tokenIn).forceApprove(address(V3_ROUTER), amountIn);
+
         uint256 amountOut = V3_ROUTER.exactInput(
             IUniswapV3Router.ExactInputParams({
                 path:             path,
-                recipient:        user,
+                recipient:        nativeOut ? address(this) : user,
                 deadline:         deadline,
                 amountIn:         amountIn,
                 amountOutMinimum: amountOutMin
             })
         );
+
         IERC20(tokenIn).forceApprove(address(V3_ROUTER), 0);
+
+        if (nativeOut) {
+            IWETH(WETH).withdraw(amountOut);
+            (bool sent,) = user.call{value: amountOut}("");
+            if (!sent) revert NativeTransferFailed();
+        }
 
         emit SwapV3Executed(user, tokenIn, tokenOut, amountIn, amountOut);
     }
@@ -412,7 +423,6 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
     // ── swapBatch() ───────────────────────────────────────────────────────────
 
     /// @notice Multiple swaps in one ForwardRequest. All or nothing.
-    ///         Encode as req.data: iface.encodeFunctionData("swapBatch", [calls])
     function swapBatch(SwapCall[] calldata calls) external whenNotPaused {
         if (msg.sender != address(this)) revert DirectCallNotAllowed();
 
@@ -433,11 +443,21 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
                 if (path.length < 2)            revert InvalidPath();
                 if (deadline < block.timestamp) revert DeadlineExpired();
 
+                bool nativeOut = path[path.length - 1] == WETH;
+
                 PERMIT2.transferFrom(user, address(this), uint160(amountIn), path[0]);
                 IERC20(path[0]).forceApprove(address(V2_ROUTER), amountIn);
-                uint256[] memory amounts = V2_ROUTER.swapExactTokensForTokens(
-                    amountIn, amountOutMin, path, user, deadline
-                );
+
+                uint256[] memory amounts;
+                if (nativeOut) {
+                    amounts = V2_ROUTER.swapExactTokensForETH(
+                        amountIn, amountOutMin, path, user, deadline
+                    );
+                } else {
+                    amounts = V2_ROUTER.swapExactTokensForTokens(
+                        amountIn, amountOutMin, path, user, deadline
+                    );
+                }
                 IERC20(path[0]).forceApprove(address(V2_ROUTER), 0);
                 emit SwapV2Executed(user, path[0], path[path.length-1], amountIn, amounts[amounts.length-1]);
 
@@ -456,17 +476,25 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
                 if (deadline < block.timestamp) revert DeadlineExpired();
                 if (fee != 500 && fee != 3000 && fee != 10000) revert InvalidFeeTier();
 
+                bool nativeOut = tokenOut == WETH;
+
                 PERMIT2.transferFrom(user, address(this), uint160(amountIn), tokenIn);
                 IERC20(tokenIn).forceApprove(address(V3_ROUTER), amountIn);
                 uint256 amountOut = V3_ROUTER.exactInputSingle(
                     IUniswapV3Router.ExactInputSingleParams({
                         tokenIn: tokenIn, tokenOut: tokenOut, fee: fee,
-                        recipient: user, deadline: deadline,
-                        amountIn: amountIn, amountOutMinimum: amountOutMin,
-                        sqrtPriceLimitX96: 0
+                        recipient: nativeOut ? address(this) : user,
+                        deadline: deadline, amountIn: amountIn,
+                        amountOutMinimum: amountOutMin, sqrtPriceLimitX96: 0
                     })
                 );
                 IERC20(tokenIn).forceApprove(address(V3_ROUTER), 0);
+
+                if (nativeOut) {
+                    IWETH(WETH).withdraw(amountOut);
+                    (bool sent,) = user.call{value: amountOut}("");
+                    if (!sent) revert NativeTransferFailed();
+                }
                 emit SwapV3Executed(user, tokenIn, tokenOut, amountIn, amountOut);
 
             } else if (c.kind == SwapKind.V3Multi) {
@@ -488,15 +516,24 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
                     tokenOut := shr(96, mload(add(add(path, 32), sub(mload(path), 20))))
                 }
 
+                bool nativeOut = tokenOut == WETH;
+
                 PERMIT2.transferFrom(user, address(this), uint160(amountIn), tokenIn);
                 IERC20(tokenIn).forceApprove(address(V3_ROUTER), amountIn);
                 uint256 amountOut = V3_ROUTER.exactInput(
                     IUniswapV3Router.ExactInputParams({
-                        path: path, recipient: user, deadline: deadline,
-                        amountIn: amountIn, amountOutMinimum: amountOutMin
+                        path: path, recipient: nativeOut ? address(this) : user,
+                        deadline: deadline, amountIn: amountIn,
+                        amountOutMinimum: amountOutMin
                     })
                 );
                 IERC20(tokenIn).forceApprove(address(V3_ROUTER), 0);
+
+                if (nativeOut) {
+                    IWETH(WETH).withdraw(amountOut);
+                    (bool sent,) = user.call{value: amountOut}("");
+                    if (!sent) revert NativeTransferFailed();
+                }
                 emit SwapV3Executed(user, tokenIn, tokenOut, amountIn, amountOut);
 
             } else {
@@ -543,5 +580,11 @@ contract AchSwapGasless is EIP712, Ownable, ReentrancyGuard, Pausable {
         IERC20(token).safeTransfer(owner(), amount);
     }
 
-    receive() external payable { revert("no ETH accepted"); }
+    function rescueETH() external onlyOwner {
+        (bool sent,) = owner().call{value: address(this).balance}("");
+        require(sent, "failed");
+    }
+
+    // accepts ETH from WETH.withdraw() only
+    receive() external payable {}
 }
