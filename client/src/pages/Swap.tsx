@@ -406,11 +406,12 @@ export default function Swap() {
           saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
           setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
+          const toSymbol = toToken.symbol === "wUSDC" ? "USDC" : toToken.symbol;
           toast({
             title: "Gasless swap successful!",
             description: (
               <div className="flex items-center gap-2">
-                <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toToken.symbol}</span>
+                <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toSymbol}{toToken.symbol === "wUSDC" && " (auto-converted)"}</span>
                 <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
               </div>
             ),
