@@ -2,11 +2,6 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist/public",
   "framework": "vite",
-  "routes": [
-    { "src": "/api/(.*)", "dest": "/api/$1" },
-    { "handle": "filesystem" },
-    { "src": "/(.*)", "dest": "/index.html" }
-  ],
   "functions": {
     "api/relay.js": { "maxDuration": 10 },
     "api/nonce.js": { "maxDuration": 10 }
