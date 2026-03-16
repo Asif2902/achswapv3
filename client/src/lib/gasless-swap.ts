@@ -150,10 +150,14 @@ export async function signPermit2(
 export async function submitToRelayer(
   request: any
 ): Promise<{ txHash: string }> {
+  const serializedRequest = JSON.stringify(request, (key, value) => 
+    typeof value === "bigint" ? value.toString() : value
+  );
+  
   const response = await fetch(GASLESS_CONFIG.relayerUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(request),
+    body: serializedRequest,
   });
 
   const text = await response.text();
