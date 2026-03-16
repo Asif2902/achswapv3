@@ -30,22 +30,8 @@ function getSwapDeadline(): number {
   return Math.floor(Date.now() / 1000) + 1800;
 }
 
-const NONCE_STORAGE_KEY = "gasless_nonce";
-
-function getStoredNonce(address: string): number {
-  const stored = localStorage.getItem(`${NONCE_STORAGE_KEY}_${address.toLowerCase()}`);
-  return stored ? parseInt(stored, 10) : 0;
-}
-
-function incrementNonce(address: string): number {
-  const current = getStoredNonce(address);
-  const next = current + 1;
-  localStorage.setItem(`${NONCE_STORAGE_KEY}_${address.toLowerCase()}`, next.toString());
-  return next;
-}
-
-export async function fetchNonce(userAddress: string): Promise<number> {
-  return incrementNonce(userAddress);
+export async function fetchNonce(): Promise<bigint> {
+  return BigInt("0x" + Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex"));
 }
 
 const PERMIT2_ABI = [
@@ -110,7 +96,7 @@ export async function signPermit2(
   signer: any,
   tokenIn: string,
   amount: bigint,
-  nonce: number,
+  nonce: bigint,
   deadline: number
 ): Promise<string> {
   const user = await signer.getAddress();
@@ -218,7 +204,7 @@ export async function executeGaslessSwapV2(
   const user = await signer.getAddress();
   
   const tokenForPermit2 = tokenIn;
-  const nonce = await fetchNonce(user);
+  const nonce = await fetchNonce();
   const deadline = getSwapDeadline();
   
   const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
@@ -260,7 +246,7 @@ export async function executeGaslessSwapV3(
   const user = await signer.getAddress();
   
   const tokenForPermit2 = tokenIn;
-  const nonce = await fetchNonce(user);
+  const nonce = await fetchNonce();
   const deadline = getSwapDeadline();
   
   const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
@@ -301,7 +287,7 @@ export async function executeGaslessSwapV3MultiHop(
   const user = await signer.getAddress();
   
   const tokenForPermit2 = tokenIn;
-  const nonce = await fetchNonce(user);
+  const nonce = await fetchNonce();
   const deadline = getSwapDeadline();
   
   const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
