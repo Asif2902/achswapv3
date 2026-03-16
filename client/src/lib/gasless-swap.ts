@@ -222,7 +222,7 @@ export async function executeGaslessSwapV2(
   const request = {
     from: user,
     nonce: nonce,
-    gas: 350000,
+    gas: 500000,
     data: swapCalldata,
   };
 
@@ -274,7 +274,7 @@ export async function executeGaslessSwapV3(
   const request = {
     from: user,
     nonce: nonce,
-    gas: 250000,
+    gas: 500000,
     data: swapCalldata,
   };
 
@@ -322,7 +322,7 @@ export async function executeGaslessSwapV3MultiHop(
   const request = {
     from: user,
     nonce: nonce,
-    gas: 350000,
+    gas: 500000,
     data: swapCalldata,
   };
 

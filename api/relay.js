@@ -44,7 +44,7 @@ export default async function handler(req, res) {
     }
 
     const tx = await contract.execute(request, signature, {
-      gasLimit: BigInt(request.gas) + 50000n,
+      gasLimit: BigInt(request.gas) + 100000n,
     });
 
     res.json({ txHash: tx.hash });
