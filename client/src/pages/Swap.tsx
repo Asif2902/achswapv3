@@ -354,7 +354,6 @@ export default function Swap() {
       }
       
       // ── GASLESS SWAP PATH ───────────────────────────────────────────────────
-      const fromNative = isNativeToken(fromToken.address);
       
       if (gaslessMode && permit2Approved) {
         try {
