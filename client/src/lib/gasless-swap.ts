@@ -46,7 +46,7 @@ export async function fetchNonce(): Promise<bigint> {
 const PERMIT2_ABI = [
   "function approve(address token, address spender, uint160 amount, uint48 expiration)",
   "function transferFrom(address from, address to, uint160 amount, address token)",
-  "function allowance(address user, address token, address spender) view returns (uint160)",
+  "function allowance(address user, address token, address spender) view returns (uint160 amount, uint48 expiration, uint48 nonce)",
   "function permitTransferFrom((address,uint256,uint256,uint256),(address,uint256),address,bytes) external",
 ];
 
@@ -68,8 +68,11 @@ export async function checkPermit2Approval(
   
   const permit2Contract = new Contract(GASLESS_CONFIG.permit2Address, PERMIT2_ABI, provider);
   try {
-    const allowance = await permit2Contract.allowance(user, tokenIn, GASLESS_CONFIG.contractAddress);
-    if (allowance < MAX_UINT160 / 2n) {
+    const { amount, expiration } = await permit2Contract.allowance(user, tokenIn, GASLESS_CONFIG.contractAddress);
+    if (amount < MAX_UINT160 / 2n) {
+      return false;
+    }
+    if (expiration > 0 && expiration <= BigInt(Math.floor(Date.now() / 1000))) {
       return false;
     }
   } catch {
@@ -153,26 +156,40 @@ export async function submitToRelayer(
     typeof value === "bigint" ? value.toString() : value
   );
   
-  const response = await fetch(GASLESS_CONFIG.relayerUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: serializedRequest,
-  });
-
-  const text = await response.text();
-  if (!response.ok) {
-    try {
-      const error = JSON.parse(text);
-      throw new Error(error.error || `Relayer failed (${response.status})`);
-    } catch {
-      throw new Error(`Relayer error (${response.status}): ${text.slice(0, 200)}`);
-    }
-  }
-
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  
   try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`Invalid relayer response: ${text.slice(0, 100)}`);
+    const response = await fetch(GASLESS_CONFIG.relayerUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: serializedRequest,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeout);
+
+    const text = await response.text();
+    if (!response.ok) {
+      try {
+        const error = JSON.parse(text);
+        throw new Error(error.error || `Relayer failed (${response.status})`);
+      } catch {
+        throw new Error(`Relayer error (${response.status}): ${text.slice(0, 200)}`);
+      }
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new Error(`Invalid relayer response: ${text.slice(0, 100)}`);
+    }
+  } catch (err: any) {
+    clearTimeout(timeout);
+    if (err.name === "AbortError") {
+      throw new Error("Relayer request timed out");
+    }
+    throw err;
   }
 }
 
@@ -290,6 +307,11 @@ export async function executeGaslessSwapV3(
   return { txHash, receipt };
 }
 
+function decodeV3Path(path: string): string {
+  const decoded = abiCoder.decode(["bytes"], path)[0];
+  return "0x" + decoded.slice(0, 40);
+}
+
 export async function executeGaslessSwapV3MultiHop(
   signer: any,
   tokenIn: string,
@@ -300,6 +322,11 @@ export async function executeGaslessSwapV3MultiHop(
   await assertGaslessChain(signer);
   const provider = signer.provider;
   const user = await signer.getAddress();
+  
+  const pathFirstToken = decodeV3Path(path);
+  if (pathFirstToken.toLowerCase() !== tokenIn.toLowerCase()) {
+    throw new Error("Path first token does not match tokenIn");
+  }
   
   const tokenForPermit2 = tokenIn;
   const nonce = await fetchNonce();

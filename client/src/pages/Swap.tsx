@@ -71,7 +71,18 @@ export default function Swap() {
   const [quoteRefreshInterval, setQuoteRefreshInterval] = useState(30);
   const [showTransactionHistory, setShowTransactionHistory] = useState(false);
   const [tradeDetailsOpen, setTradeDetailsOpen] = useState(false);
-  const [gaslessMode, setGaslessMode] = useState(false);
+  const [gaslessMode, setGaslessMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('gaslessMode') === 'true';
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('gaslessMode', String(gaslessMode));
+    }
+  }, [gaslessMode]);
   const [permit2Approved, setPermit2Approved] = useState(false);
   const [isCheckingPermit2, setIsCheckingPermit2] = useState(false);
   const [isApprovingPermit2, setIsApprovingPermit2] = useState(false);
@@ -354,6 +365,13 @@ export default function Swap() {
       }
       
       // ── GASLESS SWAP PATH ───────────────────────────────────────────────────
+      
+      // Custom recipient not supported in gasless mode
+      if (gaslessMode && permit2Approved && recipientAddress) {
+        toast({ title: "Custom recipient not supported", description: "Gasless swaps only send to connected wallet", variant: "destructive" });
+        setIsSwapping(false);
+        return;
+      }
       
       if (gaslessMode && permit2Approved) {
         try {

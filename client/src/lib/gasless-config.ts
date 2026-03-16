@@ -1,5 +1,5 @@
 export const GASLESS_CONFIG = {
-  contractAddress: "0xD65B535A6cd27657C19720759F7C6f3F89eEf734",
+  contractAddress: "0x28021558B4f60d90A97bE77D9462f06EAf92A1b9",
   permit2Address: "0x000000000022D473030F116dDEE9F6B43aC78BA3",
   relayerUrl: "https://preview.achswapfi.xyz/api/relay",
   nonceUrl: "https://preview.achswapfi.xyz/api/nonce",

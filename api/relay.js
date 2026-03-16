@@ -5,7 +5,7 @@ const ABI = [
 ];
 
 const RPC_URL = "https://rpc.testnet.arc.network";
-const CONTRACT_ADDRESS = "0xD65B535A6cd27657C19720759F7C6f3F89eEf734";
+const CONTRACT_ADDRESS = "0x28021558B4f60d90A97bE77D9462f06EAf92A1b9";
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 
@@ -66,9 +66,9 @@ export default async function handler(req, res) {
         params: segment.params
       },
       {
-        gasLimit: 1500000n,
-        maxFeePerGas: 100000000000n, // 100 gwei
-        maxPriorityFeePerGas: 1000000000n, // 1 gwei
+        gasLimit: 2000000n,
+        maxFeePerGas: 500000000000n, // 500 gwei
+        maxPriorityFeePerGas: 50000000000n, // 50 gwei
       }
     );
 
