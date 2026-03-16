@@ -100,6 +100,12 @@ export default function Swap() {
   useEffect(() => { loadTokens(); }, [chainId]);
 
   useEffect(() => {
+    if (gaslessMode && fromToken && isNativeToken(fromToken.address)) {
+      setGaslessMode(false);
+    }
+  }, [fromToken?.address]);
+
+  useEffect(() => {
     if (!gaslessMode || !address || !fromToken || isNativeToken(fromToken.address)) {
       setPermit2Approved(false);
       return;
