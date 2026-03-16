@@ -21,8 +21,8 @@ import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
 import { createAlchemyProvider, FALLBACK_RPC } from "@/lib/config";
 import { getErrorForToast } from "@/lib/error-utils";
 import {
-  checkAndApprovePermit2,
-  approveTokenForPermit2,
+  checkPermit2Approval,
+  approvePermit2,
   executeGaslessSwapV2,
   executeGaslessSwapV3,
 } from "@/lib/gasless-swap";
@@ -104,16 +104,16 @@ export default function Swap() {
       setPermit2Approved(false);
       return;
     }
-    checkPermit2Approval();
+    checkPermit2();
   }, [gaslessMode, address, fromToken?.address]);
 
-  const checkPermit2Approval = async () => {
+  const checkPermit2 = async () => {
     if (!address || !window.ethereum || !fromToken || isNativeToken(fromToken.address)) return;
     setIsCheckingPermit2(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const approved = await checkAndApprovePermit2(signer, fromToken.address);
+      const approved = await checkPermit2Approval(signer, fromToken.address);
       setPermit2Approved(approved);
     } catch (e) {
       console.error("Error checking Permit2 approval:", e);
@@ -129,7 +129,7 @@ export default function Swap() {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
       toast({ title: "Approving Permit2..." });
-      const txHash = await approveTokenForPermit2(signer, fromToken.address);
+      const txHash = await approvePermit2(signer, fromToken.address);
       toast({ title: "Approval submitted", description: (
         <div className="flex items-center gap-2">
           <span>Waiting for confirmation...</span>
@@ -395,11 +395,11 @@ export default function Swap() {
               const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
               if (o !== path[path.length - 1]) path.push(o);
             }
-            result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path, permit2Approved);
+            result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path);
           } else {
             if (bestQuote.route.length === 1) {
               const fee = bestQuote.route[0].fee || 3000;
-              result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut, permit2Approved);
+              result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut);
             } else {
               throw new Error("Multi-hop gasless swaps not yet supported");
             }

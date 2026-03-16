@@ -1,5 +1,5 @@
 import { ethers, Contract, BrowserProvider, Interface } from "ethers";
-import { GASLESS_CONFIG, GASLESS_ABI, ERC20_ABI, CHAIN_ID } from "./gasless-config";
+import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID } from "./gasless-config";
 
 export function decodeExecutionError(data: string): string {
   if (!data || data === "0x") return "Unknown error";
@@ -24,53 +24,8 @@ export function decodeExecutionError(data: string): string {
   return data;
 }
 
-function generateRandomNonce(): bigint {
-  return BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
-}
-
-function getPermitDeadline(): number {
-  return Math.floor(Date.now() / 1000) + 3600; // 1 hour
-}
-
 function getSwapDeadline(): number {
   return Math.floor(Date.now() / 1000) + 1800; // 30 minutes
-}
-
-export async function signPermit2(
-  signer: any,
-  tokenIn: string,
-  amountIn: bigint
-): Promise<{ nonce: bigint; deadline: number; signature: string }> {
-  const nonce = generateRandomNonce();
-  const deadline = getPermitDeadline();
-
-  const permitSig = await signer.signTypedData(
-    {
-      name: "Permit2",
-      chainId: CHAIN_ID,
-      verifyingContract: GASLESS_CONFIG.permit2Address,
-    },
-    {
-      PermitTransferFrom: [
-        { name: "permitted", type: "TokenPermissions" },
-        { name: "spender", type: "address" },
-        { name: "nonce", type: "uint256" },
-        { name: "deadline", type: "uint256" },
-      ],
-      TokenPermissions: [
-        { name: "token", type: "address" },
-        { name: "amount", type: "uint256" },
-      ],
-    },
-    {
-      permitted: { token: tokenIn, amount: amountIn },
-      spender: GASLESS_CONFIG.contractAddress,
-      nonce: nonce,
-      deadline: deadline,
-    }
-  );
-
-  return { nonce, deadline, signature: permitSig };
 }
 
 export async function fetchNonce(userAddress: string): Promise<number> {
@@ -89,33 +44,58 @@ export async function fetchNonce(userAddress: string): Promise<number> {
   }
 }
 
-export async function checkAndApprovePermit2(
+const PERMIT2_ABI = [
+  "function approve(address token, address spender, uint160 amount, uint48 expiration)",
+  "function transferFrom(address from, address to, uint160 amount, address token)",
+];
+
+export async function checkPermit2Approval(
   signer: any,
   tokenIn: string
 ): Promise<boolean> {
   const provider = signer.provider;
   const user = await signer.getAddress();
+  
   const tokenContract = new Contract(tokenIn, ERC20_ABI, provider);
+  const tokenAllowance = await tokenContract.allowance(user, GASLESS_CONFIG.permit2Address);
   
-  const permit2 = GASLESS_CONFIG.permit2Address;
-  const allowance = await tokenContract.allowance(user, permit2);
-  
-  if (allowance === 0n) {
-    return false; // Needs approval
+  if (tokenAllowance === 0n) {
+    return false;
   }
-  return true; // Already approved
+  
+  const permit2Contract = new Contract(GASLESS_CONFIG.permit2Address, PERMIT2_ABI, provider);
+  try {
+    const allowance = await permit2Contract.allowance(user, tokenIn, GASLESS_CONFIG.contractAddress);
+    if (allowance === 0n) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  
+  return true;
 }
 
-export async function approveTokenForPermit2(
+export async function approvePermit2(
   signer: any,
   tokenIn: string
 ): Promise<string> {
+  const user = await signer.getAddress();
+  
   const tokenContract = new Contract(tokenIn, ERC20_ABI, signer);
-  const tx = await tokenContract.approve(
-    GASLESS_CONFIG.permit2Address,
-    ethers.MaxUint256
+  const tokenTx = await tokenContract.approve(GASLESS_CONFIG.permit2Address, ethers.MaxUint256);
+  await tokenTx.wait();
+  
+  const permit2Contract = new Contract(GASLESS_CONFIG.permit2Address, PERMIT2_ABI, signer);
+  const expiration = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
+  const permitTx = await permit2Contract.approve(
+    tokenIn,
+    GASLESS_CONFIG.contractAddress,
+    ethers.MaxUint256,
+    expiration
   );
-  return tx.hash;
+  
+  return permitTx.hash;
 }
 
 export async function signForwardRequest(
@@ -181,7 +161,7 @@ export async function submitToRelayer(
 }
 
 export async function waitForTransaction(
-  provider: BrowserProvider,
+  provider: any,
   txHash: string,
   timeout = 60000
 ): Promise<any> {
@@ -214,19 +194,13 @@ export async function executeGaslessSwapV2(
   tokenIn: string,
   amountIn: bigint,
   amountOutMin: bigint,
-  path: string[],
-  isPermit2Approved: boolean
+  path: string[]
 ): Promise<{ txHash: string; receipt: any }> {
   const provider = signer.provider;
   const user = await signer.getAddress();
-  const iface = new ethers.Interface(GASLESS_ABI);
-
-  if (!isPermit2Approved) {
-    throw new Error("Token not approved for Permit2. Please approve first.");
-  }
-
-  const { nonce: permitNonce, deadline: permitDeadline, signature: permitSig } =
-    await signPermit2(signer, tokenIn, amountIn);
+  const iface = new Interface([
+    "function swapV2(uint256 amountIn, uint256 amountOutMin, address[] path, uint256 deadline)"
+  ]);
 
   const swapDeadline = getSwapDeadline();
 
@@ -235,9 +209,6 @@ export async function executeGaslessSwapV2(
     amountOutMin,
     path,
     swapDeadline,
-    permitNonce,
-    permitDeadline,
-    permitSig,
   ]);
 
   const nonce = await fetchNonce(user);
@@ -264,19 +235,13 @@ export async function executeGaslessSwapV3(
   tokenOut: string,
   fee: number,
   amountIn: bigint,
-  amountOutMin: bigint,
-  isPermit2Approved: boolean
+  amountOutMin: bigint
 ): Promise<{ txHash: string; receipt: any }> {
   const provider = signer.provider;
   const user = await signer.getAddress();
-  const iface = new ethers.Interface(GASLESS_ABI);
-
-  if (!isPermit2Approved) {
-    throw new Error("Token not approved for Permit2. Please approve first.");
-  }
-
-  const { nonce: permitNonce, deadline: permitDeadline, signature: permitSig } =
-    await signPermit2(signer, tokenIn, amountIn);
+  const iface = new Interface([
+    "function swapV3(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint256 amountOutMin, uint256 deadline)"
+  ]);
 
   const swapDeadline = getSwapDeadline();
 
@@ -287,9 +252,6 @@ export async function executeGaslessSwapV3(
     amountIn,
     amountOutMin,
     swapDeadline,
-    permitNonce,
-    permitDeadline,
-    permitSig,
   ]);
 
   const nonce = await fetchNonce(user);
@@ -314,19 +276,13 @@ export async function executeGaslessSwapV3MultiHop(
   signer: any,
   path: string,
   amountIn: bigint,
-  amountOutMin: bigint,
-  isPermit2Approved: boolean
+  amountOutMin: bigint
 ): Promise<{ txHash: string; receipt: any }> {
   const provider = signer.provider;
   const user = await signer.getAddress();
-  const iface = new ethers.Interface(GASLESS_ABI);
-
-  if (!isPermit2Approved) {
-    throw new Error("Token not approved for Permit2. Please approve first.");
-  }
-
-  const { nonce: permitNonce, deadline: permitDeadline, signature: permitSig } =
-    await signPermit2(signer, path.slice(0, 42), amountIn);
+  const iface = new Interface([
+    "function swapV3MultiHop(bytes path, uint256 amountIn, uint256 amountOutMin, uint256 deadline)"
+  ]);
 
   const swapDeadline = getSwapDeadline();
 
@@ -335,9 +291,6 @@ export async function executeGaslessSwapV3MultiHop(
     amountIn,
     amountOutMin,
     swapDeadline,
-    permitNonce,
-    permitDeadline,
-    permitSig,
   ]);
 
   const nonce = await fetchNonce(user);

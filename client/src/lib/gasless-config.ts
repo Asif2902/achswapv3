@@ -1,5 +1,5 @@
 export const GASLESS_CONFIG = {
-  contractAddress: "0x8E8E5f34405B300E77a0DEbb179CbBD2Fdf91016",
+  contractAddress: "0x45b07560D9C989A0C4140841A75d03DDBc52Ab21",
   permit2Address: "0x000000000022D473030F116dDEE9F6B43aC78BA3",
   relayerUrl: "https://preview.achswapfi.xyz/api/relay",
   nonceUrl: "https://preview.achswapfi.xyz/api/nonce",
@@ -40,10 +40,7 @@ export const GASLESS_ABI = [
       { name: "amountIn", type: "uint256" },
       { name: "amountOutMin", type: "uint256" },
       { name: "path", type: "address[]" },
-      { name: "deadline", type: "uint256" },
-      { name: "permitNonce", type: "uint256" },
-      { name: "permitDeadline", type: "uint256" },
-      { name: "permitSig", type: "bytes" }
+      { name: "deadline", type: "uint256" }
     ],
     outputs: []
   },
@@ -57,10 +54,7 @@ export const GASLESS_ABI = [
       { name: "fee", type: "uint24" },
       { name: "amountIn", type: "uint256" },
       { name: "amountOutMin", type: "uint256" },
-      { name: "deadline", type: "uint256" },
-      { name: "permitNonce", type: "uint256" },
-      { name: "permitDeadline", type: "uint256" },
-      { name: "permitSig", type: "bytes" }
+      { name: "deadline", type: "uint256" }
     ],
     outputs: []
   },
