@@ -1,7 +1,6 @@
-import { ethers, Contract, BrowserProvider, Interface } from "ethers";
+import { ethers, Contract, BrowserProvider, Interface, AbiCoder } from "ethers";
 
-const AddressArrayIface = new Interface(["function foo(address[]) view returns (address[])"]);
-const AddressUint24Iface = new Interface(["function foo(address,uint24) view returns (address,uint24)"]);
+const abiCoder = new AbiCoder();
 import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID, NATIVE_TOKEN } from "./gasless-config";
 
 export function decodeExecutionError(data: string): string {
@@ -227,7 +226,7 @@ export async function executeGaslessSwapV2(
     amountIn: amountIn,
     amountOutMin: amountOutMin,
     deadline: deadline,
-    params: AddressArrayIface.encodeFunctionData("foo", [path]),
+    params: abiCoder.encode(["address[]"], [path]),
   };
   
   const request = {
@@ -269,7 +268,7 @@ export async function executeGaslessSwapV3(
     amountIn: amountIn,
     amountOutMin: amountOutMin,
     deadline: deadline,
-    params: AddressUint24Iface.encodeFunctionData("foo", [tokenOut, fee]),
+    params: abiCoder.encode(["address", "uint24"], [tokenOut, fee]),
   };
   
   const request = {
