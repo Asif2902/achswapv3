@@ -352,12 +352,10 @@ export default function Swap() {
       }
       
       // ── GASLESS SWAP PATH ───────────────────────────────────────────────────
-      if (gaslessMode) {
-        if (!permit2Approved) {
-          toast({ title: "Permit2 not approved", description: "Please enable Permit2 first", variant: "destructive" });
-          setIsSwapping(false);
-          return;
-        }
+      console.log("[GASLESS] Starting swap. gaslessMode =", gaslessMode, "permit2Approved =", permit2Approved);
+      
+      if (gaslessMode && permit2Approved) {
+        console.log("[GASLESS] Entering gasless swap path");
         
         const provider = new BrowserProvider(window.ethereum);
         const signer = await provider.getSigner();
@@ -370,49 +368,46 @@ export default function Swap() {
         
         toast({ title: "Initiating gasless swap...", description: "Please sign the permit and request" });
         
-        try {
-          let result: { txHash: string; receipt: any };
-          
-          if (bestQuote.protocol === "V2") {
-            const path: string[] = [];
-            const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
-            if (!wrappedAddr) throw new Error("Wrapped token address not found");
-            for (let i = 0; i < bestQuote.route.length; i++) {
-              const hop = bestQuote.route[i];
-              if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
-              const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
-              if (o !== path[path.length - 1]) path.push(o);
-            }
-            result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path, permit2Approved);
-          } else {
-            if (bestQuote.route.length === 1) {
-              const fee = bestQuote.route[0].fee || 3000;
-              result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut, permit2Approved);
-            } else {
-              throw new Error("Multi-hop gasless swaps not yet supported");
-            }
+        let result: { txHash: string; receipt: any };
+        
+        if (bestQuote.protocol === "V2") {
+          const path: string[] = [];
+          const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+          if (!wrappedAddr) throw new Error("Wrapped token address not found");
+          for (let i = 0; i < bestQuote.route.length; i++) {
+            const hop = bestQuote.route[i];
+            if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
+            const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
+            if (o !== path[path.length - 1]) path.push(o);
           }
-          
-          saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
-          await Promise.all([refetchFromBalance(), refetchToBalance()]);
-          setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
-          toast({
-            title: "Gasless swap successful!",
-            description: (
-              <div className="flex items-center gap-2">
-                <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toToken.symbol}</span>
-                <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
-              </div>
-            ),
-          });
-          setIsSwapping(false);
-          return;
-        } catch (gaslessError: any) {
-          console.error("Gasless swap error:", gaslessError);
-          toast({ title: "Gasless failed", description: gaslessError.message, variant: "destructive" });
-          setIsSwapping(false);
-          return;
+          result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path, permit2Approved);
+        } else {
+          if (bestQuote.route.length === 1) {
+            const fee = bestQuote.route[0].fee || 3000;
+            result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut, permit2Approved);
+          } else {
+            throw new Error("Multi-hop gasless swaps not yet supported");
+          }
         }
+        
+        saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
+        await Promise.all([refetchFromBalance(), refetchToBalance()]);
+        setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
+        toast({
+          title: "Gasless swap successful!",
+          description: (
+            <div className="flex items-center gap-2">
+              <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toToken.symbol}</span>
+              <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
+            </div>
+          ),
+        });
+        setIsSwapping(false);
+        return; // EXIT HERE - do NOT fall through to regular swap
+      } else if (gaslessMode && !permit2Approved) {
+        toast({ title: "Permit2 not approved", description: "Please enable Permit2 first", variant: "destructive" });
+        setIsSwapping(false);
+        return;
       }
       
       // ── REGULAR SWAP PATH ───────────────────────────────────────────────────
