@@ -1,4 +1,5 @@
 import { ethers, Contract, BrowserProvider, Interface, AbiCoder } from "ethers";
+import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID, NATIVE_TOKEN } from "./gasless-config";
 
 const abiCoder = new AbiCoder();
 
@@ -8,7 +9,6 @@ async function assertGaslessChain(signer: any): Promise<void> {
     throw new Error(`Wrong network. Please switch to Arc Testnet.`);
   }
 }
-import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID, NATIVE_TOKEN } from "./gasless-config";
 
 export function decodeExecutionError(data: string): string {
   if (!data || data === "0x") return "Unknown error";
@@ -92,6 +92,7 @@ export async function approvePermit2(
   
   const tokenContract = new Contract(tokenIn, ERC20_ABI, signer);
   const tokenTx = await tokenContract.approve(GASLESS_CONFIG.permit2Address, MAX_UINT160);
+  await tokenTx.wait();
   
   const permit2Contract = new Contract(GASLESS_CONFIG.permit2Address, PERMIT2_ABI, signer);
   const expiration = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
@@ -102,7 +103,6 @@ export async function approvePermit2(
     expiration
   );
   
-  await tokenTx.wait();
   await permitTx.wait();
 }
 

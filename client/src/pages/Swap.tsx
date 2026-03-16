@@ -403,46 +403,46 @@ export default function Swap() {
           if (isV3MultiHop && v3Enabled) {
             toast({ title: "V3 multi-hop not supported in gasless", description: "Using regular swap instead" });
             setGaslessMode(false);
+          }
+          
+          // Execute gasless swap if enabled and available
+          if (gaslessMode && !isV3MultiHop) {
+            if (useV2 && v2Enabled) {
+              const path: string[] = [];
+              const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+              if (!wrappedAddr) throw new Error("Wrapped token address not found");
+              for (let i = 0; i < bestQuote.route.length; i++) {
+                const hop = bestQuote.route[i];
+                if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
+                const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
+                if (o !== path[path.length - 1]) path.push(o);
+              }
+              result = await executeGaslessSwapV2(signer, tokenInAddress, amountInForPermit2, minAmountOut, path);
+            } else if (useV3 && v3Enabled && bestQuote.route.length === 1) {
+              const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+              const tokenOutV3 = isNativeToken(toToken.address) && wrappedAddr ? wrappedAddr : toToken.address;
+              const fee = bestQuote.route[0].fee || 3000;
+              result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountInForPermit2, minAmountOut);
+            } else {
+              throw new Error("Selected protocol not available. Try regular swap.");
+            }
+            
+            saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
+            await Promise.all([refetchFromBalance(), refetchToBalance()]);
+            setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
+            const toSymbol = toToken.symbol === "wUSDC" ? "USDC" : toToken.symbol;
+            toast({
+              title: "Gasless swap successful!",
+              description: (
+                <div className="flex items-center gap-2">
+                  <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toSymbol}{toToken.symbol === "wUSDC" && " (auto-converted)"}</span>
+                  <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
+                </div>
+              ),
+            });
             setIsSwapping(false);
             return;
           }
-          
-          if (useV2 && v2Enabled) {
-            const path: string[] = [];
-            const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
-            if (!wrappedAddr) throw new Error("Wrapped token address not found");
-            for (let i = 0; i < bestQuote.route.length; i++) {
-              const hop = bestQuote.route[i];
-              if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
-              const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
-              if (o !== path[path.length - 1]) path.push(o);
-            }
-            result = await executeGaslessSwapV2(signer, tokenInAddress, amountInForPermit2, minAmountOut, path);
-          } else if (useV3 && v3Enabled && bestQuote.route.length === 1) {
-            // For V3, use wUSDC as tokenOut - contract auto-unwraps to native USDC
-            const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
-            const tokenOutV3 = isNativeToken(toToken.address) && wrappedAddr ? wrappedAddr : toToken.address;
-            const fee = bestQuote.route[0].fee || 3000;
-            result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountInForPermit2, minAmountOut);
-          } else {
-            throw new Error("Selected protocol not available. Try regular swap.");
-          }
-          
-          saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
-          await Promise.all([refetchFromBalance(), refetchToBalance()]);
-          setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
-          const toSymbol = toToken.symbol === "wUSDC" ? "USDC" : toToken.symbol;
-          toast({
-            title: "Gasless swap successful!",
-            description: (
-              <div className="flex items-center gap-2">
-                <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toSymbol}{toToken.symbol === "wUSDC" && " (auto-converted)"}</span>
-                <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
-              </div>
-            ),
-          });
-          setIsSwapping(false);
-          return;
         } catch (gaslessError: any) {
           const errorMsg = gaslessError?.message || "Unknown error";
           toast({ 

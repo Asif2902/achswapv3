@@ -56,7 +56,8 @@ export const GASLESS_ABI = [
           { name: "params", type: "bytes" }
         ]
       }
-    ]
+    ],
+    outputs: []
   }
 ];
 
