@@ -1,0 +1,8 @@
+{
+  "name": "achswap-relayer",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "ethers": "^6.13.0"
+  }
+}
