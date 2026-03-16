@@ -31,7 +31,9 @@ function getSwapDeadline(): number {
 }
 
 export async function fetchNonce(): Promise<bigint> {
-  return BigInt("0x" + Buffer.from(ethers.randomBytes(32)).toString("hex"));
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return BigInt("0x" + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(""));
 }
 
 const PERMIT2_ABI = [
