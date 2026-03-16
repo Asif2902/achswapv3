@@ -129,21 +129,13 @@ export default function Swap() {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
       toast({ title: "Approving Permit2..." });
-      const txHash = await approvePermit2(signer, fromToken.address);
-      toast({ title: "Approval submitted", description: (
-        <div className="flex items-center gap-2">
-          <span>Waiting for confirmation...</span>
-          <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => window.open(`${contracts?.explorer}${txHash}`, "_blank")}>
-            <ExternalLink className="h-3 w-3" />
-          </Button>
-        </div>
-      )});
-      const receipt = await provider.waitForTransaction(txHash);
-      if (receipt) {
-        setPermit2Approved(true);
-        toast({ title: "Permit2 approved!", description: "You can now use gasless swaps" });
-      }
+      
+      await approvePermit2(signer, fromToken.address);
+      
+      setPermit2Approved(true);
+      toast({ title: "Permit2 approved!", description: "You can now use gasless swaps" });
     } catch (e: any) {
+      console.error("Approve error:", e);
       const errorInfo = getErrorForToast(e);
       toast({ title: errorInfo.title, description: errorInfo.description, variant: "destructive" });
     } finally {
