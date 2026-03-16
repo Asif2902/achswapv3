@@ -365,6 +365,11 @@ export default function Swap() {
           maxAmountWeiRef.current = null;
           
           // Use NATIVE_TOKEN (0x3600...) - contract handles auto-wrap
+          // But 0x3600 is 6 decimals, so convert from 18 to 6
+          const fromNative = isNativeToken(fromToken.address);
+          const amountInForPermit2 = fromNative 
+            ? amountIn / 10n ** 12n 
+            : amountIn;
           const tokenInAddress = getGaslessTokenAddress(fromToken.address);
           
           const slippageBps = BigInt(Math.floor(slippage * 100));
@@ -388,13 +393,13 @@ export default function Swap() {
               const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
               if (o !== path[path.length - 1]) path.push(o);
             }
-            result = await executeGaslessSwapV2(signer, tokenInAddress, amountIn, minAmountOut, path);
+            result = await executeGaslessSwapV2(signer, tokenInAddress, amountInForPermit2, minAmountOut, path);
           } else if (useV3 && v3Enabled && bestQuote.route.length === 1) {
             // For V3, use wUSDC as tokenOut - contract auto-unwraps to native USDC
             const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
             const tokenOutV3 = isNativeToken(toToken.address) && wrappedAddr ? wrappedAddr : toToken.address;
             const fee = bestQuote.route[0].fee || 3000;
-            result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountIn, minAmountOut);
+            result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountInForPermit2, minAmountOut);
           } else {
             throw new Error("Selected protocol not available. Try regular swap.");
           }
