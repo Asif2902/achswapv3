@@ -56,18 +56,19 @@ export async function checkPermit2Approval(
 ): Promise<boolean> {
   const provider = signer.provider;
   const user = await signer.getAddress();
+  const MAX_UINT160 = 2n ** 160n - 1n;
   
   const tokenContract = new Contract(tokenIn, ERC20_ABI, provider);
   const tokenAllowance = await tokenContract.allowance(user, GASLESS_CONFIG.permit2Address);
   
-  if (tokenAllowance === 0n) {
+  if (tokenAllowance < MAX_UINT160 / 2n) {
     return false;
   }
   
   const permit2Contract = new Contract(GASLESS_CONFIG.permit2Address, PERMIT2_ABI, provider);
   try {
     const allowance = await permit2Contract.allowance(user, tokenIn, GASLESS_CONFIG.contractAddress);
-    if (allowance === 0n) {
+    if (allowance < MAX_UINT160 / 2n) {
       return false;
     }
   } catch {
@@ -80,25 +81,24 @@ export async function checkPermit2Approval(
 export async function approvePermit2(
   signer: any,
   tokenIn: string
-): Promise<string> {
+): Promise<void> {
   const user = await signer.getAddress();
+  const MAX_UINT160 = 2n ** 160n - 1n;
   
   const tokenContract = new Contract(tokenIn, ERC20_ABI, signer);
-  const tokenTx = await tokenContract.approve(GASLESS_CONFIG.permit2Address, ethers.MaxUint256);
+  const tokenTx = await tokenContract.approve(GASLESS_CONFIG.permit2Address, MAX_UINT160);
   
   const permit2Contract = new Contract(GASLESS_CONFIG.permit2Address, PERMIT2_ABI, signer);
   const expiration = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
   const permitTx = await permit2Contract.approve(
     tokenIn,
     GASLESS_CONFIG.contractAddress,
-    ethers.MaxUint256,
+    MAX_UINT160,
     expiration
   );
   
   await tokenTx.wait();
   await permitTx.wait();
-  
-  return permitTx.hash;
 }
 
 export async function signForwardRequest(
