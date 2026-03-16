@@ -30,20 +30,22 @@ function getSwapDeadline(): number {
   return Math.floor(Date.now() / 1000) + 1800;
 }
 
+const NONCE_STORAGE_KEY = "gasless_nonce";
+
+function getStoredNonce(address: string): number {
+  const stored = localStorage.getItem(`${NONCE_STORAGE_KEY}_${address.toLowerCase()}`);
+  return stored ? parseInt(stored, 10) : 0;
+}
+
+function incrementNonce(address: string): number {
+  const current = getStoredNonce(address);
+  const next = current + 1;
+  localStorage.setItem(`${NONCE_STORAGE_KEY}_${address.toLowerCase()}`, next.toString());
+  return next;
+}
+
 export async function fetchNonce(userAddress: string): Promise<number> {
-  const url = `${GASLESS_CONFIG.nonceUrl}?address=${userAddress}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Nonce API error (${response.status}): ${text.slice(0, 100)}`);
-  }
-  const text = await response.text();
-  try {
-    const data = JSON.parse(text);
-    return parseInt(data.nonce, 10);
-  } catch {
-    throw new Error(`Invalid nonce response: ${text.slice(0, 100)}`);
-  }
+  return incrementNonce(userAddress);
 }
 
 const PERMIT2_ABI = [
