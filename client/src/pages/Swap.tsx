@@ -26,7 +26,7 @@ import {
   executeGaslessSwapV2,
   executeGaslessSwapV3,
 } from "@/lib/gasless-swap";
-import { GASLESS_CONFIG, NATIVE_TOKEN_WRAPPER } from "@/lib/gasless-config";
+import { GASLESS_CONFIG, NATIVE_TOKEN_WRAPPER, NATIVE_TOKEN_WRAPPER_DECIMALS } from "@/lib/gasless-config";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -100,13 +100,7 @@ export default function Swap() {
   useEffect(() => { loadTokens(); }, [chainId]);
 
   useEffect(() => {
-    if (gaslessMode && fromToken && isNativeToken(fromToken.address)) {
-      setGaslessMode(false);
-    }
-  }, [fromToken?.address]);
-
-  useEffect(() => {
-    if (!gaslessMode || !address || !fromToken || isNativeToken(fromToken.address)) {
+    if (!gaslessMode || !address || !fromToken) {
       setPermit2Approved(false);
       return;
     }
@@ -115,6 +109,10 @@ export default function Swap() {
 
   const getGaslessTokenAddress = (tokenAddress: string) => {
     return isNativeToken(tokenAddress) ? NATIVE_TOKEN_WRAPPER : tokenAddress;
+  };
+
+  const getGaslessTokenDecimals = (tokenAddress: string) => {
+    return isNativeToken(tokenAddress) ? NATIVE_TOKEN_WRAPPER_DECIMALS : (fromToken?.decimals || 18);
   };
 
   const checkPermit2 = async () => {
@@ -360,24 +358,13 @@ export default function Swap() {
       
       if (gaslessMode && permit2Approved) {
         try {
-          // For native tokens, gasless not supported yet
-          if (fromNative) {
-            toast({ 
-              title: "Gasless unavailable", 
-              description: "Cannot use gasless mode with native USDC. Please use regular swap.", 
-              variant: "destructive" 
-            });
-            setIsSwapping(false);
-            return;
-          }
-          
           const provider = new BrowserProvider(window.ethereum);
           const signer = await provider.getSigner();
           const bestQuote = smartRoutingResult.bestQuote;
           const amountIn = currentAmountIn;
           maxAmountWeiRef.current = null;
           
-          // Use NATIVE_TOKEN_WRAPPER for native token
+          // Use NATIVE_TOKEN_WRAPPER (wUSDC) for native token - contract handles wrap
           const tokenInAddress = getGaslessTokenAddress(fromToken.address);
           
           const slippageBps = BigInt(Math.floor(slippage * 100));
@@ -696,7 +683,7 @@ export default function Swap() {
   // ── Derived ────────────────────────────────────────────────────────────────
   const hasTradeInfo = !!(fromToken && toToken && fromAmount && toAmount && parseFloat(fromAmount) > 0 && parseFloat(toAmount) > 0);
   const impactColor = priceImpact === null ? "" : priceImpact > 15 ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
-  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping && !(gaslessMode && isNativeToken(fromToken.address)));
+  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping);
   const protocolLabel = smartRoutingResult?.bestQuote?.protocol;
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -817,13 +804,7 @@ export default function Swap() {
                 {isConnected && (
                   <button 
                     className={`sw-hdr-btn ${gaslessMode ? 'sw-gasless-active' : ''}`} 
-                    onClick={() => {
-                      if (!gaslessMode && isNativeToken(fromToken?.address || "")) {
-                        toast({ title: "Gasless unavailable", description: "Cannot enable gasless mode with native USDC. Please use regular swap or select wUSDC.", variant: "destructive" });
-                        return;
-                      }
-                      setGaslessMode(!gaslessMode);
-                    }} 
+                    onClick={() => setGaslessMode(!gaslessMode)}
                     title={gaslessMode ? "Gasless mode ON - click to disable" : "Gasless mode OFF - click to enable"}
                     style={gaslessMode ? { background: 'rgba(34,197,94,0.2)', borderColor: 'rgba(34,197,94,0.4)', color: '#4ade80' } : {}}
                   >
@@ -844,7 +825,7 @@ export default function Swap() {
               <div className="sw-gasless-notice">
                 {isNativeToken(fromToken?.address || "") ? (
                   <span style={{ color: '#fb923c', fontSize: 11, fontWeight: 600 }}>
-                    ⚠ Cannot use gasless with native USDC - Use regular swap
+                    ⚠ Native USDC will be wrapped automatically for gasless swap
                   </span>
                 ) : isCheckingPermit2 ? (
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
