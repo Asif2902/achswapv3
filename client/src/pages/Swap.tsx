@@ -255,7 +255,8 @@ export default function Swap() {
     try {
       const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
       if (!wrappedTokenData) throw new Error("wUSDC not found");
-      const amountIn = parseAmount(fromAmount, fromToken.decimals);
+      // Use maxAmountWeiRef directly if set (from MAX button), otherwise parse from display
+      const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
       if (!v2Enabled && !v3Enabled) {
         toast({ title: "No protocols enabled", description: "Enable at least one in settings", variant: "destructive" });
         setToAmount(""); setPriceImpact(null); setRouteHops([]); return;
