@@ -26,7 +26,7 @@ import {
   executeGaslessSwapV2,
   executeGaslessSwapV3,
 } from "@/lib/gasless-swap";
-import { GASLESS_CONFIG, NATIVE_TOKEN } from "@/lib/gasless-config";
+import { GASLESS_CONFIG, NATIVE_TOKEN, NATIVE_TOKEN_DECIMALS } from "@/lib/gasless-config";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -120,10 +120,6 @@ export default function Swap() {
 
   const getGaslessTokenAddress = (tokenAddress: string) => {
     return isNativeToken(tokenAddress) ? NATIVE_TOKEN : tokenAddress;
-  };
-
-  const getGaslessTokenDecimals = (tokenAddress: string) => {
-    return fromToken?.decimals || 18;
   };
 
   const checkPermit2 = async () => {
@@ -382,10 +378,11 @@ export default function Swap() {
           maxAmountWeiRef.current = null;
           
           // Use NATIVE_TOKEN (0x3600...) - contract handles auto-wrap
-          // But 0x3600 is 6 decimals, so convert from 18 to 6
+          // Convert from token decimals to NATIVE_TOKEN_DECIMALS (6)
           const fromNative = isNativeToken(fromToken.address);
+          const decimalDiff = BigInt((fromToken.decimals || 18) - NATIVE_TOKEN_DECIMALS);
           const amountInForPermit2 = fromNative 
-            ? amountIn / 10n ** 12n 
+            ? amountIn / 10n ** decimalDiff
             : amountIn;
           const tokenInAddress = getGaslessTokenAddress(fromToken.address);
           

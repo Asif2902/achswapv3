@@ -6,6 +6,7 @@ export const GASLESS_CONFIG = {
 };
 
 export const NATIVE_TOKEN = "0x3600000000000000000000000000000000000000"; // USDC_NATIVE - ERC20 on Arc
+export const NATIVE_TOKEN_DECIMALS = 6;
 
 export const GASLESS_ABI = [
   {

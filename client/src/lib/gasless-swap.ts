@@ -309,7 +309,7 @@ export async function executeGaslessSwapV3(
 
 function decodeV3Path(path: string): string {
   const decoded = abiCoder.decode(["bytes"], path)[0];
-  return "0x" + decoded.slice(0, 40);
+  return decoded.slice(0, 42);
 }
 
 export async function executeGaslessSwapV3MultiHop(
