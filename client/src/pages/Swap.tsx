@@ -377,7 +377,11 @@ export default function Swap() {
           
           let result: { txHash: string; receipt: any };
           
-          if (bestQuote.protocol === "V2") {
+          // Check protocol based on user settings
+          const useV2 = bestQuote.protocol === "V2" || (!v3Enabled && bestQuote.route.length > 1);
+          const useV3 = bestQuote.protocol === "V3" && bestQuote.route.length === 1;
+          
+          if (useV2 && v2Enabled) {
             const path: string[] = [];
             const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
             if (!wrappedAddr) throw new Error("Wrapped token address not found");
@@ -388,13 +392,11 @@ export default function Swap() {
               if (o !== path[path.length - 1]) path.push(o);
             }
             result = await executeGaslessSwapV2(signer, fromToken.address, amountIn, minAmountOut, path);
+          } else if (useV3 && v3Enabled && bestQuote.route.length === 1) {
+            const fee = bestQuote.route[0].fee || 3000;
+            result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut);
           } else {
-            if (bestQuote.route.length === 1) {
-              const fee = bestQuote.route[0].fee || 3000;
-              result = await executeGaslessSwapV3(signer, fromToken.address, toToken.address, fee, amountIn, minAmountOut);
-            } else {
-              throw new Error("Multi-hop gasless swaps not yet supported");
-            }
+            throw new Error("Selected protocol not available. Try regular swap.");
           }
           
           saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
