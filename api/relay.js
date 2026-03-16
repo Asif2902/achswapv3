@@ -40,7 +40,9 @@ export default async function handler(req, res) {
         params: segment.params
       },
       {
-        gasLimit: 800000n,
+        gasLimit: 1500000n,
+        maxFeePerGas: 100000000000n, // 100 gwei
+        maxPriorityFeePerGas: 1000000000n, // 1 gwei
       }
     );
 
