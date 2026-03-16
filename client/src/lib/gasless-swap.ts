@@ -1,5 +1,28 @@
-import { ethers, Contract, BrowserProvider } from "ethers";
+import { ethers, Contract, BrowserProvider, Interface } from "ethers";
 import { GASLESS_CONFIG, GASLESS_ABI, ERC20_ABI, CHAIN_ID } from "./gasless-config";
+
+export function decodeExecutionError(data: string): string {
+  if (!data || data === "0x") return "Unknown error";
+  try {
+    if (data.startsWith("0x") && data.length > 4) {
+      const selector = data.slice(0, 10);
+      if (selector === "0x08c379a0") {
+        const iface = new Interface(["function Error(string)"]);
+        const result = iface.decodeErrorResult("Error(string)", data);
+        return result.args[0] as string;
+      }
+      if (selector === "0x3ee5aeb5") {
+        const iface = new Interface(["function ExecutionFailed(bytes)"]);
+        const result = iface.decodeErrorResult("ExecutionFailed(bytes)", data);
+        return decodeExecutionError(result.args[0] as string);
+      }
+      return `Error selector: ${selector}`;
+    }
+  } catch (e) {
+    console.error("Decode error:", e);
+  }
+  return data;
+}
 
 function generateRandomNonce(): bigint {
   return BigInt(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
