@@ -47,6 +47,7 @@ export async function fetchNonce(userAddress: string): Promise<number> {
 const PERMIT2_ABI = [
   "function approve(address token, address spender, uint160 amount, uint48 expiration)",
   "function transferFrom(address from, address to, uint160 amount, address token)",
+  "function allowance(address user, address token, address spender) view returns (uint160)",
 ];
 
 export async function checkPermit2Approval(
@@ -84,7 +85,6 @@ export async function approvePermit2(
   
   const tokenContract = new Contract(tokenIn, ERC20_ABI, signer);
   const tokenTx = await tokenContract.approve(GASLESS_CONFIG.permit2Address, ethers.MaxUint256);
-  await tokenTx.wait();
   
   const permit2Contract = new Contract(GASLESS_CONFIG.permit2Address, PERMIT2_ABI, signer);
   const expiration = Math.floor(Date.now() / 1000) + 365 * 24 * 60 * 60;
@@ -94,6 +94,9 @@ export async function approvePermit2(
     ethers.MaxUint256,
     expiration
   );
+  
+  await tokenTx.wait();
+  await permitTx.wait();
   
   return permitTx.hash;
 }
