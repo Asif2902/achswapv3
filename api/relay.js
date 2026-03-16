@@ -1,7 +1,7 @@
 import { ethers } from "ethers";
 
 const ABI = [
-  "function execute((address from,uint256 nonce,uint256 gas,bytes data) req, bytes sig) returns (bytes)",
+  "function execute((address,uint256,uint256,bytes),bytes) returns (bytes)",
   "function getNonce(address) view returns (uint256)"
 ];
 
