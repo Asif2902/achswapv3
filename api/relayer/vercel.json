@@ -1,6 +1,0 @@
-{
-  "functions": {
-    "api/relayer/relay.js": { "maxDuration": 10 },
-    "api/relayer/nonce.js": { "maxDuration": 10 }
-  }
-}

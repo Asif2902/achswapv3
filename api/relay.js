@@ -8,8 +8,14 @@ const RPC_URL = "https://rpc.testnet.arc.network";
 const CONTRACT_ADDRESS = "0xD65B535A6cd27657C19720759F7C6f3F89eEf734";
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
-const relayerWallet = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
-const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, relayerWallet);
+
+let relayerWallet = null;
+let contract = null;
+
+if (process.env.RELAYER_PRIVATE_KEY) {
+  relayerWallet = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
+  contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, relayerWallet);
+}
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -18,11 +24,31 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") return res.status(405).json({ error: "method not allowed" });
 
+  if (!relayerWallet || !contract) {
+    return res.status(503).json({ error: "relayer not configured" });
+  }
+
   try {
     const { user, tokenIn, totalAmountIn, permitNonce, permitDeadline, permitSig, segment } = req.body;
 
-    if (!user || !tokenIn || !totalAmountIn || !permitNonce || !permitDeadline || !permitSig || !segment) {
+    if (!user || !tokenIn || totalAmountIn == null || permitNonce == null || permitDeadline == null || !permitSig || !segment) {
       return res.status(400).json({ error: "missing required parameters" });
+    }
+
+    // Validate segment
+    if (segment.kind == null || segment.amountIn == null || segment.amountOutMin == null || segment.deadline == null || !segment.params) {
+      return res.status(400).json({ error: "invalid segment" });
+    }
+
+    // Validate kind is 0, 1, or 2
+    const validKinds = [0, 1, 2];
+    if (!validKinds.includes(Number(segment.kind))) {
+      return res.status(400).json({ error: "invalid segment kind" });
+    }
+
+    // Validate addresses
+    if (!ethers.isAddress(user) || !ethers.isAddress(tokenIn)) {
+      return res.status(400).json({ error: "invalid address" });
     }
 
     const tx = await contract.execute(

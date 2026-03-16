@@ -72,14 +72,16 @@ export const PERMIT2_ABI = [
             { name: "token", type: "address" },
             { name: "amount", type: "uint256" }
           ]},
-          { name: "spender", type: "address" },
           { name: "nonce", type: "uint256" },
           { name: "deadline", type: "uint256" }
         ]
       },
-      { name: "from", type: "address" },
-      { name: "to", type: "address" },
-      { name: "amount", type: "uint256" }
+      { name: "transferDetails", type: "tuple", components: [
+        { name: "to", type: "address" },
+        { name: "requestedAmount", type: "uint256" }
+      ]},
+      { name: "owner", type: "address" },
+      { name: "signature", type: "bytes" }
     ],
     outputs: []
   }

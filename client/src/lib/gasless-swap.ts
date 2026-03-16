@@ -1,6 +1,13 @@
 import { ethers, Contract, BrowserProvider, Interface, AbiCoder } from "ethers";
 
 const abiCoder = new AbiCoder();
+
+async function assertGaslessChain(signer: any): Promise<void> {
+  const network = await signer.provider.getNetwork();
+  if (Number(network.chainId) !== CHAIN_ID) {
+    throw new Error(`Wrong network. Please switch to Arc Testnet.`);
+  }
+}
 import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID, NATIVE_TOKEN } from "./gasless-config";
 
 export function decodeExecutionError(data: string): string {
@@ -47,6 +54,7 @@ export async function checkPermit2Approval(
   signer: any,
   tokenIn: string
 ): Promise<boolean> {
+  await assertGaslessChain(signer);
   const provider = signer.provider;
   const user = await signer.getAddress();
   const MAX_UINT160 = 2n ** 160n - 1n;
@@ -75,6 +83,7 @@ export async function approvePermit2(
   signer: any,
   tokenIn: string
 ): Promise<void> {
+  await assertGaslessChain(signer);
   const user = await signer.getAddress();
   const MAX_UINT160 = 2n ** 160n - 1n;
   
@@ -101,6 +110,7 @@ export async function signPermit2(
   nonce: bigint,
   deadline: number
 ): Promise<string> {
+  await assertGaslessChain(signer);
   const user = await signer.getAddress();
   
   const domain = {
@@ -202,6 +212,7 @@ export async function executeGaslessSwapV2(
   amountOutMin: bigint,
   path: string[]
 ): Promise<{ txHash: string; receipt: any }> {
+  await assertGaslessChain(signer);
   const provider = signer.provider;
   const user = await signer.getAddress();
   
@@ -244,6 +255,7 @@ export async function executeGaslessSwapV3(
   amountIn: bigint,
   amountOutMin: bigint
 ): Promise<{ txHash: string; receipt: any }> {
+  await assertGaslessChain(signer);
   const provider = signer.provider;
   const user = await signer.getAddress();
   
@@ -285,6 +297,7 @@ export async function executeGaslessSwapV3MultiHop(
   amountIn: bigint,
   amountOutMin: bigint
 ): Promise<{ txHash: string; receipt: any }> {
+  await assertGaslessChain(signer);
   const provider = signer.provider;
   const user = await signer.getAddress();
   
@@ -299,7 +312,7 @@ export async function executeGaslessSwapV3MultiHop(
     amountIn: amountIn,
     amountOutMin: amountOutMin,
     deadline: deadline,
-    params: path,
+    params: abiCoder.encode(["bytes"], [path]),
   };
   
   const request = {

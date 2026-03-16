@@ -381,6 +381,15 @@ export default function Swap() {
           // Check protocol based on user settings
           const useV2 = bestQuote.protocol === "V2" || (!v3Enabled && bestQuote.route.length > 1);
           const useV3 = bestQuote.protocol === "V3" && bestQuote.route.length === 1;
+          const isV3MultiHop = bestQuote.protocol === "V3" && bestQuote.route.length > 1;
+          
+          // V3 multi-hop not supported in gasless - fallback to regular swap
+          if (isV3MultiHop && v3Enabled) {
+            toast({ title: "V3 multi-hop not supported in gasless", description: "Using regular swap instead" });
+            setGaslessMode(false);
+            setIsSwapping(false);
+            return;
+          }
           
           if (useV2 && v2Enabled) {
             const path: string[] = [];
