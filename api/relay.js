@@ -13,9 +13,9 @@ const relayerWallet = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY, provide
 const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, relayerWallet);
 
 const ALLOWED_SELECTORS = [
-  ethers.id("swapV2(uint256,uint256,address[],uint256,uint256,uint256,bytes)").slice(0, 10),
-  ethers.id("swapV3(address,address,uint24,uint256,uint256,uint256,uint256,uint256,bytes)").slice(0, 10),
-  ethers.id("swapV3MultiHop(bytes,uint256,uint256,uint256,uint256,uint256,bytes)").slice(0, 10),
+  ethers.id("swapV2(uint256,uint256,address[],uint256)").slice(0, 10),
+  ethers.id("swapV3(address,address,uint24,uint256,uint256,uint256)").slice(0, 10),
+  ethers.id("swapV3MultiHop(bytes,uint256,uint256,uint256)").slice(0, 10),
   ethers.id("swapBatch((uint8,bytes)[])").slice(0, 10),
 ];
 
