@@ -823,11 +823,7 @@ export default function Swap() {
             {/* Gasless Mode Notice */}
             {gaslessMode && isConnected && (
               <div className="sw-gasless-notice">
-                {isNativeToken(fromToken?.address || "") ? (
-                  <span style={{ color: '#fb923c', fontSize: 11, fontWeight: 600 }}>
-                    ⚠ Native USDC will be wrapped automatically for gasless swap
-                  </span>
-                ) : isCheckingPermit2 ? (
+                {isCheckingPermit2 ? (
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <Loader2 className="sw-spin" style={{ width: 12, height: 12 }} />
                     Checking Permit2 approval...
@@ -846,7 +842,9 @@ export default function Swap() {
                   </button>
                 ) : (
                   <span style={{ color: '#4ade80', fontSize: 11, fontWeight: 600 }}>
-                    ✓ Permit2 Enabled - Gasless swaps available
+                    {isNativeToken(fromToken?.address || "") 
+                      ? "✓ Permit2 Enabled - Native USDC will wrap automatically"
+                      : "✓ Permit2 Enabled - Gasless swaps available"}
                   </span>
                 )}
               </div>
