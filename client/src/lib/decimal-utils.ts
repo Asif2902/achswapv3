@@ -1,12 +1,21 @@
 import { formatUnits, parseUnits } from "ethers";
 
+function truncateDecimals(value: string, decimals: number): string {
+  const displayDecimals = Math.min(decimals, 18);
+  const parts = value.split('.');
+  if (parts.length === 1) return parts[0];
+  const integer = parts[0];
+  const fraction = parts[1].padEnd(displayDecimals, '0').slice(0, displayDecimals);
+  return fraction ? `${integer}.${fraction}` : integer;
+}
+
 const NATIVE_USDC_SYMBOL = "USDC";
 
 /**
  * Get the max amount string for MAX button
- * - Returns formatted display string (6 decimals for UI)
+ * - Returns formatted display string
  * - For native USDC, uses 99% of balance for gas buffer
- * - Ensures precision is preserved when parsed back
+ * - Preserves precision using string-based truncation
  */
 export function getMaxAmount(balanceWei: bigint, decimals: number, symbol: string): string {
   if (balanceWei === 0n || balanceWei === undefined) return "0";
@@ -18,7 +27,7 @@ export function getMaxAmount(balanceWei: bigint, decimals: number, symbol: strin
     maxBalance = (balanceWei * 99n) / 100n;
   }
 
-  // Format to 6 decimals for display, but ensure it can be parsed back correctly
+  // Format with string-based truncation to preserve precision
   const formatted = formatUnits(maxBalance, decimals);
   const num = parseFloat(formatted);
   
@@ -27,12 +36,12 @@ export function getMaxAmount(balanceWei: bigint, decimals: number, symbol: strin
     return num.toExponential(2);
   }
   
-  return parseFloat(num.toFixed(6)).toString();
+  return truncateDecimals(formatted, decimals);
 }
 
 /**
- * Format a numeric value for DISPLAY only (6 decimal places)
- * Does NOT preserve full precision - use for UI display only
+ * Format a numeric value for DISPLAY only
+ * Uses token decimals for precision - use for UI display
  */
 export function formatAmount(value: string | number | bigint, decimals: number): string {
   try {
@@ -45,24 +54,22 @@ export function formatAmount(value: string | number | bigint, decimals: number):
       const formatted = formatUnits(value, decimals);
       const num = parseFloat(formatted);
       if (!isNaN(num) && isFinite(num)) {
-        // For very small numbers, use scientific notation
         if (num > 0 && num < 0.000001) {
           return num.toExponential(2);
         }
-        // For display, show up to 6 decimal places but remove trailing zeros
-        return parseFloat(num.toFixed(6)).toString();
+        return truncateDecimals(formatted, decimals);
       }
       return "0";
     }
     
-    const num = parseFloat(String(value));
+    const formatted = formatUnits(String(value), decimals);
+    const num = parseFloat(formatted);
     if (!isNaN(num) && isFinite(num)) {
       if (num === 0) return "0";
-      // For very small numbers, use scientific notation
       if (num > 0 && num < 0.000001) {
         return num.toExponential(2);
       }
-      return parseFloat(num.toFixed(6)).toString();
+      return truncateDecimals(formatted, decimals);
     }
     return "0";
   } catch (error) {
