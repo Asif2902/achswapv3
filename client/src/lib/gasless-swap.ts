@@ -16,12 +16,12 @@ export function decodeExecutionError(data: string): string {
     if (data.startsWith("0x") && data.length > 4) {
       const selector = data.slice(0, 10);
       if (selector === "0x08c379a0") {
-        const iface = new Interface(["function Error(string)"]);
+        const iface = new Interface(["error Error(string)"]);
         const result = iface.decodeErrorResult("Error(string)", data);
         return result.args[0] as string;
       }
       if (selector === "0x3ee5aeb5") {
-        const iface = new Interface(["function ExecutionFailed(bytes)"]);
+        const iface = new Interface(["error ExecutionFailed(bytes)"]);
         const result = iface.decodeErrorResult("ExecutionFailed(bytes)", data);
         return decodeExecutionError(result.args[0] as string);
       }
@@ -31,10 +31,6 @@ export function decodeExecutionError(data: string): string {
     console.error("Decode error:", e);
   }
   return data;
-}
-
-function getSwapDeadline(): number {
-  return Math.floor(Date.now() / 1000) + (GASLESS_CONFIG.deadlineMinutes * 60);
 }
 
 export async function fetchNonce(): Promise<bigint> {
@@ -63,19 +59,6 @@ export async function checkPermit2Approval(
   const tokenAllowance = await tokenContract.allowance(user, GASLESS_CONFIG.permit2Address);
   
   if (tokenAllowance < MAX_UINT160 / 2n) {
-    return false;
-  }
-  
-  const permit2Contract = new Contract(GASLESS_CONFIG.permit2Address, PERMIT2_ABI, provider);
-  try {
-    const { amount, expiration } = await permit2Contract.allowance(user, tokenIn, GASLESS_CONFIG.contractAddress);
-    if (amount < MAX_UINT160 / 2n) {
-      return false;
-    }
-    if (expiration > 0 && expiration <= BigInt(Math.floor(Date.now() / 1000))) {
-      return false;
-    }
-  } catch {
     return false;
   }
   
@@ -207,6 +190,10 @@ export async function waitForTransaction(
       try {
         const receipt = await provider.getTransactionReceipt(txHash);
         if (receipt) {
+          if (receipt.status === 0) {
+            reject(new Error("Transaction reverted"));
+            return;
+          }
           resolve(receipt);
           return;
         }
@@ -229,7 +216,8 @@ export async function executeGaslessSwapV2(
   tokenIn: string,
   amountIn: bigint,
   amountOutMin: bigint,
-  path: string[]
+  path: string[],
+  deadline: number
 ): Promise<{ txHash: string; receipt: any }> {
   await assertGaslessChain(signer);
   const provider = signer.provider;
@@ -237,7 +225,6 @@ export async function executeGaslessSwapV2(
   
   const tokenForPermit2 = tokenIn;
   const nonce = await fetchNonce();
-  const deadline = getSwapDeadline();
   
   const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
   
@@ -272,7 +259,8 @@ export async function executeGaslessSwapV3(
   tokenOut: string,
   fee: number,
   amountIn: bigint,
-  amountOutMin: bigint
+  amountOutMin: bigint,
+  deadline: number
 ): Promise<{ txHash: string; receipt: any }> {
   await assertGaslessChain(signer);
   const provider = signer.provider;
@@ -280,7 +268,6 @@ export async function executeGaslessSwapV3(
   
   const tokenForPermit2 = tokenIn;
   const nonce = await fetchNonce();
-  const deadline = getSwapDeadline();
   
   const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
   
@@ -324,7 +311,8 @@ export async function executeGaslessSwapV3MultiHop(
   tokenIn: string,
   path: string,
   amountIn: bigint,
-  amountOutMin: bigint
+  amountOutMin: bigint,
+  deadline: number
 ): Promise<{ txHash: string; receipt: any }> {
   await assertGaslessChain(signer);
   const provider = signer.provider;
@@ -337,7 +325,6 @@ export async function executeGaslessSwapV3MultiHop(
   
   const tokenForPermit2 = tokenIn;
   const nonce = await fetchNonce();
-  const deadline = getSwapDeadline();
   
   const permitSig = await signPermit2(signer, tokenForPermit2, amountIn, nonce, deadline);
   

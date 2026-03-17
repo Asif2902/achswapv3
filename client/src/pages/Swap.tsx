@@ -124,32 +124,40 @@ export default function Swap() {
 
   const checkPermit2 = async () => {
     if (!address || !window.ethereum || !fromToken) return;
+    const currentFromTokenAddress = fromToken.address;
+    const currentChainId = chainId;
     setIsCheckingPermit2(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
-      const tokenForPermit2 = getGaslessTokenAddress(fromToken.address);
+      const tokenForPermit2 = getGaslessTokenAddress(currentFromTokenAddress);
       const approved = await checkPermit2Approval(signer, tokenForPermit2);
+      if (fromToken.address !== currentFromTokenAddress || chainId !== currentChainId) return;
       setPermit2Approved(approved);
     } catch (e) {
       console.error("Error checking Permit2 approval:", e);
+      if (fromToken.address !== currentFromTokenAddress || chainId !== currentChainId) return;
       setPermit2Approved(false);
     } finally {
+      if (fromToken.address !== currentFromTokenAddress || chainId !== currentChainId) return;
       setIsCheckingPermit2(false);
     }
   };
 
   const handleApprovePermit2 = async () => {
     if (!address || !window.ethereum || !fromToken) return;
+    const currentFromTokenAddress = fromToken.address;
+    const currentChainId = chainId;
     setIsApprovingPermit2(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
       const signer = await provider.getSigner();
       toast({ title: "Approving Permit2..." });
       
-      const tokenForPermit2 = getGaslessTokenAddress(fromToken.address);
+      const tokenForPermit2 = getGaslessTokenAddress(currentFromTokenAddress);
       await approvePermit2(signer, tokenForPermit2);
       
+      if (fromToken.address !== currentFromTokenAddress || chainId !== currentChainId) return;
       setPermit2Approved(true);
       toast({ title: "Permit2 approved!", description: "You can now use gasless swaps" });
     } catch (e: any) {
@@ -408,6 +416,7 @@ export default function Swap() {
           
           // Execute gasless swap if enabled and available
           if (gaslessMode && !isV3MultiHop) {
+            const deadlineTimestamp = Math.floor(Date.now() / 1000) + deadline * 60;
             if (useV2 && v2Enabled) {
               const path: string[] = [];
               const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
@@ -418,12 +427,12 @@ export default function Swap() {
                 const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
                 if (o !== path[path.length - 1]) path.push(o);
               }
-              result = await executeGaslessSwapV2(signer, tokenInAddress, amountInForPermit2, minAmountOut, path);
+              result = await executeGaslessSwapV2(signer, tokenInAddress, amountInForPermit2, minAmountOut, path, deadlineTimestamp);
             } else if (useV3 && v3Enabled && bestQuote.route.length === 1) {
               const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
               const tokenOutV3 = isNativeToken(toToken.address) && wrappedAddr ? wrappedAddr : toToken.address;
               const fee = bestQuote.route[0].fee || 3000;
-              result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountInForPermit2, minAmountOut);
+              result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountInForPermit2, minAmountOut, deadlineTimestamp);
             } else {
               throw new Error("Selected protocol not available. Try regular swap.");
             }
