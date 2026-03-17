@@ -34,7 +34,7 @@ export function decodeExecutionError(data: string): string {
 }
 
 function getSwapDeadline(): number {
-  return Math.floor(Date.now() / 1000) + 1800;
+  return Math.floor(Date.now() / 1000) + (GASLESS_CONFIG.deadlineMinutes * 60);
 }
 
 export async function fetchNonce(): Promise<bigint> {
@@ -171,12 +171,14 @@ export async function submitToRelayer(
 
     const text = await response.text();
     if (!response.ok) {
+      let errorMessage = `Relayer failed (${response.status})`;
       try {
         const error = JSON.parse(text);
-        throw new Error(error.error || `Relayer failed (${response.status})`);
+        if (error.error) errorMessage = error.error;
       } catch {
-        throw new Error(`Relayer error (${response.status}): ${text.slice(0, 200)}`);
+        errorMessage = `Relayer error (${response.status}): ${text.slice(0, 200)}`;
       }
+      throw new Error(errorMessage);
     }
 
     try {
@@ -308,6 +310,11 @@ export async function executeGaslessSwapV3(
 }
 
 function decodeV3Path(path: string): string {
+  // If path is already a raw hex string (packed path), extract first token directly
+  if (path.startsWith('0x')) {
+    return '0x' + path.slice(2, 42);
+  }
+  // Otherwise, ABI-decode as bytes
   const decoded = abiCoder.decode(["bytes"], path)[0];
   return decoded.slice(0, 42);
 }

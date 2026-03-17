@@ -116,7 +116,7 @@ export default function Swap() {
       return;
     }
     checkPermit2();
-  }, [gaslessMode, address, fromToken?.address]);
+  }, [gaslessMode, address, fromToken?.address, chainId]);
 
   const getGaslessTokenAddress = (tokenAddress: string) => {
     return isNativeToken(tokenAddress) ? NATIVE_TOKEN : tokenAddress;
@@ -133,6 +133,7 @@ export default function Swap() {
       setPermit2Approved(approved);
     } catch (e) {
       console.error("Error checking Permit2 approval:", e);
+      setPermit2Approved(false);
     } finally {
       setIsCheckingPermit2(false);
     }

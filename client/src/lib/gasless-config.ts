@@ -3,6 +3,7 @@ export const GASLESS_CONFIG = {
   permit2Address: "0x000000000022D473030F116dDEE9F6B43aC78BA3",
   relayerUrl: "https://preview.achswapfi.xyz/api/relay",
   nonceUrl: "https://preview.achswapfi.xyz/api/nonce",
+  deadlineMinutes: 30,
 };
 
 export const NATIVE_TOKEN = "0x3600000000000000000000000000000000000000"; // USDC_NATIVE - ERC20 on Arc
