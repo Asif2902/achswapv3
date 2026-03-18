@@ -1,4 +1,5 @@
-import { Wallet, getWalletConnectConnector } from '@rainbow-me/rainbowkit';
+import type { Wallet } from '@rainbow-me/rainbowkit';
+import { injected } from 'wagmi/connectors';
 
 export interface BackpackWalletOptions {
   projectId: string;
@@ -10,60 +11,33 @@ export const backpackWallet = ({
   id: 'backpack',
   name: 'Backpack',
   iconUrl: 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRskzMkaUu-zGm89qBtvWV7voyrivovJhTpI3VjbTrq_A&s',
-  iconBackground: '#000',
-  iconAccent: '#fff',
+  iconBackground: '#8697FF',
+  rdns: 'app.backpack',
   downloadUrls: {
     chrome: 'https://chrome.google.com/webstore/detail/backpack/flpicaolkpkjcjhoiboagmoaohneibmf',
     browserExtension: 'https://backpack.app/download',
-    qrCode: 'https://backpack.app/download',
-  },
-  mobile: {
-    getUri: (uri: string) => uri,
-  },
-  qrCode: {
-    getUri: (uri: string) => uri,
-    instructions: {
-      learnMoreUrl: 'https://backpack.app/learn-more',
-      steps: [
-        {
-          description:
-            'We recommend putting Backpack Wallet on your home screen for faster access to your wallet.',
-          step: 'install',
-          title: 'Open the Backpack Wallet Extension',
-        },
-        {
-          description:
-            'After you scan, a connection prompt will appear for you to connect your wallet.',
-          step: 'scan',
-          title: 'Tap the scan button',
-        },
-      ],
-    },
   },
   extension: {
     instructions: {
-      learnMoreUrl: 'https://backpack.app/learn-more',
+      learnMoreUrl: 'https://backpack.app/',
       steps: [
         {
-          description:
-            'Once you set up your wallet, click below to refresh the browser and load up the extension.',
+          description: 'wallet_connectors.backpack.extension.step1.description',
           step: 'install',
-          title: 'Install the Backpack Extension',
+          title: 'wallet_connectors.backpack.extension.step1.title',
         },
         {
-          description:
-            'Create a new wallet or import an existing one. Your wallet will be detected automatically.',
+          description: 'wallet_connectors.backpack.extension.step2.description',
           step: 'create',
-          title: 'Create or Import a Wallet',
+          title: 'wallet_connectors.backpack.extension.step2.title',
         },
         {
-          description:
-            'Once you set up your wallet, click below to refresh the browser and load up the extension.',
+          description: 'wallet_connectors.backpack.extension.step3.description',
           step: 'refresh',
-          title: 'Refresh the Browser',
+          title: 'wallet_connectors.backpack.extension.step3.title',
         },
       ],
     },
   },
-  createConnector: getWalletConnectConnector({ projectId }),
+  createConnector: () => injected() as any,
 });
