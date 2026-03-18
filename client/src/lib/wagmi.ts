@@ -1,5 +1,10 @@
 import { connectorsForWallets } from '@rainbow-me/rainbowkit';
-import { rabbyWallet, walletConnectWallet } from '@rainbow-me/rainbowkit/wallets';
+import {
+  metaMaskWallet,
+  coinbaseWallet,
+  rabbyWallet,
+  walletConnectWallet,
+} from '@rainbow-me/rainbowkit/wallets';
 import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
 import { RPC_CONFIG } from './config';
@@ -37,7 +42,12 @@ const connectors = connectorsForWallets(
   [
     {
       groupName: 'Browser Wallets',
-      wallets: [rabbyWallet, () => backpackWallet({ projectId })],
+      wallets: [
+        metaMaskWallet,
+        coinbaseWallet,
+        rabbyWallet,
+        () => backpackWallet({ projectId }),
+      ],
     },
     {
       groupName: 'Other',
