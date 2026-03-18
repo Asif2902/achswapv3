@@ -9,7 +9,6 @@ import {
 import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
 import { RPC_CONFIG } from './config';
-import { backpackWallet } from './backpackWallet';
 
 // Define ARC Testnet chain
 export const arcTestnet = defineChain({
@@ -48,7 +47,6 @@ const connectors = connectorsForWallets(
         metaMaskWallet,
         coinbaseWallet,
         rabbyWallet,
-        () => backpackWallet({ projectId }),
       ],
     },
     {
