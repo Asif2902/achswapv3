@@ -9,7 +9,7 @@ export const backpackWallet = ({
 }: BackpackWalletOptions): Wallet => ({
   id: 'backpack',
   name: 'Backpack',
-  iconUrl: 'https://raw.githubusercontent.com/backpack/app/main/apps/xnft/public/logo.png',
+  iconUrl: 'https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRskzMkaUu-zGm89qBtvWV7voyrivovJhTpI3VjbTrq_A&s',
   iconBackground: '#000',
   iconAccent: '#fff',
   downloadUrls: {
