@@ -1,6 +1,9 @@
-import { getDefaultConfig } from '@rainbow-me/rainbowkit';
+import { connectorsForWallets } from '@rainbow-me/rainbowkit';
+import { rabbyWallet, walletConnectWallet } from '@rainbow-me/rainbowkit/wallets';
+import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
 import { RPC_CONFIG } from './config';
+import { backpackWallet } from './backpackWallet';
 
 // Define ARC Testnet chain
 export const arcTestnet = defineChain({
@@ -28,9 +31,29 @@ export const arcTestnet = defineChain({
 // Multichain support - add more chains here in the future
 export const supportedChains = [arcTestnet];
 
-export const config = getDefaultConfig({
-  appName: 'Achswap',
-  projectId: import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || 'demo-project-id-12345abcdef',
+const projectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || 'demo-project-id-12345abcdef';
+
+const connectors = connectorsForWallets(
+  [
+    {
+      groupName: 'Browser Wallets',
+      wallets: [rabbyWallet, () => backpackWallet({ projectId })],
+    },
+    {
+      groupName: 'Other',
+      wallets: [walletConnectWallet],
+    },
+  ],
+  {
+    appName: 'Achswap',
+    projectId,
+  }
+);
+
+export const config = createConfig({
+  connectors,
   chains: supportedChains as any,
-  ssr: false,
+  transports: {
+    [arcTestnet.id]: http(),
+  },
 });
