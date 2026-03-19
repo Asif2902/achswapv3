@@ -1,4 +1,12 @@
-import { getDefaultConfig } from '@rainbow-me/rainbowkit';
+import { connectorsForWallets } from '@rainbow-me/rainbowkit';
+import {
+  injectedWallet,
+  metaMaskWallet,
+  coinbaseWallet,
+  rabbyWallet,
+  walletConnectWallet,
+} from '@rainbow-me/rainbowkit/wallets';
+import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
 import { RPC_CONFIG } from './config';
 
@@ -28,9 +36,26 @@ export const arcTestnet = defineChain({
 // Multichain support - add more chains here in the future
 export const supportedChains = [arcTestnet];
 
-export const config = getDefaultConfig({
-  appName: 'Achswap',
-  projectId: import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || 'demo-project-id-12345abcdef',
+const projectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID;
+if (!projectId) {
+  throw new Error('Missing VITE_WALLETCONNECT_PROJECT_ID environment variable');
+}
+
+const browserWallets = [injectedWallet, metaMaskWallet, coinbaseWallet, rabbyWallet];
+const otherWallets = [walletConnectWallet];
+
+const connectors = connectorsForWallets(
+  [
+    { groupName: 'Browser Wallets', wallets: browserWallets },
+    { groupName: 'Other', wallets: otherWallets },
+  ],
+  { appName: 'Achswap', projectId }
+);
+
+export const config = createConfig({
+  connectors,
   chains: supportedChains as any,
-  ssr: false,
+  transports: {
+    [arcTestnet.id]: http(),
+  },
 });
