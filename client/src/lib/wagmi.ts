@@ -36,28 +36,20 @@ export const arcTestnet = defineChain({
 // Multichain support - add more chains here in the future
 export const supportedChains = [arcTestnet];
 
-const projectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID || 'demo-project-id-12345abcdef';
+const projectId = import.meta.env.VITE_WALLETCONNECT_PROJECT_ID;
+if (!projectId) {
+  throw new Error('Missing VITE_WALLETCONNECT_PROJECT_ID environment variable');
+}
+
+const browserWallets = [injectedWallet, metaMaskWallet, coinbaseWallet, rabbyWallet];
+const otherWallets = [walletConnectWallet];
 
 const connectors = connectorsForWallets(
   [
-    {
-      groupName: 'Browser Wallets',
-      wallets: [
-        injectedWallet,
-        metaMaskWallet,
-        coinbaseWallet,
-        rabbyWallet,
-      ],
-    },
-    {
-      groupName: 'Other',
-      wallets: [walletConnectWallet],
-    },
+    { groupName: 'Browser Wallets', wallets: browserWallets },
+    { groupName: 'Other', wallets: otherWallets },
   ],
-  {
-    appName: 'Achswap',
-    projectId,
-  }
+  { appName: 'Achswap', projectId }
 );
 
 export const config = createConfig({
