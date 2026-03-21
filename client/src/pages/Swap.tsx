@@ -95,6 +95,7 @@ export default function Swap() {
   const abortControllerRef = useRef<AbortController | null>(null);
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const maxAmountWeiRef = useRef<bigint | null>(null);
+  const maxJustClickedRef = useRef<boolean>(false);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -216,8 +217,11 @@ export default function Swap() {
 
   // ── Quote fetching ─────────────────────────────────────────────────────────
   useEffect(() => {
-    // Clear max amount ref when amount changes (user edited manually after clicking max)
-    maxAmountWeiRef.current = null;
+    // Only clear max amount ref if it wasn't just set by MAX button
+    if (!maxJustClickedRef.current) {
+      maxAmountWeiRef.current = null;
+    }
+    maxJustClickedRef.current = false;
     
     if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
     if (abortControllerRef.current) abortControllerRef.current.abort();
@@ -898,10 +902,11 @@ export default function Swap() {
                 <div className="sw-box-top">
                   <span className="sw-box-label">From</span>
                   {isConnected && fromToken && (
-                    <span className="sw-bal">
+                      <span className="sw-bal">
                       Balance:{" "}
                       <span className="sw-bal-val" onClick={() => {
                         if (!fromBalance) return;
+                        maxJustClickedRef.current = true;
                         const displayAmount = getMaxAmount(fromBalance.value, fromBalance.decimals, fromToken.symbol);
                         setFromAmount(displayAmount);
                         let maxWei = fromBalance.value;
@@ -933,6 +938,7 @@ export default function Swap() {
                     </button>
                     {isConnected && fromBalance && fromToken && (
                       <button data-testid="button-max-from" className="sw-max-btn" onClick={() => {
+                        maxJustClickedRef.current = true;
                         const displayAmount = getMaxAmount(fromBalance.value, fromBalance.decimals, fromToken.symbol);
                         setFromAmount(displayAmount);
                         // Store full precision balance for transaction
