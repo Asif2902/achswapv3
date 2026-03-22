@@ -401,8 +401,11 @@ function buildV2PathWithHop(
 
 /**
  * Calculate V2 price impact: spot rate vs execution rate
- * priceImpact = (spotRate - execRate) / spotRate * 100
- * where spotRate = output of 1 unit input, execRate = output of full amount
+ * spotRate = output of a small test amount (1e10 in) — represents current pool price
+ * execRate = outputAmount / amountIn — actual rate you get
+ * impact  = (spotRate - execRate) / spotRate * 100
+ * Uses integer-safe arithmetic: (spotOut * amountIn) / (testIn * outputAmount) to avoid
+ * floating-point precision loss on large token amounts.
  */
 async function calculateV2PriceImpact(
   router: Contract,
@@ -412,14 +415,23 @@ async function calculateV2PriceImpact(
 ): Promise<number> {
   try {
     if (amountIn === 0n || outputAmount === 0n) return 0;
-    const spotQuotes = await router.getAmountsOut(1n, path);
-    const spotOutput = spotQuotes[spotQuotes.length - 1];
-    if (spotOutput === 0n) return 0;
-    const spotRate = Number(spotOutput);
-    const execRate = (Number(outputAmount) * 1) / Number(amountIn);
-    if (spotRate === 0) return 0;
-    const impact = ((spotRate - execRate) / spotRate) * 100;
-    return Math.max(0, impact);
+
+    const testIn = 10_000_000_000n; // 1e10 — small enough for spot, large enough for any pool
+    const spotQuotes = await router.getAmountsOut(testIn, path);
+    const spotOut = spotQuotes[spotQuotes.length - 1];
+    if (spotOut === 0n) return 0;
+
+    // spotRate = spotOut / testIn
+    // execRate = outputAmount / amountIn
+    // impact   = (spotRate - execRate) / spotRate
+    //           = (spotOut/testIn - outputAmount/amountIn) / (spotOut/testIn)
+    //           = (spotOut*amountIn - outputAmount*testIn) / (spotOut*amountIn)
+    const numerator = spotOut * amountIn - outputAmount * testIn;
+    if (numerator <= 0n) return 0;
+
+    const denominator = spotOut * amountIn;
+    const impactBps = (numerator * 10000n) / denominator;
+    return Number(impactBps) / 100;
   } catch (error) {
     console.error("V2 price impact calculation failed:", error);
     return 0;
@@ -428,6 +440,7 @@ async function calculateV2PriceImpact(
 
 /**
  * Calculate V3 price impact for single-hop: spot rate vs execution rate
+ * Uses same integer-safe arithmetic as V2 to avoid floating-point precision loss.
  */
 async function calculateV3PriceImpact(
   quoter: Contract,
@@ -439,21 +452,23 @@ async function calculateV3PriceImpact(
 ): Promise<number> {
   try {
     if (amountIn === 0n || outputAmount === 0n) return 0;
-    const spotParams = {
+
+    const testIn = 10_000_000_000n; // 1e10
+    const spotResult = await quoter.quoteExactInputSingle.staticCall({
       tokenIn: tokenInAddress,
       tokenOut: tokenOutAddress,
-      amountIn: 1n,
-      fee: fee,
+      amountIn: testIn,
+      fee,
       sqrtPriceLimitX96: 0n,
-    };
-    const spotResult = await quoter.quoteExactInputSingle.staticCall(spotParams);
-    const spotOutput = spotResult[0];
-    if (spotOutput === 0n) return 0;
-    const spotRate = Number(spotOutput);
-    const execRate = (Number(outputAmount) * 1) / Number(amountIn);
-    if (spotRate === 0) return 0;
-    const impact = ((spotRate - execRate) / spotRate) * 100;
-    return Math.max(0, impact);
+    });
+    const spotOut = spotResult[0];
+    if (spotOut === 0n) return 0;
+
+    const diff = spotOut * amountIn - outputAmount * testIn;
+    if (diff <= 0n) return 0;
+
+    const impactBps = (diff * 10000n) / (amountIn * spotOut);
+    return Number(impactBps) / 100;
   } catch (error) {
     console.error("V3 price impact calculation failed:", error);
     return 0;
@@ -462,6 +477,7 @@ async function calculateV3PriceImpact(
 
 /**
  * Calculate V3 price impact for multi-hop routes: spot rate vs execution rate
+ * Uses same integer-safe arithmetic as V2.
  */
 async function calculateV3MultiHopPriceImpact(
   quoter: Contract,
@@ -471,14 +487,17 @@ async function calculateV3MultiHopPriceImpact(
 ): Promise<number> {
   try {
     if (amountIn === 0n || outputAmount === 0n) return 0;
-    const spotResult = await quoter.quoteExactInput.staticCall(encodedPath, 1n);
-    const spotOutput = spotResult[0];
-    if (spotOutput === 0n) return 0;
-    const spotRate = Number(spotOutput);
-    const execRate = (Number(outputAmount) * 1) / Number(amountIn);
-    if (spotRate === 0) return 0;
-    const impact = ((spotRate - execRate) / spotRate) * 100;
-    return Math.max(0, impact);
+
+    const testIn = 10_000_000_000n; // 1e10
+    const spotResult = await quoter.quoteExactInput.staticCall(encodedPath, testIn);
+    const spotOut = spotResult[0];
+    if (spotOut === 0n) return 0;
+
+    const diff = spotOut * amountIn - outputAmount * testIn;
+    if (diff <= 0n) return 0;
+
+    const impactBps = (diff * 10000n) / (amountIn * spotOut);
+    return Number(impactBps) / 100;
   } catch (error) {
     console.error("V3 multi-hop price impact calculation failed:", error);
     return 0;
