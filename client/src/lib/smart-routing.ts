@@ -456,7 +456,6 @@ function getTokenForAddress(
   if (address.toLowerCase() === fromToken.address.toLowerCase()) return fromToken;
   if (address.toLowerCase() === toToken.address.toLowerCase()) return toToken;
   
-  // Return wrapped token placeholder
   return {
     address: wrappedTokenAddress,
     symbol: "wUSDC",
