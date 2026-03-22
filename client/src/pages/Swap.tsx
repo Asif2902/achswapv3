@@ -574,13 +574,6 @@ export default function Swap() {
           throw new Error("Invalid recipient address format");
         }
       }
-      const executeWithRetry = async <T,>(fn: () => Promise<T>, maxRetries = 1): Promise<T> => {
-        let last: any;
-        for (let i = 0; i <= maxRetries; i++) {
-          try { return await fn(); } catch (e: any) { last = e; if (i < maxRetries) await new Promise(r => setTimeout(r, 500 * (i + 1))); }
-        }
-        throw last;
-      };
       toast({ title: "Swapping…", description: `Using ${bestQuote.protocol} protocol` });
       let tx: any;
 
@@ -632,10 +625,8 @@ export default function Swap() {
           }
 
           try {
-            tx = await executeWithRetry(async () => {
-              const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-              return swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
-            });
+            const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
+            tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
           } catch (v3Err) {
             throw v3Err;
           }
