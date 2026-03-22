@@ -71,6 +71,10 @@ export default function Swap() {
   const [quoteRefreshInterval, setQuoteRefreshInterval] = useState(30);
   const [showTransactionHistory, setShowTransactionHistory] = useState(false);
   const [tradeDetailsOpen, setTradeDetailsOpen] = useState(false);
+  const [highImpactConfirm, setHighImpactConfirm] = useState(false);
+  const [impactChecked, setImpactChecked] = useState(false);
+  const [impactText, setImpactText] = useState("");
+  const [impactAcknowledged, setImpactAcknowledged] = useState(false);
   const [gaslessMode, setGaslessMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('gaslessMode') === 'true';
@@ -235,6 +239,7 @@ export default function Swap() {
       maxAmountWeiRef.current = null;
     }
     maxJustClickedRef.current = false;
+    setImpactAcknowledged(false);
     
     if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
     if (abortControllerRef.current) abortControllerRef.current.abort();
@@ -365,7 +370,7 @@ export default function Swap() {
   };
 
   // ── Main swap ──────────────────────────────────────────────────────────────
-  const handleSwap = async () => {
+  const executeSwapCore = async () => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) return;
     if (fromToken.symbol === "USDC" && toToken.symbol === "wUSDC") { await handleWrap(fromAmount); return; }
     if (fromToken.symbol === "wUSDC" && toToken.symbol === "USDC") { await handleUnwrap(fromAmount); return; }
@@ -675,6 +680,14 @@ export default function Swap() {
     } finally { setIsSwapping(false); }
   };
 
+  const handleSwap = async () => {
+    if (priceImpact !== null && priceImpact >= 15 && !impactAcknowledged) {
+      setHighImpactConfirm(true);
+      return;
+    }
+    await executeSwapCore();
+  };
+
   // ── Balances ───────────────────────────────────────────────────────────────
   const isFromNative = fromToken?.address === "0x0000000000000000000000000000000000000000";
   const isToNative = toToken?.address === "0x0000000000000000000000000000000000000000";
@@ -793,6 +806,8 @@ export default function Swap() {
         .sw-submit.active:hover { background:linear-gradient(135deg,#4f46e5,#2563eb); box-shadow:0 6px 32px rgba(99,102,241,0.52); transform:translateY(-1px); }
         .sw-submit.loading { background:rgba(99,102,241,0.28); color:rgba(255,255,255,0.5); cursor:not-allowed; }
         .sw-submit.off { background:rgba(255,255,255,0.06); color:rgba(255,255,255,0.24); cursor:not-allowed; }
+        .sw-submit.highimpact { background:linear-gradient(135deg,#991b1b,#b91c1c); color:white; box-shadow:0 4px 24px rgba(185,28,28,0.38); display:flex; align-items:center; justify-content:center; gap:9px; }
+        .sw-submit.highimpact:hover { background:linear-gradient(135deg,#7f1d1d,#991b1b); box-shadow:0 6px 32px rgba(185,28,28,0.52); transform:translateY(-1px); }
 
         @keyframes sw-spin { to{transform:rotate(360deg)} }
         .sw-spin { animation:sw-spin 1s linear infinite; display:inline-block; width:18px; height:18px; border:2.5px solid rgba(255,255,255,0.2); border-top-color:white; border-radius:50%; }
@@ -805,6 +820,32 @@ export default function Swap() {
         .sw-permit2-btn:disabled { opacity:0.6; cursor:not-allowed; }
 
         @media (max-width:400px) { .sw-body{padding:12px;} .sw-box{padding:12px 14px;} .sw-hdr{padding:13px 16px;} }
+
+        .sw-impact-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.7); backdrop-filter:blur(4px); z-index:200; display:flex; align-items:center; justify-content:center; padding:16px; animation:fadeIn 0.15s ease; }
+        @keyframes fadeIn { from{opacity:0} to{opacity:1} }
+        .sw-impact-modal { background:#1a1a2e; border:1px solid rgba(239,68,68,0.35); border-radius:18px; padding:24px; width:100%; max-width:380px; box-shadow:0 24px 60px rgba(0,0,0,0.6); }
+        .sw-impact-icon { display:flex; justify-content:center; margin-bottom:14px; }
+        .sw-impact-title { font-size:17px; font-weight:800; color:white; text-align:center; margin-bottom:10px; }
+        .sw-impact-desc { font-size:13px; color:rgba(255,255,255,0.6); text-align:center; line-height:1.55; margin-bottom:18px; }
+        .sw-impact-desc strong { color:#f87171; }
+        .sw-impact-warn-box { background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.22); border-radius:12px; padding:12px 14px; margin-bottom:18px; display:flex; align-items:flex-start; gap:10px; }
+        .sw-impact-warn-box svg { flex-shrink:0; margin-top:1px; }
+        .sw-impact-warn-box span { font-size:12px; color:rgba(255,255,255,0.7); line-height:1.5; }
+        .sw-impact-check { display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:14px; }
+        .sw-impact-check input[type=checkbox] { width:17px; height:17px; accent-color:#6366f1; cursor:pointer; flex-shrink:0; }
+        .sw-impact-check label { font-size:13px; color:rgba(255,255,255,0.75); cursor:pointer; }
+        .sw-impact-input-wrap { margin-bottom:20px; }
+        .sw-impact-input-label { font-size:11px; font-weight:700; color:rgba(255,255,255,0.4); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:7px; }
+        .sw-impact-input { width:100%; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:10px; padding:10px 14px; color:white; font-size:14px; font-weight:700; letter-spacing:0.05em; outline:none; box-sizing:border-box; transition:border-color 0.2s; font-family:inherit; }
+        .sw-impact-input:focus { border-color:rgba(99,102,241,0.5); }
+        .sw-impact-input::placeholder { color:rgba(255,255,255,0.2); font-weight:400; letter-spacing:0; }
+        .sw-impact-btn-row { display:flex; gap:10px; }
+        .sw-impact-btn { flex:1; height:44px; border-radius:12px; font-weight:800; font-size:14px; cursor:pointer; transition:all 0.2s; border:none; }
+        .sw-impact-btn-cancel { background:rgba(255,255,255,0.07); color:rgba(255,255,255,0.6); border:1px solid rgba(255,255,255,0.1); }
+        .sw-impact-btn-cancel:hover { background:rgba(255,255,255,0.12); color:rgba(255,255,255,0.85); }
+        .sw-impact-btn-confirm { background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.35); }
+        .sw-impact-btn-confirm:hover:not(:disabled) { background:rgba(239,68,68,0.25); border-color:rgba(239,68,68,0.55); }
+        .sw-impact-btn-confirm:disabled { opacity:0.4; cursor:not-allowed; }
       `}</style>
 
       <div className="sw-wrap">
@@ -1030,10 +1071,12 @@ export default function Swap() {
 
               {/* Submit */}
               {isConnected ? (
-                <button data-testid="button-swap" onClick={handleSwap} disabled={!canSwap} className={`sw-submit ${isSwapping ? "loading" : canSwap ? "active" : "off"}`}>
+                <button data-testid="button-swap" onClick={handleSwap} disabled={!canSwap} className={`sw-submit ${isSwapping ? "loading" : canSwap && priceImpact !== null && priceImpact >= 15 && !impactAcknowledged ? "highimpact" : canSwap ? "active" : "off"}`}>
                   {isSwapping
                     ? <><span className="sw-spin" />Swapping…</>
-                    : <><ArrowDownUp style={{ width: 18, height: 18 }} />Swap</>
+                    : priceImpact !== null && priceImpact >= 15 && !impactAcknowledged
+                      ? <><AlertTriangle style={{ width: 18, height: 18 }} />Confirm High Impact Swap</>
+                      : <><ArrowDownUp style={{ width: 18, height: 18 }} />Swap</>
                   }
                 </button>
               ) : (
@@ -1048,6 +1091,57 @@ export default function Swap() {
       <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={t => { setToToken(t); setShowToSelector(false); }} tokens={tokens} onImport={handleImportToken} />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
+
+      {highImpactConfirm && (
+        <div className="sw-impact-overlay" onClick={e => { if (e.target === e.currentTarget) setHighImpactConfirm(false); }}>
+          <div className="sw-impact-modal">
+            <div className="sw-impact-icon">
+              <AlertTriangle style={{ width: 42, height: 42, color: "#f87171" }} />
+            </div>
+            <div className="sw-impact-title">High Price Impact Warning</div>
+            <div className="sw-impact-desc">
+              This swap has a price impact of <strong>{priceImpact?.toFixed(2)}%</strong>. You may receive significantly less than the current estimate due to low liquidity.
+            </div>
+            <div className="sw-impact-warn-box">
+              <AlertTriangle style={{ width: 16, height: 16, color: "#f87171", flexShrink: 0 }} />
+              <span>High price impact swaps can result in substantial token loss. Make sure you understand the risks before proceeding.</span>
+            </div>
+            <div className="sw-impact-check">
+              <input type="checkbox" id="impact-check" checked={impactChecked} onChange={e => setImpactChecked(e.target.checked)} />
+              <label htmlFor="impact-check">I understand the risks and want to proceed</label>
+            </div>
+            <div className="sw-impact-input-wrap">
+              <div className="sw-impact-input-label">Type "CONFIRM SWAP" to continue</div>
+              <input
+                type="text"
+                className="sw-impact-input"
+                placeholder="CONFIRM SWAP"
+                value={impactText}
+                onChange={e => setImpactText(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+            <div className="sw-impact-btn-row">
+              <button className="sw-impact-btn sw-impact-btn-cancel" onClick={() => { setHighImpactConfirm(false); setImpactChecked(false); setImpactText(""); }}>
+                Cancel
+              </button>
+              <button
+                className="sw-impact-btn sw-impact-btn-confirm"
+                disabled={!impactChecked || impactText.trim().toUpperCase() !== "CONFIRM SWAP"}
+                onClick={async () => {
+                  setHighImpactConfirm(false);
+                  setImpactChecked(false);
+                  setImpactText("");
+                  setImpactAcknowledged(true);
+                  await executeSwapCore();
+                }}
+              >
+                Confirm Swap
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
