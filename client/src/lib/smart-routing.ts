@@ -400,7 +400,9 @@ function buildV2PathWithHop(
 }
 
 /**
- * Calculate V2 price impact using midpoint method
+ * Calculate V2 price impact: spot rate vs execution rate
+ * priceImpact = (spotRate - execRate) / spotRate * 100
+ * where spotRate = output of 1 unit input, execRate = output of full amount
  */
 async function calculateV2PriceImpact(
   router: Contract,
@@ -409,24 +411,15 @@ async function calculateV2PriceImpact(
   path: string[]
 ): Promise<number> {
   try {
-    const halfAmountBigInt = amountIn / 2n;
-    
-    if (halfAmountBigInt > 0n) {
-      const halfAmountQuotes = await router.getAmountsOut(halfAmountBigInt, path);
-      const halfAmountOutput = halfAmountQuotes[halfAmountQuotes.length - 1];
-      
-      const expectedOutput = halfAmountOutput * 2n;
-      
-      if (expectedOutput > 0n && outputAmount > 0n) {
-        const impactBasisPoints = expectedOutput > outputAmount
-          ? ((expectedOutput - outputAmount) * 10000n) / expectedOutput
-          : ((outputAmount - expectedOutput) * 10000n) / expectedOutput;
-        
-        return Math.max(0, Math.abs(Number(impactBasisPoints) / 100));
-      }
-    }
-    
-    return 0;
+    if (amountIn === 0n || outputAmount === 0n) return 0;
+    const spotQuotes = await router.getAmountsOut(1n, path);
+    const spotOutput = spotQuotes[spotQuotes.length - 1];
+    if (spotOutput === 0n) return 0;
+    const spotRate = Number(spotOutput);
+    const execRate = (Number(outputAmount) * 1) / Number(amountIn);
+    if (spotRate === 0) return 0;
+    const impact = ((spotRate - execRate) / spotRate) * 100;
+    return Math.max(0, impact);
   } catch (error) {
     console.error("V2 price impact calculation failed:", error);
     return 0;
@@ -434,7 +427,7 @@ async function calculateV2PriceImpact(
 }
 
 /**
- * Calculate V3 price impact for single-hop
+ * Calculate V3 price impact for single-hop: spot rate vs execution rate
  */
 async function calculateV3PriceImpact(
   quoter: Contract,
@@ -445,32 +438,22 @@ async function calculateV3PriceImpact(
   fee: number
 ): Promise<number> {
   try {
-    const halfAmountBigInt = amountIn / 2n;
-    
-    if (halfAmountBigInt > 0n) {
-      const params = {
-        tokenIn: tokenInAddress,
-        tokenOut: tokenOutAddress,
-        amountIn: halfAmountBigInt,
-        fee: fee,
-        sqrtPriceLimitX96: 0n,
-      };
-      
-      const result = await quoter.quoteExactInputSingle.staticCall(params);
-      const halfAmountOutput = result[0];
-      
-      const expectedOutput = halfAmountOutput * 2n;
-      
-      if (expectedOutput > 0n && outputAmount > 0n) {
-        const impactBasisPoints = expectedOutput > outputAmount
-          ? ((expectedOutput - outputAmount) * 10000n) / expectedOutput
-          : ((outputAmount - expectedOutput) * 10000n) / expectedOutput;
-        
-        return Math.max(0, Math.abs(Number(impactBasisPoints) / 100));
-      }
-    }
-    
-    return 0;
+    if (amountIn === 0n || outputAmount === 0n) return 0;
+    const spotParams = {
+      tokenIn: tokenInAddress,
+      tokenOut: tokenOutAddress,
+      amountIn: 1n,
+      fee: fee,
+      sqrtPriceLimitX96: 0n,
+    };
+    const spotResult = await quoter.quoteExactInputSingle.staticCall(spotParams);
+    const spotOutput = spotResult[0];
+    if (spotOutput === 0n) return 0;
+    const spotRate = Number(spotOutput);
+    const execRate = (Number(outputAmount) * 1) / Number(amountIn);
+    if (spotRate === 0) return 0;
+    const impact = ((spotRate - execRate) / spotRate) * 100;
+    return Math.max(0, impact);
   } catch (error) {
     console.error("V3 price impact calculation failed:", error);
     return 0;
@@ -478,7 +461,7 @@ async function calculateV3PriceImpact(
 }
 
 /**
- * Calculate V3 price impact for multi-hop routes
+ * Calculate V3 price impact for multi-hop routes: spot rate vs execution rate
  */
 async function calculateV3MultiHopPriceImpact(
   quoter: Contract,
@@ -487,25 +470,15 @@ async function calculateV3MultiHopPriceImpact(
   outputAmount: bigint
 ): Promise<number> {
   try {
-    const halfAmountBigInt = amountIn / 2n;
-    
-    if (halfAmountBigInt > 0n) {
-      
-      const result = await quoter.quoteExactInput.staticCall(encodedPath, halfAmountBigInt);
-      const halfAmountOutput = result[0];
-      
-      const expectedOutput = halfAmountOutput * 2n;
-      
-      if (expectedOutput > 0n && outputAmount > 0n) {
-        const impactBasisPoints = expectedOutput > outputAmount
-          ? ((expectedOutput - outputAmount) * 10000n) / expectedOutput
-          : ((outputAmount - expectedOutput) * 10000n) / expectedOutput;
-        
-        return Math.max(0, Math.abs(Number(impactBasisPoints) / 100));
-      }
-    }
-    
-    return 0;
+    if (amountIn === 0n || outputAmount === 0n) return 0;
+    const spotResult = await quoter.quoteExactInput.staticCall(encodedPath, 1n);
+    const spotOutput = spotResult[0];
+    if (spotOutput === 0n) return 0;
+    const spotRate = Number(spotOutput);
+    const execRate = (Number(outputAmount) * 1) / Number(amountIn);
+    if (spotRate === 0) return 0;
+    const impact = ((spotRate - execRate) / spotRate) * 100;
+    return Math.max(0, impact);
   } catch (error) {
     console.error("V3 multi-hop price impact calculation failed:", error);
     return 0;
