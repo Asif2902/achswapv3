@@ -747,7 +747,7 @@ export default function Swap() {
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const hasTradeInfo = !!(fromToken && toToken && fromAmount && toAmount && parseFloat(fromAmount) > 0 && parseFloat(toAmount) > 0);
-  const impactColor = priceImpact === null ? "" : priceImpact > HIGH_IMPACT_THRESHOLD ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
+  const impactColor = priceImpact === null ? "" : priceImpact >= HIGH_IMPACT_THRESHOLD ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
   const toAmountNum = parseFloat(toAmount);
   const toAmountDisplay = toAmountBelowThreshold && toAmount ? `<${toAmount}` : toAmount;
   const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping);

@@ -185,11 +185,8 @@ export async function getV3Quote(
     const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
 
     const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
-    const DECIMALS_SCALE_OUT = 10n ** BigInt(toToken.decimals);
     const TARGET_PROBE_TOKENS_IN = 10_000n;
-    const TARGET_PROBE_TOKENS_OUT = 10_000n;
     const PROBE_IN_BASE = TARGET_PROBE_TOKENS_IN * DECIMALS_SCALE_IN;
-    const PROBE_OUT_BASE = TARGET_PROBE_TOKENS_OUT * DECIMALS_SCALE_OUT;
     const MIN = 10_000_000_000n;
     const MAX = 10_000_000_000_000_000n;
     const testIn = amountIn > 0n
@@ -198,10 +195,6 @@ export async function getV3Quote(
           return scaled < MIN ? MIN : scaled > MAX ? MAX : scaled;
         })()
       : MIN;
-    const testOut = (() => {
-      const scaled = PROBE_OUT_BASE / 1000n;
-      return scaled < MIN ? MIN : scaled > MAX ? MAX : scaled;
-    })();
 
     const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number | undefined => {
       if (spotOut === 0n) return undefined;
@@ -302,6 +295,7 @@ export async function getV3Quote(
 
     // Choose overall best (single-hop vs multi-hop)
     if (best && bestMultiHop && bestMultiHop.outputAmount > best.outputAmount) {
+      const wrappedToken = getTokenForAddress(wrappedTokenAddress, fromToken, toToken, wrappedTokenAddress);
       return {
         protocol: "V3",
         outputAmount: bestMultiHop.outputAmount,
@@ -310,28 +304,12 @@ export async function getV3Quote(
         route: [
           {
             tokenIn: fromToken,
-            tokenOut: {
-              address: wrappedTokenAddress,
-              symbol: "wUSDC",
-              name: "Wrapped USDC",
-              decimals: 18,
-              logoURI: "/img/logos/wusdc.png",
-              verified: true,
-              chainId: fromToken.chainId,
-            } as Token,
+            tokenOut: wrappedToken,
             protocol: "V3",
             fee: bestMultiHop.fee1,
           },
           {
-            tokenIn: {
-              address: wrappedTokenAddress,
-              symbol: "wUSDC",
-              name: "Wrapped USDC",
-              decimals: 18,
-              logoURI: "/img/logos/wusdc.png",
-              verified: true,
-              chainId: fromToken.chainId,
-            } as Token,
+            tokenIn: wrappedToken,
             tokenOut: toToken,
             protocol: "V3",
             fee: bestMultiHop.fee2,
@@ -464,16 +442,6 @@ function buildV2PathWithHop(
 }
 
 /**
- * Sort tokens by address (required for V3)
- */
-function sortTokensByAddress(tokenA: Token, tokenB: Token): [Token, Token] {
-  const addressA = tokenA.address.toLowerCase();
-  const addressB = tokenB.address.toLowerCase();
-  return addressA < addressB ? [tokenA, tokenB] : [tokenB, tokenA];
-}
-
-/**
- * Helper to get token object for an address in the path
  */
 function getTokenForAddress(
   address: string,

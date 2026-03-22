@@ -117,8 +117,20 @@ export function AddLiquidityV2() {
     try {
       if (!chainId) return;
       const chainTokens = getTokensByChainId(chainId);
-      const imported = localStorage.getItem('importedTokens');
-      const importedTokens = imported ? JSON.parse(imported) : [];
+      const key = `importedTokens:${chainId}`;
+      let importedTokens: Token[] = [];
+      try {
+        const data = localStorage.getItem(key);
+        if (data) {
+          importedTokens = JSON.parse(data);
+        } else {
+          const legacy = localStorage.getItem('importedTokens');
+          if (legacy) {
+            importedTokens = JSON.parse(legacy);
+            localStorage.setItem(key, JSON.stringify(importedTokens));
+          }
+        }
+      } catch { importedTokens = []; }
       const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
       setTokens([
         ...chainTokens.map(t => ({ ...t, logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : `/img/logos/unknown-token.png` })),
@@ -156,9 +168,10 @@ export function AddLiquidityV2() {
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), 10000))]) as [string, string, bigint];
       if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
-      const imported = localStorage.getItem('importedTokens');
-      const importedTokens = imported ? JSON.parse(imported) : [];
-      if (!importedTokens.find((t: Token) => t.address.toLowerCase() === address.toLowerCase())) { importedTokens.push(newToken); localStorage.setItem('importedTokens', JSON.stringify(importedTokens)); }
+      const key = `importedTokens:${chainId}`;
+      let importedTokens: Token[] = [];
+      try { const data = localStorage.getItem(key); importedTokens = data ? JSON.parse(data) : []; } catch { importedTokens = []; }
+      if (!importedTokens.find((t: Token) => t.address.toLowerCase() === address.toLowerCase())) { importedTokens.push(newToken); localStorage.setItem(key, JSON.stringify(importedTokens)); }
       setTokens(prev => [...prev, newToken]);
       toast({ title: "Token imported", description: `${symbol} has been added to your token list` });
       return newToken;

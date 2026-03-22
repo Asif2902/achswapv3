@@ -108,8 +108,20 @@ export function RemoveLiquidityV2() {
   useEffect(() => {
     if (!chainId) return;
     fetchTokensWithCommunity(chainId).then(chainTokens => {
-      const imported = localStorage.getItem("importedTokens");
-      const importedTokens = imported ? JSON.parse(imported) : [];
+      const key = `importedTokens:${chainId}`;
+      let importedTokens: Token[] = [];
+      try {
+        const data = localStorage.getItem(key);
+        if (data) {
+          importedTokens = JSON.parse(data);
+        } else {
+          const legacy = localStorage.getItem("importedTokens");
+          if (legacy) {
+            importedTokens = JSON.parse(legacy);
+            localStorage.setItem(key, JSON.stringify(importedTokens));
+          }
+        }
+      } catch { importedTokens = []; }
       const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
       const processed = chainTokens.map((token) => ({
         ...token,
