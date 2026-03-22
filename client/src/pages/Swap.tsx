@@ -520,7 +520,7 @@ export default function Swap() {
           throw new Error("Invalid recipient address format");
         }
       }
-      const executeWithRetry = async <T,>(fn: () => Promise<T>, maxRetries = 2): Promise<T> => {
+      const executeWithRetry = async <T,>(fn: () => Promise<T>, maxRetries = 0): Promise<T> => {
         let last: any;
         for (let i = 0; i <= maxRetries; i++) {
           try { return await fn(); } catch (e: any) { last = e; if (i < maxRetries) await new Promise(r => setTimeout(r, 500 * (i + 1))); }
