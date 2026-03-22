@@ -54,6 +54,7 @@ function fmtBal(raw: string): string {
 }
 
 export default function Swap() {
+  const HIGH_IMPACT_THRESHOLD = 15;
   const [fromToken, setFromToken] = useState<Token | null>(null);
   const [toToken, setToToken] = useState<Token | null>(null);
   const [fromAmount, setFromAmount] = useState("");
@@ -77,6 +78,7 @@ export default function Swap() {
   const [impactAcknowledged, setImpactAcknowledged] = useState(false);
   const [fromImgError, setFromImgError] = useState(false);
   const [toImgError, setToImgError] = useState(false);
+  const [toAmountBelowThreshold, setToAmountBelowThreshold] = useState(false);
   const [gaslessMode, setGaslessMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('gaslessMode') === 'true';
@@ -103,6 +105,7 @@ export default function Swap() {
   const maxAmountWeiRef = useRef<bigint | null>(null);
   const maxJustClickedRef = useRef<boolean>(false);
   const quoteRefreshNonceRef = useRef<number>(0);
+  const [quoteRefreshNonce, setQuoteRefreshNonce] = useState(0);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -132,7 +135,9 @@ export default function Swap() {
 
   const computeAndSetMaxSelection = (balance: { value: bigint; decimals: number }, token: Token) => {
     maxJustClickedRef.current = true;
-    quoteRefreshNonceRef.current += 1;
+    const next = quoteRefreshNonceRef.current + 1;
+    quoteRefreshNonceRef.current = next;
+    setQuoteRefreshNonce(next);
     const displayAmount = getMaxAmount(balance.value, balance.decimals, token.symbol);
     let maxWei = balance.value;
     if (token.symbol === "USDC") {
@@ -198,19 +203,20 @@ export default function Swap() {
   const loadTokens = async () => {
     if (!chainId) return;
     const chainTokens = getTokensByChainId(chainId);
-    const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
+    const imported: Token[] = JSON.parse(localStorage.getItem(`importedTokens:${chainId}`) || "[]");
     const process = (arr: Token[]) =>
       arr.filter(t => !chainId || t.chainId === chainId).map(t => ({ ...t, logoURI: t.logoURI || "/img/logos/unknown-token.png" }));
     setTokens([...process(chainTokens), ...process(imported)]);
   };
 
   const handleDeleteToken = (address: string) => {
-    const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
-    const updated = imported.filter(t => t.address.toLowerCase() !== address.toLowerCase());
-    localStorage.setItem("importedTokens", JSON.stringify(updated));
-    setTokens(prev => prev.filter(t => t.address.toLowerCase() !== address.toLowerCase()));
-    if (fromToken?.address.toLowerCase() === address.toLowerCase()) setFromToken(null);
-    if (toToken?.address.toLowerCase() === address.toLowerCase()) setToToken(null);
+    const key = `importedTokens:${chainId}`;
+    const imported: Token[] = JSON.parse(localStorage.getItem(key) || "[]");
+    const updated = imported.filter(t => !(t.address.toLowerCase() === address.toLowerCase() && t.chainId === chainId));
+    localStorage.setItem(key, JSON.stringify(updated));
+    setTokens(prev => prev.filter(t => !(t.address.toLowerCase() === address.toLowerCase() && t.chainId === chainId)));
+    if (fromToken?.address.toLowerCase() === address.toLowerCase() && fromToken?.chainId === chainId) setFromToken(null);
+    if (toToken?.address.toLowerCase() === address.toLowerCase() && toToken?.chainId === chainId) setToToken(null);
   };
 
   const handleImportToken = async (addr: string): Promise<Token | null> => {
@@ -231,8 +237,9 @@ export default function Swap() {
       ]) as [string, string, bigint];
       if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
-      const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
-      if (!imported.find(t => t.address.toLowerCase() === addr.toLowerCase())) { imported.push(newToken); localStorage.setItem("importedTokens", JSON.stringify(imported)); }
+      const key = `importedTokens:${chainId}`;
+      const imported: Token[] = JSON.parse(localStorage.getItem(key) || "[]");
+      if (!imported.find(t => t.address.toLowerCase() === addr.toLowerCase() && t.chainId === chainId)) { imported.push(newToken); localStorage.setItem(key, JSON.stringify(imported)); }
       setTokens(prev => [...prev, newToken]);
       toast({ title: "Token imported", description: `${symbol} added to your list` });
       return newToken;
@@ -263,16 +270,17 @@ export default function Swap() {
       if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
       if (abortControllerRef.current) abortControllerRef.current.abort();
     };
-  }, [fromAmount, fromToken, toToken, tokens, contracts, chainId, v2Enabled, v3Enabled]);
+  }, [fromAmount, fromToken, toToken, tokens, contracts, chainId, v2Enabled, v3Enabled, quoteRefreshNonce]);
 
   useEffect(() => {
     setFromImgError(false);
     setToImgError(false);
+    setToAmountBelowThreshold(false);
   }, [fromToken?.address, toToken?.address]);
 
   const fetchQuote = async (signal: AbortSignal) => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) {
-      setToAmount(""); setPriceImpact(null); return;
+      setToAmount(""); setPriceImpact(null); setToAmountBelowThreshold(false); return;
     }
     const isWrap = fromToken.symbol === "USDC" && toToken.symbol === "wUSDC";
     const isUnwrap = fromToken.symbol === "wUSDC" && toToken.symbol === "USDC";
@@ -317,14 +325,15 @@ export default function Swap() {
         if (signal.aborted) return;
         if (result) setCachedQuote(fromToken.address, toToken.address, fromAmount + (quoteRefreshNonceRef.current ? `#${quoteRefreshNonceRef.current}` : ""), v2Enabled, v3Enabled, result);
       }
-      if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); return; }
+      if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); setToAmountBelowThreshold(false); return; }
       setSmartRoutingResult(result);
       const displayDecimals = Math.min(4, toToken.decimals);
       const threshold = 10 ** -displayDecimals;
       const rawOutput = Number(result.bestQuote.outputAmount) / 10 ** toToken.decimals;
       const formatted = formatAmount(result.bestQuote.outputAmount, toToken.decimals);
-      setToAmount(rawOutput > 0 && rawOutput < threshold ? `<${formatted}` : formatted);
-      setPriceImpact(result.bestQuote.priceImpact);
+      setToAmountBelowThreshold(rawOutput > 0 && rawOutput < threshold);
+      setToAmount(formatted);
+      setPriceImpact(result.bestQuote.priceImpact ?? null);
       setRouteHops(result.bestQuote.route);
     } catch { if (signal.aborted) return; setToAmount(""); setPriceImpact(null); setRouteHops([]); setSmartRoutingResult(null); }
     finally { if (!signal.aborted) setIsLoadingQuote(false); }
@@ -487,7 +496,7 @@ export default function Swap() {
               title: "Gasless swap successful!",
               description: (
                 <div className="flex items-center gap-2">
-                  <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toSymbol}{toToken.symbol === "wUSDC" && " (auto-converted)"}</span>
+                    <span>Swapped {fromAmount} {fromToken.symbol} → {toAmountDisplay} {toSymbol}{toToken.symbol === "wUSDC" && " (auto-converted)"}</span>
                   <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
                 </div>
               ),
@@ -684,7 +693,7 @@ export default function Swap() {
         title: "Swap successful!",
         description: (
           <div className="flex items-center gap-2">
-            <span>Swapped {fromAmount} {fromToken.symbol} → {toAmount} {toToken.symbol} via {bestQuote.protocol}</span>
+            <span>Swapped {fromAmount} {fromToken.symbol} → {toAmountDisplay} {toToken.symbol} via {bestQuote.protocol}</span>
             <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button>
           </div>
         ),
@@ -701,7 +710,7 @@ export default function Swap() {
   };
 
   const handleSwap = async () => {
-    if (priceImpact !== null && priceImpact >= 15 && !impactAcknowledged) {
+    if (priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged) {
       setHighImpactConfirm(true);
       return;
     }
@@ -738,8 +747,9 @@ export default function Swap() {
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const hasTradeInfo = !!(fromToken && toToken && fromAmount && toAmount && parseFloat(fromAmount) > 0 && parseFloat(toAmount) > 0);
-  const impactColor = priceImpact === null ? "" : priceImpact > 15 ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
-  const toAmountNum = parseFloat(toAmount.replace("<", ""));
+  const impactColor = priceImpact === null ? "" : priceImpact > HIGH_IMPACT_THRESHOLD ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
+  const toAmountNum = parseFloat(toAmount);
+  const toAmountDisplay = toAmountBelowThreshold && toAmount ? `<${toAmount}` : toAmount;
   const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping);
   const protocolLabel = smartRoutingResult?.bestQuote?.protocol;
 
@@ -1019,7 +1029,7 @@ export default function Swap() {
               </div>
 
               {/* High impact warning */}
-              {hasTradeInfo && priceImpact !== null && priceImpact > 15 && (
+              {hasTradeInfo && priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && (
                 <div className="sw-impact-warn">
                   <AlertTriangle style={{ width: 15, height: 15, color: "#f87171", flexShrink: 0, marginTop: 1 }} />
                   <div>
@@ -1092,10 +1102,10 @@ export default function Swap() {
 
               {/* Submit */}
               {isConnected ? (
-                <button data-testid="button-swap" onClick={handleSwap} disabled={!canSwap} className={`sw-submit ${isSwapping ? "loading" : canSwap && priceImpact !== null && priceImpact >= 15 && !impactAcknowledged ? "highimpact" : canSwap ? "active" : "off"}`}>
+                <button data-testid="button-swap" onClick={handleSwap} disabled={!canSwap} className={`sw-submit ${isSwapping ? "loading" : canSwap && priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged ? "highimpact" : canSwap ? "active" : "off"}`}>
                   {isSwapping
                     ? <><span className="sw-spin" />Swapping…</>
-                    : priceImpact !== null && priceImpact >= 15 && !impactAcknowledged
+                    : priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged
                       ? <><AlertTriangle style={{ width: 18, height: 18 }} />Confirm High Impact Swap</>
                       : <><ArrowDownUp style={{ width: 18, height: 18 }} />Swap</>
                   }
@@ -1114,7 +1124,7 @@ export default function Swap() {
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 
       {highImpactConfirm && (
-        <div className="sw-impact-overlay" onClick={e => { if (e.target === e.currentTarget) setHighImpactConfirm(false); }}>
+        <div className="sw-impact-overlay" onClick={e => { if (e.target === e.currentTarget) { setHighImpactConfirm(false); setImpactChecked(false); setImpactText(""); } }}>
           <div className="sw-impact-modal">
             <div className="sw-impact-icon">
               <AlertTriangle style={{ width: 42, height: 42, color: "#f87171" }} />

@@ -453,6 +453,7 @@ function TokenRow({
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [holding, setHolding] = useState(false);
+  const [focused, setFocused] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -461,6 +462,7 @@ function TokenRow({
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
       if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
       setHolding(false);
+      setFocused(false);
     }
     return () => {
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -482,25 +484,33 @@ function TokenRow({
     }
   };
 
+  const showDelete = !!(onDelete && !token.verified && (holding || focused));
+  const dismissDelete = () => {
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    setHolding(false);
+    setFocused(false);
+  };
+
   return (
     <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
       {/* Delete slide-in from left */}
-      {onDelete && !token.verified && holding && (
+      {showDelete && (
         <div
           className="absolute inset-y-0 left-0 flex items-center pl-2"
           style={{
             width: 52,
-            transform: holding ? "translateX(0)" : "translateX(-100%)",
+            transform: "translateX(0)",
             transition: "transform 0.22s cubic-bezier(0.32,0.72,0,1)",
             zIndex: 2,
             background: "rgba(239,68,68,0.12)",
           }}
         >
           <button
-            onClick={(e) => { e.stopPropagation(); if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; } onDelete(token.address); setHolding(false); }}
+            onClick={(e) => { e.stopPropagation(); dismissDelete(); onDelete(token.address); }}
             className="w-9 h-9 rounded-lg flex items-center justify-center"
             style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
             title="Remove token"
+            aria-label={`Remove ${token.symbol}`}
           >
             <Trash2 style={{ width: 15, height: 15, color: "#f87171" }} />
           </button>
@@ -513,6 +523,14 @@ function TokenRow({
         onPointerDown={startHold}
         onPointerUp={endHold}
         onPointerLeave={endHold}
+        onFocus={() => { if (onDelete && !token.verified) setFocused(true); }}
+        onBlur={() => { if (!holding) setFocused(false); }}
+        onKeyDown={(e) => {
+          if ((e.key === "Delete" || e.key === "Backspace" || e.key === "Enter") && onDelete && !token.verified) {
+            e.preventDefault();
+            onDelete(token.address);
+          }
+        }}
         className="w-full flex items-center justify-between px-3 py-2.5 text-left relative active:scale-[0.98]"
         style={{
           background: pressed ? "rgba(255,255,255,0.08)" : "transparent",
@@ -615,6 +633,7 @@ function CommunityTokenRow({
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [holding, setHolding] = useState(false);
+  const [focused, setFocused] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -623,6 +642,7 @@ function CommunityTokenRow({
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
       if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
       setHolding(false);
+      setFocused(false);
     }
     return () => {
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -644,24 +664,32 @@ function CommunityTokenRow({
     }
   };
 
+  const showDelete = !!(onDelete && (holding || focused));
+  const dismissDelete = () => {
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    setHolding(false);
+    setFocused(false);
+  };
+
   return (
     <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
-      {onDelete && holding && (
+      {showDelete && (
         <div
           className="absolute inset-y-0 left-0 flex items-center pl-2"
           style={{
             width: 52,
-            transform: holding ? "translateX(0)" : "translateX(-100%)",
+            transform: "translateX(0)",
             transition: "transform 0.22s cubic-bezier(0.32,0.72,0,1)",
             zIndex: 2,
             background: "rgba(139,92,246,0.1)",
           }}
         >
           <button
-            onClick={(e) => { e.stopPropagation(); if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; } onDelete(token.address); setHolding(false); }}
+            onClick={(e) => { e.stopPropagation(); dismissDelete(); onDelete(token.address); }}
             className="w-9 h-9 rounded-lg flex items-center justify-center"
             style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
             title="Remove token"
+            aria-label={`Remove ${token.symbol}`}
           >
             <Trash2 style={{ width: 15, height: 15, color: "#f87171" }} />
           </button>
@@ -672,6 +700,14 @@ function CommunityTokenRow({
         onPointerDown={startHold}
         onPointerUp={endHold}
         onPointerLeave={endHold}
+        onFocus={() => { if (onDelete) setFocused(true); }}
+        onBlur={() => { if (!holding) setFocused(false); }}
+        onKeyDown={(e) => {
+          if ((e.key === "Delete" || e.key === "Backspace" || e.key === "Enter") && onDelete) {
+            e.preventDefault();
+            onDelete(token.address);
+          }
+        }}
         className="w-full flex items-center justify-between px-3 py-2.5 text-left relative active:scale-[0.98]"
         style={{
           background: pressed ? "rgba(139,92,246,0.1)" : "transparent",

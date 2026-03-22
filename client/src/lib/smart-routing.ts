@@ -30,7 +30,7 @@ export interface QuoteResult {
   protocol: "V2" | "V3";
   outputAmount: bigint;
   route: RouteHop[];
-  priceImpact: number;
+  priceImpact: number | undefined;
   gasEstimate?: bigint;
 }
 
@@ -60,31 +60,35 @@ export async function getV2Quote(
     const directPath = buildV2Path(fromToken, toToken, wrappedTokenAddress);
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
+    const DECIMALS_SCALE = 10n ** BigInt(fromToken.decimals);
+    const TARGET_PROBE_TOKENS = 10_000n;
+    const PROBE_BASE = TARGET_PROBE_TOKENS * DECIMALS_SCALE;
+    const MIN = 10_000_000_000n;
+    const MAX = 10_000_000_000_000_000n;
     const testIn = amountIn > 0n
       ? (() => {
-          const scaled = amountIn / 1000n;
-          const MIN = 10_000_000_000n;   // 1e10 — minimum for quoter accuracy
-          const MAX = 10_000_000_000_000_000n; // 1e16 — cap to avoid overflow
-          return scaled > 0n
-            ? scaled < MIN ? MIN : scaled > MAX ? MAX : scaled
-            : MIN;
+          const scaled = PROBE_BASE / 1000n;
+          return scaled < MIN ? MIN : scaled > MAX ? MAX : scaled;
         })()
-      : 10_000_000_000n;
+      : MIN;
+
+    const calcV2Impact = (spotOut: bigint, outputAmount: bigint): number | undefined => {
+      if (spotOut === 0n) return undefined;
+      const num = spotOut * amountIn - outputAmount * testIn;
+      if (num <= 0n) return 0;
+      return Number((num * 10000n) / (spotOut * amountIn)) / 100;
+    };
 
     const [directResult, hopResult] = await Promise.allSettled([
       (async () => {
         const amounts = await router.getAmountsOut(amountIn, directPath);
         const outputAmount = amounts[amounts.length - 1];
         if (outputAmount === 0n) throw new Error("zero output");
-        let priceImpact = 0;
+        let priceImpact: number | undefined;
         try {
           const spotAmounts = await router.getAmountsOut(testIn, directPath);
-          const spotOut = spotAmounts[spotAmounts.length - 1];
-          if (spotOut > 0n) {
-            const num = spotOut * amountIn - outputAmount * testIn;
-            if (num > 0n) priceImpact = Number((num * 10000n) / (spotOut * amountIn)) / 100;
-          }
-        } catch { /* probe failed — priceImpact stays 0, quote still valid */ }
+          priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
+        } catch { /* probe failed — impact unavailable */ }
         return { outputAmount, path: directPath, priceImpact };
       })(),
       hopPath.length !== directPath.length
@@ -92,15 +96,11 @@ export async function getV2Quote(
             const amounts = await router.getAmountsOut(amountIn, hopPath);
             const outputAmount = amounts[amounts.length - 1];
             if (outputAmount === 0n) throw new Error("zero output");
-            let priceImpact = 0;
+            let priceImpact: number | undefined;
             try {
               const spotAmounts = await router.getAmountsOut(testIn, hopPath);
-              const spotOut = spotAmounts[spotAmounts.length - 1];
-              if (spotOut > 0n) {
-                const num = spotOut * amountIn - outputAmount * testIn;
-                if (num > 0n) priceImpact = Number((num * 10000n) / (spotOut * amountIn)) / 100;
-              }
-            } catch { /* probe failed — priceImpact stays 0, quote still valid */ }
+              priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
+            } catch { /* probe failed — impact unavailable */ }
             return { outputAmount, path: hopPath, priceImpact };
           })()
         : Promise.reject(),
@@ -111,7 +111,7 @@ export async function getV2Quote(
 
     let bestOutputAmount: bigint | null = null;
     let bestPath: string[] = [];
-    let bestPriceImpact = 0;
+    let bestPriceImpact: number | undefined;
 
     if (direct && (!bestOutputAmount || direct.outputAmount > bestOutputAmount)) {
       bestOutputAmount = direct.outputAmount;
@@ -184,19 +184,27 @@ export async function getV3Quote(
     const fromERC20 = getERC20Address(fromToken.address, wrappedTokenAddress);
     const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
 
+    const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
+    const DECIMALS_SCALE_OUT = 10n ** BigInt(toToken.decimals);
+    const TARGET_PROBE_TOKENS_IN = 10_000n;
+    const TARGET_PROBE_TOKENS_OUT = 10_000n;
+    const PROBE_IN_BASE = TARGET_PROBE_TOKENS_IN * DECIMALS_SCALE_IN;
+    const PROBE_OUT_BASE = TARGET_PROBE_TOKENS_OUT * DECIMALS_SCALE_OUT;
+    const MIN = 10_000_000_000n;
+    const MAX = 10_000_000_000_000_000n;
     const testIn = amountIn > 0n
       ? (() => {
-          const scaled = amountIn / 1000n;
-          const MIN = 10_000_000_000n;
-          const MAX = 10_000_000_000_000_000n;
-          return scaled > 0n
-            ? scaled < MIN ? MIN : scaled > MAX ? MAX : scaled
-            : MIN;
+          const scaled = PROBE_IN_BASE / 1000n;
+          return scaled < MIN ? MIN : scaled > MAX ? MAX : scaled;
         })()
-      : 10_000_000_000n;
+      : MIN;
+    const testOut = (() => {
+      const scaled = PROBE_OUT_BASE / 1000n;
+      return scaled < MIN ? MIN : scaled > MAX ? MAX : scaled;
+    })();
 
-    const calcPriceImpact = (spotOut: bigint, outputAmount: bigint): number => {
-      if (spotOut === 0n) return 0;
+    const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number | undefined => {
+      if (spotOut === 0n) return undefined;
       const num = spotOut * amountIn - outputAmount * testIn;
       if (num <= 0n) return 0;
       return Number((num * 10000n) / (spotOut * amountIn)) / 100;
@@ -215,7 +223,7 @@ export async function getV3Quote(
         const outputAmount = actualResult[0];
         const gasEstimate = actualResult[3];
 
-        let priceImpact = 0;
+        let priceImpact: number | undefined;
         try {
           const spotResult = await quoter.quoteExactInputSingle.staticCall({
             tokenIn: fromERC20,
@@ -224,8 +232,8 @@ export async function getV3Quote(
             fee,
             sqrtPriceLimitX96: 0n,
           });
-          priceImpact = calcPriceImpact(spotResult[0], outputAmount);
-        } catch { /* probe failed — priceImpact stays 0, quote still valid */ }
+          priceImpact = calcV3Impact(spotResult[0], outputAmount);
+        } catch { /* probe failed — impact unavailable */ }
 
         return { fee, outputAmount, gasEstimate, priceImpact, isMultiHop: false };
       } catch {
@@ -242,11 +250,11 @@ export async function getV3Quote(
           const outputAmount = actualResult[0];
           const gasEstimate = actualResult[3];
 
-          let priceImpact = 0;
+          let priceImpact: number | undefined;
           try {
             const spotResult = await quoter.quoteExactInput.staticCall(path, testIn);
-            priceImpact = calcPriceImpact(spotResult[0], outputAmount);
-          } catch { /* probe failed — priceImpact stays 0, quote still valid */ }
+            priceImpact = calcV3Impact(spotResult[0], outputAmount);
+          } catch { /* probe failed — impact unavailable */ }
 
           return { fee1, fee2, path, outputAmount, gasEstimate, priceImpact };
         } catch {
@@ -265,7 +273,7 @@ export async function getV3Quote(
     let best: {
       outputAmount: bigint;
       gasEstimate: bigint;
-      priceImpact: number;
+      priceImpact: number | undefined;
       fee: number;
       isMultiHop: false;
     } | null = null;
@@ -280,7 +288,7 @@ export async function getV3Quote(
     let bestMultiHop: {
       outputAmount: bigint;
       gasEstimate: bigint;
-      priceImpact: number;
+      priceImpact: number | undefined;
       fee1: number;
       fee2: number;
       path: string;
