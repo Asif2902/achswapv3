@@ -113,18 +113,19 @@ export function RemoveLiquidityV2() {
       try {
         const data = localStorage.getItem(key);
         if (data) {
-          importedTokens = JSON.parse(data);
+          const parsed = JSON.parse(data);
+          importedTokens = Array.isArray(parsed) ? parsed : [];
         } else {
           const legacy = localStorage.getItem("importedTokens");
           if (legacy) {
-            const legacyTokens = JSON.parse(legacy);
-            const chainTokens = legacyTokens.filter((t: Token) => t.chainId === chainId);
-            localStorage.setItem(key, JSON.stringify(chainTokens));
-            importedTokens = chainTokens;
+            const parsedLegacy = JSON.parse(legacy);
+            const legacyTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
+            localStorage.setItem(key, JSON.stringify(legacyTokens));
+            importedTokens = legacyTokens;
           }
         }
       } catch { importedTokens = []; }
-      const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
+      const chainImportedTokens = Array.isArray(importedTokens) ? importedTokens.filter((t: Token) => t.chainId === chainId) : [];
       const processed = chainTokens.map((token) => ({
         ...token,
         logoURI: token.logoURI || "/img/logos/unknown-token.png",
@@ -272,6 +273,11 @@ export function RemoveLiquidityV2() {
       loadPositions();
     }
   }, [isConnected, address, loadPositions]);
+
+  useEffect(() => {
+    importedPositionsRef.current = [];
+    hasAutoSelected.current = false;
+  }, [address, chainId]);
 
   const handleImportPool = async () => {
     if (!importTokenA || !importTokenB || !contracts || !chainId) return;

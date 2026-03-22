@@ -61,11 +61,13 @@ export async function getV2Quote(
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
     const DECIMALS_SCALE = 10n ** BigInt(fromToken.decimals);
-    const MIN = 10_000_000_000n;
-    const MAX = 10_000_000_000_000_000n;
+    const MIN_TOKENS = 10_000n;
+    const MAX_TOKENS = 10_000_000_000_000_000n;
+    const MIN = MIN_TOKENS * DECIMALS_SCALE;
+    const MAX = MAX_TOKENS * DECIMALS_SCALE;
     const testIn = amountIn > 0n
       ? (() => {
-          const probeCandidate = (amountIn * DECIMALS_SCALE) / 1000n;
+          const probeCandidate = amountIn / 1000n;
           const bounded = probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
           return bounded;
         })()
@@ -102,7 +104,7 @@ export async function getV2Quote(
             } catch { /* probe failed — impact unavailable */ }
             return { outputAmount, path: hopPath, priceImpact };
           })()
-        : Promise.reject(),
+        : Promise.resolve(null),
     ]);
 
     const direct = directResult.status === "fulfilled" ? directResult.value : null;
@@ -184,6 +186,7 @@ export async function getV3Quote(
     const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
 
     const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
+    const DECIMALS_SCALE_OUT = 10n ** BigInt(toToken.decimals);
     const MIN = 10_000_000_000n;
     const MAX = 10_000_000_000_000_000n;
     const testIn = amountIn > 0n
@@ -195,9 +198,13 @@ export async function getV3Quote(
 
     const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number => {
       if (spotOut === 0n) return Number.NaN;
-      const num = spotOut * amountIn - outputAmount * testIn;
+      const scaledSpotOut = spotOut * DECIMALS_SCALE_OUT;
+      const scaledOutput = outputAmount * DECIMALS_SCALE_OUT;
+      const scaledAmountIn = amountIn * DECIMALS_SCALE_IN;
+      const scaledTestIn = testIn * DECIMALS_SCALE_IN;
+      const num = scaledSpotOut * scaledAmountIn - scaledOutput * scaledTestIn;
       if (num <= 0n) return 0;
-      return Number((num * 10000n) / (spotOut * amountIn)) / 100;
+      return Number((num * 10000n) / (scaledSpotOut * scaledAmountIn)) / 100;
     };
 
     // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────

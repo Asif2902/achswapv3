@@ -122,18 +122,19 @@ export function AddLiquidityV2() {
       try {
         const data = localStorage.getItem(key);
         if (data) {
-          importedTokens = JSON.parse(data);
+          const parsed = JSON.parse(data);
+          importedTokens = Array.isArray(parsed) ? parsed : [];
         } else {
           const legacy = localStorage.getItem('importedTokens');
           if (legacy) {
-            const legacyTokens = JSON.parse(legacy);
-            const chainTokens = legacyTokens.filter((t: Token) => t.chainId === chainId);
-            localStorage.setItem(key, JSON.stringify(chainTokens));
-            importedTokens = chainTokens;
+            const parsedLegacy = JSON.parse(legacy);
+            const legacyTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
+            localStorage.setItem(key, JSON.stringify(legacyTokens));
+            importedTokens = legacyTokens;
           }
         }
       } catch { importedTokens = []; }
-      const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
+      const chainImportedTokens = Array.isArray(importedTokens) ? importedTokens.filter((t: Token) => t.chainId === chainId) : [];
       setTokens([
         ...chainTokens.map(t => ({ ...t, logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : `/img/logos/unknown-token.png` })),
         ...chainImportedTokens.map((t: Token) => ({ ...t, logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : `/img/logos/unknown-token.png` }))

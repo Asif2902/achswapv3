@@ -6,6 +6,7 @@ import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
+import { createAlchemyProvider } from "@/lib/config";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
@@ -167,14 +168,15 @@ export function AddLiquidityV3Advanced() {
     try {
       const data = localStorage.getItem(key);
       if (data) {
-        importedTokens = JSON.parse(data);
+        const parsed = JSON.parse(data);
+        importedTokens = Array.isArray(parsed) ? parsed : [];
       } else {
         const legacy = localStorage.getItem("importedTokens");
         if (legacy) {
-          const legacyTokens = JSON.parse(legacy);
-          const chainTokens = legacyTokens.filter((t: Token) => t.chainId === chainId);
-          localStorage.setItem(key, JSON.stringify(chainTokens));
-          importedTokens = chainTokens;
+          const parsedLegacy = JSON.parse(legacy);
+          const legacyTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
+          localStorage.setItem(key, JSON.stringify(legacyTokens));
+          importedTokens = legacyTokens;
         }
       }
     } catch {
@@ -189,6 +191,26 @@ export function AddLiquidityV3Advanced() {
   }, [chainId]);
 
   useEffect(() => {
+    setTokenA(null);
+    setTokenB(null);
+    setAmountA("");
+    setAmountB("");
+    setMinPrice("");
+    setMaxPrice("");
+    setMinTick("");
+    setMaxTick("");
+    setPoolExists(false);
+    setCurrentPrice(null);
+    setCurrentSqrtPriceX96(null);
+    setCurrentTick(null);
+    setPoolLiquidity(0n);
+    setPoolToken0Reserve(null);
+    setPoolToken1Reserve(null);
+    setPoolAddress(null);
+    setAutoCalcAmounts(null);
+  }, [chainId]);
+
+  useEffect(() => {
     if (tokens.length === 0) return;
     if (!tokenA) { const t = tokens.find(t => t.symbol === "USDC"); if (t) setTokenA(t); }
     if (!tokenB) { const t = tokens.find(t => t.symbol === "ACHS"); if (t) setTokenB(t); }
@@ -199,7 +221,8 @@ export function AddLiquidityV3Advanced() {
       if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
       const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is in your list` }); return exists; }
-      const provider = new BrowserProvider({ request: async ({ method, params }: any) => { const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }); const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result; } });
+      if (!chainId) throw new Error("Chain ID not available");
+      const provider = createAlchemyProvider(chainId);
       const META_ABI = ["function name() view returns (string)", "function symbol() view returns (string)", "function decimals() view returns (uint8)"];
       const contract = new Contract(addr, META_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), 10000))]) as [string, string, bigint];
