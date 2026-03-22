@@ -459,7 +459,7 @@ function TokenRow({
 
   const startHold = () => {
     if (!onDelete || token.verified) return;
-    holdTimer.current = setTimeout(() => setHolding(true), 300);
+    holdTimer.current = setTimeout(() => setHolding(true), 650);
   };
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -616,7 +616,7 @@ function CommunityTokenRow({
 
   const startHold = () => {
     if (!onDelete) return;
-    holdTimer.current = setTimeout(() => setHolding(true), 300);
+    holdTimer.current = setTimeout(() => setHolding(true), 650);
   };
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
