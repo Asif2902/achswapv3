@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef } from "react";
-import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users } from "lucide-react";
+import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2 } from "lucide-react";
 import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import type { Token } from "@shared/schema";
@@ -28,6 +28,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     try { return new Set(JSON.parse(localStorage.getItem("hiddenCommunityTokens") || "[]")); }
     catch { return new Set(); }
   });
+  const [resetHoldingKey, setResetHoldingKey] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
   const chainId = useChainId();
@@ -50,6 +51,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       }
     } else {
       setVisible(false);
+      setResetHoldingKey(k => k + 1);
       const t = setTimeout(() => {
         setMounted(false);
         setSearchQuery("");
@@ -334,6 +336,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     index={i}
                     onClick={() => handleSelect(token)}
                     onDelete={onDelete}
+                    resetHolding={resetHoldingKey}
                   />
                 ))}
               </>
@@ -363,6 +366,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                       index={i}
                       onClick={() => handleSelect(token)}
                       onDelete={handleDeleteCommunity}
+                      resetHolding={resetHoldingKey}
                     />
                   ))
                 )}
@@ -411,12 +415,14 @@ function TokenRow({
   index,
   onClick,
   onDelete,
+  resetHolding,
 }: {
   token: Token;
   userAddress?: string;
   index: number;
   onClick: () => void;
   onDelete?: (address: string) => void;
+  resetHolding?: number;
 }) {
   const isNativeToken = token.address === "0x0000000000000000000000000000000000000000";
   const { data: balance } = useBalance({
@@ -443,9 +449,13 @@ function TokenRow({
   const [holding, setHolding] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => {
+    if (resetHolding) setHolding(false);
+  }, [resetHolding]);
+
   const startHold = () => {
     if (!onDelete || token.verified) return;
-    holdTimer.current = setTimeout(() => setHolding(true), 500);
+    holdTimer.current = setTimeout(() => setHolding(true), 300);
   };
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -453,17 +463,47 @@ function TokenRow({
   };
 
   return (
-    <div className="relative flex items-center">
+    <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
+      {/* Delete slide-in from left */}
+      {onDelete && !token.verified && (
+        <div
+          className="absolute inset-y-0 left-0 flex items-center pl-2"
+          style={{
+            width: 52,
+            transform: holding ? "translateX(0)" : "translateX(-100%)",
+            transition: "transform 0.22s cubic-bezier(0.32,0.72,0,1)",
+            zIndex: 2,
+            background: "rgba(239,68,68,0.12)",
+          }}
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(token.address); setHolding(false); }}
+            className="w-9 h-9 rounded-lg flex items-center justify-center"
+            style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
+            title="Remove token"
+          >
+            <Trash2 style={{ width: 15, height: 15, color: "#f87171" }} />
+          </button>
+        </div>
+      )}
+      {/* Main row — slides right when holding */}
       <button
         data-testid={`button-select-token-${token.symbol}`}
         onClick={holding ? endHold : onClick}
         onPointerDown={startHold}
         onPointerUp={endHold}
         onPointerLeave={endHold}
-        className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all text-left relative active:scale-[0.98]"
+        className="w-full flex items-center justify-between px-3 py-2.5 text-left relative active:scale-[0.98]"
         style={{
           background: pressed ? "rgba(255,255,255,0.08)" : "transparent",
           transition: "background 0.12s ease, transform 0.1s ease",
+          transform: holding ? "translateX(52px)" : "translateX(0)",
+          transitionProperty: "background, transform",
+          transitionDuration: holding ? "0s, 0.22s" : "0.12s, 0.18s",
+          transitionTimingFunction: holding ? "linear" : "ease",
+          borderRadius: 14,
+          position: "relative",
+          zIndex: 1,
         }}
       >
         <div
@@ -517,16 +557,6 @@ function TokenRow({
           </div>
         )}
       </button>
-      {holding && onDelete && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onDelete(token.address); }}
-          className="absolute right-2 flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-all hover:scale-110"
-          style={{ background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.35)" }}
-          title="Remove token"
-        >
-          <X style={{ width: 14, height: 14, color: "#f87171" }} />
-        </button>
-      )}
     </div>
   );
 }
@@ -539,12 +569,14 @@ function CommunityTokenRow({
   index,
   onClick,
   onDelete,
+  resetHolding,
 }: {
   token: CommunityToken;
   userAddress?: string;
   index: number;
   onClick: () => void;
   onDelete?: (address: string) => void;
+  resetHolding?: number;
 }) {
   const { data: balance } = useBalance({
     address: userAddress as `0x${string}` | undefined,
@@ -565,9 +597,13 @@ function CommunityTokenRow({
   const [holding, setHolding] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => {
+    if (resetHolding) setHolding(false);
+  }, [resetHolding]);
+
   const startHold = () => {
     if (!onDelete) return;
-    holdTimer.current = setTimeout(() => setHolding(true), 500);
+    holdTimer.current = setTimeout(() => setHolding(true), 300);
   };
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -575,16 +611,44 @@ function CommunityTokenRow({
   };
 
   return (
-    <div className="relative flex items-center">
+    <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
+      {onDelete && (
+        <div
+          className="absolute inset-y-0 left-0 flex items-center pl-2"
+          style={{
+            width: 52,
+            transform: holding ? "translateX(0)" : "translateX(-100%)",
+            transition: "transform 0.22s cubic-bezier(0.32,0.72,0,1)",
+            zIndex: 2,
+            background: "rgba(139,92,246,0.1)",
+          }}
+        >
+          <button
+            onClick={(e) => { e.stopPropagation(); onDelete(token.address); setHolding(false); }}
+            className="w-9 h-9 rounded-lg flex items-center justify-center"
+            style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
+            title="Remove token"
+          >
+            <Trash2 style={{ width: 15, height: 15, color: "#f87171" }} />
+          </button>
+        </div>
+      )}
       <button
         onClick={holding ? endHold : onClick}
         onPointerDown={startHold}
         onPointerUp={endHold}
         onPointerLeave={endHold}
-        className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all text-left relative active:scale-[0.98]"
+        className="w-full flex items-center justify-between px-3 py-2.5 text-left relative active:scale-[0.98]"
         style={{
           background: pressed ? "rgba(139,92,246,0.1)" : "transparent",
           transition: "background 0.12s ease, transform 0.1s ease",
+          transform: holding ? "translateX(52px)" : "translateX(0)",
+          transitionProperty: "background, transform",
+          transitionDuration: holding ? "0s, 0.22s" : "0.12s, 0.18s",
+          transitionTimingFunction: holding ? "linear" : "ease",
+          borderRadius: 14,
+          position: "relative",
+          zIndex: 1,
         }}
       >
         <div
@@ -641,16 +705,6 @@ function CommunityTokenRow({
           </div>
         )}
       </button>
-      {holding && onDelete && (
-        <button
-          onClick={(e) => { e.stopPropagation(); onDelete(token.address); }}
-          className="absolute right-2 flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-all hover:scale-110"
-          style={{ background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.35)" }}
-          title="Remove token"
-        >
-          <X style={{ width: 14, height: 14, color: "#f87171" }} />
-        </button>
-      )}
     </div>
   );
 }
