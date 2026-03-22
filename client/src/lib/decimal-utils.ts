@@ -4,6 +4,14 @@ const DISPLAY_DECIMALS = 4;
 
 function truncateDecimals(value: string, decimals: number): string {
   const displayDecimals = Math.min(DISPLAY_DECIMALS, decimals);
+  const num = parseFloat(value);
+  if (num > 0) {
+    const threshold = Math.pow(10, -displayDecimals);
+    if (num < threshold) {
+      const zeros = "0".repeat(Math.max(0, displayDecimals - 1));
+      return `<0.${zeros}1`;
+    }
+  }
   const parts = value.split('.');
   if (parts.length === 1) return parts[0];
   const integer = parts[0];
@@ -38,7 +46,7 @@ export function getMaxAmount(balanceWei: bigint, decimals: number, symbol: strin
     return num.toExponential(2);
   }
   
-  return truncateDecimals(formatted, DISPLAY_DECIMALS);
+  return truncateDecimals(formatted, decimals);
 }
 
 /**
@@ -59,7 +67,7 @@ export function formatAmount(value: string | number | bigint, decimals: number):
         if (num > 0 && num < 0.000001) {
           return num.toExponential(2);
         }
-        return truncateDecimals(formatted, DISPLAY_DECIMALS);
+        return truncateDecimals(formatted, decimals);
       }
       return "0";
     }
@@ -71,7 +79,7 @@ export function formatAmount(value: string | number | bigint, decimals: number):
       if (num > 0 && num < 0.000001) {
         return num.toExponential(2);
       }
-      return truncateDecimals(formatted, DISPLAY_DECIMALS);
+      return truncateDecimals(formatted, decimals);
     }
     return "0";
   } catch (error) {

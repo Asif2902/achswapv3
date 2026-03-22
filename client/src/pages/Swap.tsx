@@ -96,6 +96,7 @@ export default function Swap() {
   const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const maxAmountWeiRef = useRef<bigint | null>(null);
   const maxJustClickedRef = useRef<boolean>(false);
+  const quoteRefreshNonceRef = useRef<number>(0);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -121,6 +122,18 @@ export default function Swap() {
 
   const getGaslessTokenAddress = (tokenAddress: string) => {
     return isNativeToken(tokenAddress) ? NATIVE_TOKEN : tokenAddress;
+  };
+
+  const computeAndSetMaxSelection = (balance: { value: bigint; decimals: number }, token: Token) => {
+    maxJustClickedRef.current = true;
+    quoteRefreshNonceRef.current += 1;
+    const displayAmount = getMaxAmount(balance.value, balance.decimals, token.symbol);
+    let maxWei = balance.value;
+    if (token.symbol === "USDC") {
+      maxWei = (balance.value * 99n) / 100n;
+    }
+    maxAmountWeiRef.current = maxWei;
+    return displayAmount;
   };
 
   const checkPermit2 = async () => {
@@ -275,13 +288,13 @@ export default function Swap() {
         setToAmount(""); setPriceImpact(null); setRouteHops([]); return;
       }
       if (signal.aborted) return;
-      const cached = getCachedQuote(fromToken.address, toToken.address, fromAmount, v2Enabled, v3Enabled);
+      const cached = getCachedQuote(fromToken.address, toToken.address, fromAmount + (quoteRefreshNonceRef.current ? `#${quoteRefreshNonceRef.current}` : ""), v2Enabled, v3Enabled);
       let result: SmartRoutingResult | null;
       if (cached) { result = cached; }
       else {
         result = await getSmartRouteQuote(provider, contracts.v2.router, contracts.v3.quoter02, fromToken, toToken, amountIn, wrappedTokenData.address, v2Enabled, v3Enabled);
         if (signal.aborted) return;
-        if (result) setCachedQuote(fromToken.address, toToken.address, fromAmount, v2Enabled, v3Enabled, result);
+        if (result) setCachedQuote(fromToken.address, toToken.address, fromAmount + (quoteRefreshNonceRef.current ? `#${quoteRefreshNonceRef.current}` : ""), v2Enabled, v3Enabled, result);
       }
       if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); return; }
       setSmartRoutingResult(result);
@@ -906,14 +919,7 @@ export default function Swap() {
                       Balance:{" "}
                       <span className="sw-bal-val" onClick={() => {
                         if (!fromBalance) return;
-                        maxJustClickedRef.current = true;
-                        const displayAmount = getMaxAmount(fromBalance.value, fromBalance.decimals, fromToken.symbol);
-                        setFromAmount(displayAmount);
-                        let maxWei = fromBalance.value;
-                        if (fromToken.symbol === "USDC") {
-                          maxWei = (fromBalance.value * 99n) / 100n;
-                        }
-                        maxAmountWeiRef.current = maxWei;
+                        setFromAmount(computeAndSetMaxSelection(fromBalance, fromToken));
                       }}>
                         {fromBalFmt}
                       </span>
@@ -938,15 +944,7 @@ export default function Swap() {
                     </button>
                     {isConnected && fromBalance && fromToken && (
                       <button data-testid="button-max-from" className="sw-max-btn" onClick={() => {
-                        maxJustClickedRef.current = true;
-                        const displayAmount = getMaxAmount(fromBalance.value, fromBalance.decimals, fromToken.symbol);
-                        setFromAmount(displayAmount);
-                        // Store full precision balance for transaction
-                        let maxWei = fromBalance.value;
-                        if (fromToken.symbol === "USDC") {
-                          maxWei = (fromBalance.value * 99n) / 100n; // 1% gas buffer
-                        }
-                        maxAmountWeiRef.current = maxWei;
+                        setFromAmount(computeAndSetMaxSelection(fromBalance, fromToken));
                       }}>MAX</button>
                     )}
                   </div>
