@@ -448,9 +448,13 @@ function TokenRow({
   const [pressed, setPressed] = useState(false);
   const [holding, setHolding] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (resetHolding) setHolding(false);
+    if (resetHolding) {
+      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+      setHolding(false);
+    }
   }, [resetHolding]);
 
   const startHold = () => {
@@ -459,7 +463,12 @@ function TokenRow({
   };
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    setHolding(false);
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    if (holding) {
+      hideTimer.current = setTimeout(() => setHolding(false), 5000);
+    } else {
+      setHolding(false);
+    }
   };
 
   return (
@@ -477,7 +486,7 @@ function TokenRow({
           }}
         >
           <button
-            onClick={(e) => { e.stopPropagation(); onDelete(token.address); setHolding(false); }}
+            onClick={(e) => { e.stopPropagation(); if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; } onDelete(token.address); setHolding(false); }}
             className="w-9 h-9 rounded-lg flex items-center justify-center"
             style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
             title="Remove token"
@@ -596,9 +605,13 @@ function CommunityTokenRow({
   const [pressed, setPressed] = useState(false);
   const [holding, setHolding] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (resetHolding) setHolding(false);
+    if (resetHolding) {
+      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+      setHolding(false);
+    }
   }, [resetHolding]);
 
   const startHold = () => {
@@ -607,7 +620,12 @@ function CommunityTokenRow({
   };
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    setHolding(false);
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    if (holding) {
+      hideTimer.current = setTimeout(() => setHolding(false), 5000);
+    } else {
+      setHolding(false);
+    }
   };
 
   return (
@@ -624,7 +642,7 @@ function CommunityTokenRow({
           }}
         >
           <button
-            onClick={(e) => { e.stopPropagation(); onDelete(token.address); setHolding(false); }}
+            onClick={(e) => { e.stopPropagation(); if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; } onDelete(token.address); setHolding(false); }}
             className="w-9 h-9 rounded-lg flex items-center justify-center"
             style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
             title="Remove token"
