@@ -226,11 +226,14 @@ export function AddLiquidityV3Advanced() {
       const META_ABI = ["function name() view returns (string)", "function symbol() view returns (string)", "function decimals() view returns (uint8)"];
       const contract = new Contract(addr, META_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), 10000))]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
       const key = `importedTokens:${chainId}`;
       let imported: Token[] = [];
-      try { const data = localStorage.getItem(key); imported = data ? JSON.parse(data) : []; } catch { imported = []; }
+      try { 
+        const data = localStorage.getItem(key);
+        const parsed = data ? JSON.parse(data) : [];
+        imported = Array.isArray(parsed) ? parsed : [];
+      } catch { imported = []; }
       if (!imported.find(t => t.address.toLowerCase() === addr.toLowerCase())) { imported.push(newToken); localStorage.setItem(key, JSON.stringify(imported)); }
       setTokens(prev => [...prev, newToken]);
       toast({ title: "Token imported", description: `${symbol} added` });

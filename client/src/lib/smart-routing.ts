@@ -187,24 +187,25 @@ export async function getV3Quote(
 
     const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
     const DECIMALS_SCALE_OUT = 10n ** BigInt(toToken.decimals);
-    const MIN = 10_000_000_000n;
-    const MAX = 10_000_000_000_000_000n;
+    const MIN_TOKENS = 10_000n;
+    const MAX_TOKENS = 10_000_000_000_000_000n;
+    const MIN = MIN_TOKENS * DECIMALS_SCALE_IN;
+    const MAX = MAX_TOKENS * DECIMALS_SCALE_IN;
     const testIn = amountIn > 0n
       ? (() => {
-          const probeCandidate = (amountIn * DECIMALS_SCALE_IN) / 1000n;
+          const probeCandidate = amountIn / 1000n;
           return probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
         })()
       : MIN;
 
     const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number => {
       if (spotOut === 0n) return Number.NaN;
-      const scaledSpotOut = spotOut * DECIMALS_SCALE_OUT;
-      const scaledOutput = outputAmount * DECIMALS_SCALE_OUT;
-      const scaledAmountIn = amountIn * DECIMALS_SCALE_IN;
-      const scaledTestIn = testIn * DECIMALS_SCALE_IN;
-      const num = scaledSpotOut * scaledAmountIn - scaledOutput * scaledTestIn;
+      // Scale output amounts to same decimal base as input
+      const scaledOutputAmount = outputAmount * DECIMALS_SCALE_IN / DECIMALS_SCALE_OUT;
+      const scaledSpotOut = spotOut * DECIMALS_SCALE_IN / DECIMALS_SCALE_OUT;
+      const num = scaledSpotOut * amountIn - scaledOutputAmount * testIn;
       if (num <= 0n) return 0;
-      return Number((num * 10000n) / (scaledSpotOut * scaledAmountIn)) / 100;
+      return Number((num * 10000n) / (scaledSpotOut * amountIn)) / 100;
     };
 
     // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────

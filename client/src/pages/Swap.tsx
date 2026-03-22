@@ -209,14 +209,15 @@ export default function Swap() {
     try {
       const data = localStorage.getItem(key);
       if (data) {
-        imported = JSON.parse(data);
+        const parsed = JSON.parse(data);
+        imported = Array.isArray(parsed) ? parsed : [];
       } else {
         const legacy = localStorage.getItem("importedTokens");
         if (legacy) {
-          const legacyTokens = JSON.parse(legacy);
-          const chainTokens = legacyTokens.filter((t: Token) => t.chainId === chainId);
-          localStorage.setItem(key, JSON.stringify(chainTokens));
-          imported = chainTokens;
+          const parsedLegacy = JSON.parse(legacy);
+          const legacyTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
+          localStorage.setItem(key, JSON.stringify(legacyTokens));
+          imported = legacyTokens;
         }
       }
     } catch { imported = []; }
@@ -255,7 +256,9 @@ export default function Swap() {
       if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
       const key = `importedTokens:${chainId}`;
-      const imported: Token[] = JSON.parse(localStorage.getItem(key) || "[]");
+      const raw = localStorage.getItem(key);
+      const parsed = raw ? JSON.parse(raw) : [];
+      const imported: Token[] = Array.isArray(parsed) ? parsed : [];
       if (!imported.find(t => t.address.toLowerCase() === addr.toLowerCase() && t.chainId === chainId)) { imported.push(newToken); localStorage.setItem(key, JSON.stringify(imported)); }
       setTokens(prev => [...prev, newToken]);
       toast({ title: "Token imported", description: `${symbol} added to your list` });
@@ -571,7 +574,7 @@ export default function Swap() {
           throw new Error("Invalid recipient address format");
         }
       }
-      const executeWithRetry = async <T,>(fn: () => Promise<T>, maxRetries = 0): Promise<T> => {
+      const executeWithRetry = async <T,>(fn: () => Promise<T>, maxRetries = 1): Promise<T> => {
         let last: any;
         for (let i = 0; i <= maxRetries; i++) {
           try { return await fn(); } catch (e: any) { last = e; if (i < maxRetries) await new Promise(r => setTimeout(r, 500 * (i + 1))); }
