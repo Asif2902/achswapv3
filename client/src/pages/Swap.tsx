@@ -251,9 +251,7 @@ export default function Swap() {
     }
     maxJustClickedRef.current = false;
     setImpactAcknowledged(false);
-    setFromImgError(false);
-    setToImgError(false);
-    
+
     if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
     if (abortControllerRef.current) abortControllerRef.current.abort();
     debounceTimeoutRef.current = setTimeout(() => {
@@ -266,6 +264,11 @@ export default function Swap() {
       if (abortControllerRef.current) abortControllerRef.current.abort();
     };
   }, [fromAmount, fromToken, toToken, tokens, contracts, chainId, v2Enabled, v3Enabled]);
+
+  useEffect(() => {
+    setFromImgError(false);
+    setToImgError(false);
+  }, [fromToken?.address, toToken?.address]);
 
   const fetchQuote = async (signal: AbortSignal) => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) {
@@ -316,7 +319,11 @@ export default function Swap() {
       }
       if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); return; }
       setSmartRoutingResult(result);
-      setToAmount(formatAmount(result.bestQuote.outputAmount, toToken.decimals));
+      const displayDecimals = Math.min(4, toToken.decimals);
+      const threshold = 10 ** -displayDecimals;
+      const rawOutput = Number(result.bestQuote.outputAmount) / 10 ** toToken.decimals;
+      const formatted = formatAmount(result.bestQuote.outputAmount, toToken.decimals);
+      setToAmount(rawOutput > 0 && rawOutput < threshold ? `<${formatted}` : formatted);
       setPriceImpact(result.bestQuote.priceImpact);
       setRouteHops(result.bestQuote.route);
     } catch { if (signal.aborted) return; setToAmount(""); setPriceImpact(null); setRouteHops([]); setSmartRoutingResult(null); }
@@ -732,6 +739,7 @@ export default function Swap() {
   // ── Derived ────────────────────────────────────────────────────────────────
   const hasTradeInfo = !!(fromToken && toToken && fromAmount && toAmount && parseFloat(fromAmount) > 0 && parseFloat(toAmount) > 0);
   const impactColor = priceImpact === null ? "" : priceImpact > 15 ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
+  const toAmountNum = parseFloat(toAmount.replace("<", ""));
   const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping);
   const protocolLabel = smartRoutingResult?.bestQuote?.protocol;
 
@@ -1027,7 +1035,7 @@ export default function Swap() {
                   <div className="sw-details-trigger" onClick={() => setTradeDetailsOpen(o => !o)}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ fontSize: 12, fontWeight: 700, color: "rgba(255,255,255,0.45)" }}>
-                        1 {fromToken!.symbol} = {(parseFloat(toAmount) / parseFloat(fromAmount)).toFixed(6)} {toToken!.symbol}
+                        1 {fromToken!.symbol} = {(toAmountNum / parseFloat(fromAmount)).toFixed(6)} {toToken!.symbol}
                       </span>
                       {protocolLabel && (
                         <span className={`sw-proto ${protocolLabel === "V3" ? "sw-proto-v3" : "sw-proto-v2"}`}>{protocolLabel}</span>
@@ -1040,7 +1048,7 @@ export default function Swap() {
                     <div className="sw-details-panel">
                       <div className="sw-detail-row">
                         <span className="sw-detail-label">Exchange Rate</span>
-                        <span className="sw-detail-val">1 {fromToken!.symbol} = {(parseFloat(toAmount) / parseFloat(fromAmount)).toFixed(6)} {toToken!.symbol}</span>
+                        <span className="sw-detail-val">1 {fromToken!.symbol} = {(toAmountNum / parseFloat(fromAmount)).toFixed(6)} {toToken!.symbol}</span>
                       </div>
                       {priceImpact !== null && (
                         <div className="sw-detail-row">

@@ -24,14 +24,20 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [mounted, setMounted] = useState(false);
   const [communityTokens, setCommunityTokens] = useState<CommunityToken[]>([]);
   const [loadingCommunity, setLoadingCommunity] = useState(false);
-  const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(() => {
-    try { return new Set(JSON.parse(localStorage.getItem("hiddenCommunityTokens") || "[]")); }
-    catch { return new Set(); }
-  });
+  const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(new Set());
   const [resetHoldingKey, setResetHoldingKey] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
   const chainId = useChainId();
+
+  const hiddenKey = `hiddenCommunityTokens:${chainId ?? ""}`;
+
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(hiddenKey) || "[]");
+      setHiddenCommunity(new Set(stored));
+    } catch { setHiddenCommunity(new Set()); }
+  }, [chainId]);
 
   // Animate in/out
   useEffect(() => {
@@ -87,7 +93,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     setHiddenCommunity(prev => {
       const next = new Set(prev);
       next.add(lower);
-      localStorage.setItem("hiddenCommunityTokens", JSON.stringify([...next]));
+      localStorage.setItem(hiddenKey, JSON.stringify([...next]));
       return next;
     });
   };
@@ -452,9 +458,14 @@ function TokenRow({
 
   useEffect(() => {
     if (resetHolding) {
+      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
       if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
       setHolding(false);
     }
+    return () => {
+      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
+      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    };
   }, [resetHolding]);
 
   const startHold = () => {
@@ -474,7 +485,7 @@ function TokenRow({
   return (
     <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
       {/* Delete slide-in from left */}
-      {onDelete && !token.verified && (
+      {onDelete && !token.verified && holding && (
         <div
           className="absolute inset-y-0 left-0 flex items-center pl-2"
           style={{
@@ -609,9 +620,14 @@ function CommunityTokenRow({
 
   useEffect(() => {
     if (resetHolding) {
+      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
       if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
       setHolding(false);
     }
+    return () => {
+      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
+      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    };
   }, [resetHolding]);
 
   const startHold = () => {
@@ -630,7 +646,7 @@ function CommunityTokenRow({
 
   return (
     <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
-      {onDelete && (
+      {onDelete && holding && (
         <div
           className="absolute inset-y-0 left-0 flex items-center pl-2"
           style={{

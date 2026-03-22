@@ -60,21 +60,31 @@ export async function getV2Quote(
     const directPath = buildV2Path(fromToken, toToken, wrappedTokenAddress);
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
-    const testIn = 10_000_000_000n; // 1e10
+    const testIn = amountIn > 0n
+      ? (() => {
+          const scaled = amountIn / 1000n;
+          const MIN = 10_000_000_000n;   // 1e10 — minimum for quoter accuracy
+          const MAX = 10_000_000_000_000_000n; // 1e16 — cap to avoid overflow
+          return scaled > 0n
+            ? scaled < MIN ? MIN : scaled > MAX ? MAX : scaled
+            : MIN;
+        })()
+      : 10_000_000_000n;
 
-    // Try both paths in parallel
     const [directResult, hopResult] = await Promise.allSettled([
       (async () => {
         const amounts = await router.getAmountsOut(amountIn, directPath);
         const outputAmount = amounts[amounts.length - 1];
         if (outputAmount === 0n) throw new Error("zero output");
-        const spotAmounts = await router.getAmountsOut(testIn, directPath);
-        const spotOut = spotAmounts[spotAmounts.length - 1];
         let priceImpact = 0;
-        if (spotOut > 0n) {
-          const num = spotOut * amountIn - outputAmount * testIn;
-          if (num > 0n) priceImpact = Number((num * 10000n) / (spotOut * amountIn)) / 100;
-        }
+        try {
+          const spotAmounts = await router.getAmountsOut(testIn, directPath);
+          const spotOut = spotAmounts[spotAmounts.length - 1];
+          if (spotOut > 0n) {
+            const num = spotOut * amountIn - outputAmount * testIn;
+            if (num > 0n) priceImpact = Number((num * 10000n) / (spotOut * amountIn)) / 100;
+          }
+        } catch { /* probe failed — priceImpact stays 0, quote still valid */ }
         return { outputAmount, path: directPath, priceImpact };
       })(),
       hopPath.length !== directPath.length
@@ -82,13 +92,15 @@ export async function getV2Quote(
             const amounts = await router.getAmountsOut(amountIn, hopPath);
             const outputAmount = amounts[amounts.length - 1];
             if (outputAmount === 0n) throw new Error("zero output");
-            const spotAmounts = await router.getAmountsOut(testIn, hopPath);
-            const spotOut = spotAmounts[spotAmounts.length - 1];
             let priceImpact = 0;
-            if (spotOut > 0n) {
-              const num = spotOut * amountIn - outputAmount * testIn;
-              if (num > 0n) priceImpact = Number((num * 10000n) / (spotOut * amountIn)) / 100;
-            }
+            try {
+              const spotAmounts = await router.getAmountsOut(testIn, hopPath);
+              const spotOut = spotAmounts[spotAmounts.length - 1];
+              if (spotOut > 0n) {
+                const num = spotOut * amountIn - outputAmount * testIn;
+                if (num > 0n) priceImpact = Number((num * 10000n) / (spotOut * amountIn)) / 100;
+              }
+            } catch { /* probe failed — priceImpact stays 0, quote still valid */ }
             return { outputAmount, path: hopPath, priceImpact };
           })()
         : Promise.reject(),
@@ -172,38 +184,48 @@ export async function getV3Quote(
     const fromERC20 = getERC20Address(fromToken.address, wrappedTokenAddress);
     const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
 
-    const testIn = 10_000_000_000n; // 1e10 — used for price impact
+    const testIn = amountIn > 0n
+      ? (() => {
+          const scaled = amountIn / 1000n;
+          const MIN = 10_000_000_000n;
+          const MAX = 10_000_000_000_000_000n;
+          return scaled > 0n
+            ? scaled < MIN ? MIN : scaled > MAX ? MAX : scaled
+            : MIN;
+        })()
+      : 10_000_000_000n;
+
+    const calcPriceImpact = (spotOut: bigint, outputAmount: bigint): number => {
+      if (spotOut === 0n) return 0;
+      const num = spotOut * amountIn - outputAmount * testIn;
+      if (num <= 0n) return 0;
+      return Number((num * 10000n) / (spotOut * amountIn)) / 100;
+    };
 
     // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────
     const singleHopPromises = feeTiers.map(async (fee) => {
       try {
-        const [actualResult, spotResult] = await Promise.all([
-          quoter.quoteExactInputSingle.staticCall({
-            tokenIn: fromERC20,
-            tokenOut: toERC20,
-            amountIn,
-            fee,
-            sqrtPriceLimitX96: 0n,
-          }),
-          quoter.quoteExactInputSingle.staticCall({
+        const actualResult = await quoter.quoteExactInputSingle.staticCall({
+          tokenIn: fromERC20,
+          tokenOut: toERC20,
+          amountIn,
+          fee,
+          sqrtPriceLimitX96: 0n,
+        });
+        const outputAmount = actualResult[0];
+        const gasEstimate = actualResult[3];
+
+        let priceImpact = 0;
+        try {
+          const spotResult = await quoter.quoteExactInputSingle.staticCall({
             tokenIn: fromERC20,
             tokenOut: toERC20,
             amountIn: testIn,
             fee,
             sqrtPriceLimitX96: 0n,
-          }),
-        ]);
-        const outputAmount = actualResult[0];
-        const gasEstimate = actualResult[3];
-        const spotOut = spotResult[0];
-
-        let priceImpact = 0;
-        if (spotOut > 0n) {
-          const num = spotOut * amountIn - outputAmount * testIn;
-          if (num > 0n) {
-            priceImpact = Number((num * 10000n) / (spotOut * amountIn)) / 100;
-          }
-        }
+          });
+          priceImpact = calcPriceImpact(spotResult[0], outputAmount);
+        } catch { /* probe failed — priceImpact stays 0, quote still valid */ }
 
         return { fee, outputAmount, gasEstimate, priceImpact, isMultiHop: false };
       } catch {
@@ -216,21 +238,15 @@ export async function getV3Quote(
       feeTiers.map(async (fee2) => {
         try {
           const path = encodePath([fromERC20, wrappedTokenAddress, toERC20], [fee1, fee2]);
-          const [actualResult, spotResult] = await Promise.all([
-            quoter.quoteExactInput.staticCall(path, amountIn),
-            quoter.quoteExactInput.staticCall(path, testIn),
-          ]);
+          const actualResult = await quoter.quoteExactInput.staticCall(path, amountIn);
           const outputAmount = actualResult[0];
           const gasEstimate = actualResult[3];
-          const spotOut = spotResult[0];
 
           let priceImpact = 0;
-          if (spotOut > 0n) {
-            const num = spotOut * amountIn - outputAmount * testIn;
-            if (num > 0n) {
-              priceImpact = Number((num * 10000n) / (spotOut * amountIn)) / 100;
-            }
-          }
+          try {
+            const spotResult = await quoter.quoteExactInput.staticCall(path, testIn);
+            priceImpact = calcPriceImpact(spotResult[0], outputAmount);
+          } catch { /* probe failed — priceImpact stays 0, quote still valid */ }
 
           return { fee1, fee2, path, outputAmount, gasEstimate, priceImpact };
         } catch {
