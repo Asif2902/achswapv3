@@ -12,10 +12,11 @@ interface TokenSelectorProps {
   onSelect: (token: Token) => void;
   tokens: Token[];
   onImport?: (address: string) => Promise<Token | null>;
+  onDelete?: (address: string) => void;
 }
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: TokenSelectorProps) {
+export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete }: TokenSelectorProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState("");
@@ -23,6 +24,10 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
   const [mounted, setMounted] = useState(false);
   const [communityTokens, setCommunityTokens] = useState<CommunityToken[]>([]);
   const [loadingCommunity, setLoadingCommunity] = useState(false);
+  const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem("hiddenCommunityTokens") || "[]")); }
+    catch { return new Set(); }
+  });
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
   const chainId = useChainId();
@@ -71,8 +76,19 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
     const q = searchQuery.toLowerCase().trim();
     return communityTokens
       .filter(t => !regularAddresses.has(t.address.toLowerCase()))
+      .filter(t => !hiddenCommunity.has(t.address.toLowerCase()))
       .filter(t => !q || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q) || t.address.toLowerCase().includes(q));
-  }, [communityTokens, regularAddresses, searchQuery]);
+  }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity]);
+
+  const handleDeleteCommunity = (address: string) => {
+    const lower = address.toLowerCase();
+    setHiddenCommunity(prev => {
+      const next = new Set(prev);
+      next.add(lower);
+      localStorage.setItem("hiddenCommunityTokens", JSON.stringify([...next]));
+      return next;
+    });
+  };
 
   const { filteredVerified, filteredImported } = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
@@ -317,6 +333,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    onDelete={onDelete}
                   />
                 ))}
               </>
@@ -345,6 +362,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport }: Tok
                       userAddress={userAddress}
                       index={i}
                       onClick={() => handleSelect(token)}
+                      onDelete={handleDeleteCommunity}
                     />
                   ))
                 )}
@@ -392,11 +410,13 @@ function TokenRow({
   userAddress,
   index,
   onClick,
+  onDelete,
 }: {
   token: Token;
   userAddress?: string;
   index: number;
   onClick: () => void;
+  onDelete?: (address: string) => void;
 }) {
   const isNativeToken = token.address === "0x0000000000000000000000000000000000000000";
   const { data: balance } = useBalance({
@@ -420,71 +440,94 @@ function TokenRow({
 
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
+  const [holding, setHolding] = useState(false);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const startHold = () => {
+    if (!onDelete || token.verified) return;
+    holdTimer.current = setTimeout(() => setHolding(true), 500);
+  };
+  const endHold = () => {
+    if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
+    setHolding(false);
+  };
 
   return (
-    <button
-      data-testid={`button-select-token-${token.symbol}`}
-      onClick={onClick}
-      onPointerDown={() => setPressed(true)}
-      onPointerUp={() => setPressed(false)}
-      onPointerLeave={() => setPressed(false)}
-      className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all text-left relative active:scale-[0.98]"
-      style={{
-        background: pressed ? "rgba(255,255,255,0.08)" : "transparent",
-        transition: "background 0.12s ease, transform 0.1s ease",
-      }}
-    >
-      <div
-        className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full pointer-events-none"
+    <div className="relative flex items-center">
+      <button
+        data-testid={`button-select-token-${token.symbol}`}
+        onClick={holding ? endHold : onClick}
+        onPointerDown={startHold}
+        onPointerUp={endHold}
+        onPointerLeave={endHold}
+        className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all text-left relative active:scale-[0.98]"
         style={{
-          background: "linear-gradient(180deg, #6366f1, #8b5cf6)",
-          opacity: pressed ? 1 : 0,
-          transform: pressed ? "scaleY(1)" : "scaleY(0.4)",
-          transition: "opacity 0.12s, transform 0.12s",
+          background: pressed ? "rgba(255,255,255,0.08)" : "transparent",
+          transition: "background 0.12s ease, transform 0.1s ease",
         }}
-      />
-      <div className="flex items-center gap-3 min-w-0 pl-1.5">
-        <div className="relative flex-shrink-0">
-          <div className="w-9 h-9 rounded-full overflow-hidden" style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.08)" }}>
-            <img
-              src={!imgError && token.logoURI ? token.logoURI : "/img/logos/unknown-token.png"}
-              alt={token.symbol}
-              className="w-full h-full object-cover"
-              onError={() => setImgError(true)}
-              loading="lazy"
-            />
-          </div>
-          {token.verified && (
-            <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center" style={{ background: "#0f1117", boxShadow: "0 0 0 1px rgba(255,255,255,0.06)" }}>
-              <div className="w-2.5 h-2.5 rounded-full bg-blue-500 flex items-center justify-center">
-                <CheckCircle2 className="w-2 h-2 text-white" data-testid={`icon-verified-${token.symbol}`} />
-              </div>
+      >
+        <div
+          className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full pointer-events-none"
+          style={{
+            background: "linear-gradient(180deg, #6366f1, #8b5cf6)",
+            opacity: pressed ? 1 : 0,
+            transform: pressed ? "scaleY(1)" : "scaleY(0.4)",
+            transition: "opacity 0.12s, transform 0.12s",
+          }}
+        />
+        <div className="flex items-center gap-3 min-w-0 pl-1.5">
+          <div className="relative flex-shrink-0">
+            <div className="w-9 h-9 rounded-full overflow-hidden" style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.08)" }}>
+              <img
+                src={!imgError && token.logoURI ? token.logoURI : "/img/logos/unknown-token.png"}
+                alt={token.symbol}
+                className="w-full h-full object-cover"
+                onError={() => setImgError(true)}
+                loading="lazy"
+              />
             </div>
-          )}
-        </div>
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="font-semibold text-sm text-white tracking-tight">{token.symbol}</span>
-            {!token.verified && (
-              <span
-                className="text-[9px] px-1.5 py-0.5 rounded-full font-medium"
-                style={{ background: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.3)", border: "1px solid rgba(255,255,255,0.06)" }}
-              >
-                unverified
-              </span>
+            {token.verified && (
+              <div className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center" style={{ background: "#0f1117", boxShadow: "0 0 0 1px rgba(255,255,255,0.06)" }}>
+                  <div className="w-2.5 h-2.5 rounded-full bg-blue-500 flex items-center justify-center">
+                    <CheckCircle2 className="w-2 h-2 text-white" data-testid={`icon-verified-${token.symbol}`} />
+                  </div>
+              </div>
             )}
           </div>
-          <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>{token.name}</p>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="font-semibold text-sm text-white tracking-tight">{token.symbol}</span>
+              {!token.verified && (
+                <span
+                  className="text-[9px] px-1.5 py-0.5 rounded-full font-medium"
+                  style={{ background: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.3)", border: "1px solid rgba(255,255,255,0.06)" }}
+                >
+                  unverified
+                </span>
+              )}
+            </div>
+            <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>{token.name}</p>
+          </div>
         </div>
-      </div>
-      {userAddress && displayBalance && (
-        <div className="flex-shrink-0 ml-2 text-right">
-          <p className="text-xs font-mono font-medium tabular-nums" data-testid={`text-balance-${token.symbol}`} style={{ color: "rgba(255,255,255,0.7)" }}>
-            {displayBalance}
-          </p>
-        </div>
+        {userAddress && displayBalance && (
+          <div className="flex-shrink-0 ml-2 text-right">
+            <p className="text-xs font-mono font-medium tabular-nums" data-testid={`text-balance-${token.symbol}`} style={{ color: "rgba(255,255,255,0.7)" }}>
+              {displayBalance}
+            </p>
+          </div>
+        )}
+      </button>
+      {holding && onDelete && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(token.address); }}
+          className="absolute right-2 flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-all hover:scale-110"
+          style={{ background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.35)" }}
+          title="Remove token"
+        >
+          <X style={{ width: 14, height: 14, color: "#f87171" }} />
+        </button>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -495,11 +538,13 @@ function CommunityTokenRow({
   userAddress,
   index,
   onClick,
+  onDelete,
 }: {
   token: CommunityToken;
   userAddress?: string;
   index: number;
   onClick: () => void;
+  onDelete?: (address: string) => void;
 }) {
   const { data: balance } = useBalance({
     address: userAddress as `0x${string}` | undefined,
@@ -517,74 +562,95 @@ function CommunityTokenRow({
 
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
+  const [holding, setHolding] = useState(false);
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const startHold = () => {
+    if (!onDelete) return;
+    holdTimer.current = setTimeout(() => setHolding(true), 500);
+  };
+  const endHold = () => {
+    if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
+    setHolding(false);
+  };
 
   return (
-    <button
-      onClick={onClick}
-      onPointerDown={() => setPressed(true)}
-      onPointerUp={() => setPressed(false)}
-      onPointerLeave={() => setPressed(false)}
-      className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all text-left relative active:scale-[0.98]"
-      style={{
-        background: pressed ? "rgba(139,92,246,0.1)" : "transparent",
-        transition: "background 0.12s ease, transform 0.1s ease",
-      }}
-    >
-      {/* Purple accent bar for community */}
-      <div
-        className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full pointer-events-none"
+    <div className="relative flex items-center">
+      <button
+        onClick={holding ? endHold : onClick}
+        onPointerDown={startHold}
+        onPointerUp={endHold}
+        onPointerLeave={endHold}
+        className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl transition-all text-left relative active:scale-[0.98]"
         style={{
-          background: "linear-gradient(180deg, #8b5cf6, #a78bfa)",
-          opacity: pressed ? 1 : 0,
-          transform: pressed ? "scaleY(1)" : "scaleY(0.4)",
-          transition: "opacity 0.12s, transform 0.12s",
+          background: pressed ? "rgba(139,92,246,0.1)" : "transparent",
+          transition: "background 0.12s ease, transform 0.1s ease",
         }}
-      />
-      <div className="flex items-center gap-3 min-w-0 pl-1.5">
-        <div className="relative flex-shrink-0">
-          <div className="w-9 h-9 rounded-full overflow-hidden" style={{ boxShadow: "0 0 0 1.5px rgba(139,92,246,0.3)" }}>
-            <img
-              src={!imgError && token.logoURI && token.logoURI !== "/img/logos/unknown-token.png" ? token.logoURI : "/img/logos/unknown-token.png"}
-              alt={token.symbol}
-              className="w-full h-full object-cover"
-              onError={() => setImgError(true)}
-              loading="lazy"
-            />
-          </div>
-          {/* Community badge */}
-          <div
-            className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center"
-            style={{ background: "#0f1117", boxShadow: "0 0 0 1px rgba(139,92,246,0.3)" }}
-          >
-            <div className="w-2.5 h-2.5 rounded-full flex items-center justify-center" style={{ background: "rgba(139,92,246,0.8)" }}>
-              <Users style={{ width: 6, height: 6, color: "white" }} />
+      >
+        <div
+          className="absolute left-0 top-2 bottom-2 w-0.5 rounded-full pointer-events-none"
+          style={{
+            background: "linear-gradient(180deg, #8b5cf6, #a78bfa)",
+            opacity: pressed ? 1 : 0,
+            transform: pressed ? "scaleY(1)" : "scaleY(0.4)",
+            transition: "opacity 0.12s, transform 0.12s",
+          }}
+        />
+        <div className="flex items-center gap-3 min-w-0 pl-1.5">
+          <div className="relative flex-shrink-0">
+            <div className="w-9 h-9 rounded-full overflow-hidden" style={{ boxShadow: "0 0 0 1.5px rgba(139,92,246,0.3)" }}>
+              <img
+                src={!imgError && token.logoURI && token.logoURI !== "/img/logos/unknown-token.png" ? token.logoURI : "/img/logos/unknown-token.png"}
+                alt={token.symbol}
+                className="w-full h-full object-cover"
+                onError={() => setImgError(true)}
+                loading="lazy"
+              />
+            </div>
+            <div
+              className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full flex items-center justify-center"
+              style={{ background: "#0f1117", boxShadow: "0 0 0 1px rgba(139,92,246,0.3)" }}
+            >
+              <div className="w-2.5 h-2.5 rounded-full flex items-center justify-center" style={{ background: "rgba(139,92,246,0.8)" }}>
+                <Users style={{ width: 6, height: 6, color: "white" }} />
+              </div>
             </div>
           </div>
-        </div>
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <span className="font-semibold text-sm text-white tracking-tight">{token.symbol}</span>
-            <span
-              className="text-[9px] px-1.5 py-0.5 rounded-full font-bold"
-              style={{
-                background: "rgba(139,92,246,0.15)",
-                color: "#c4b5fd",
-                border: "1px solid rgba(139,92,246,0.25)",
-              }}
-            >
-              community
-            </span>
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="font-semibold text-sm text-white tracking-tight">{token.symbol}</span>
+              <span
+                className="text-[9px] px-1.5 py-0.5 rounded-full font-bold"
+                style={{
+                  background: "rgba(139,92,246,0.15)",
+                  color: "#c4b5fd",
+                  border: "1px solid rgba(139,92,246,0.25)",
+                }}
+              >
+                community
+              </span>
+            </div>
+            <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>{token.name}</p>
           </div>
-          <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>{token.name}</p>
         </div>
-      </div>
-      {userAddress && displayBalance && (
-        <div className="flex-shrink-0 ml-2 text-right">
-          <p className="text-xs font-mono font-medium tabular-nums" style={{ color: "rgba(255,255,255,0.7)" }}>
-            {displayBalance}
-          </p>
-        </div>
+        {userAddress && displayBalance && (
+          <div className="flex-shrink-0 ml-2 text-right">
+            <p className="text-xs font-mono font-medium tabular-nums" style={{ color: "rgba(255,255,255,0.7)" }}>
+              {displayBalance}
+            </p>
+          </div>
+        )}
+      </button>
+      {holding && onDelete && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(token.address); }}
+          className="absolute right-2 flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center transition-all hover:scale-110"
+          style={{ background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.35)" }}
+          title="Remove token"
+        >
+          <X style={{ width: 14, height: 14, color: "#f87171" }} />
+        </button>
       )}
-    </button>
+    </div>
   );
 }

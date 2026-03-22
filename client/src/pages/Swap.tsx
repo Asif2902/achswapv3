@@ -75,6 +75,8 @@ export default function Swap() {
   const [impactChecked, setImpactChecked] = useState(false);
   const [impactText, setImpactText] = useState("");
   const [impactAcknowledged, setImpactAcknowledged] = useState(false);
+  const [fromImgError, setFromImgError] = useState(false);
+  const [toImgError, setToImgError] = useState(false);
   const [gaslessMode, setGaslessMode] = useState(() => {
     if (typeof window !== 'undefined') {
       return localStorage.getItem('gaslessMode') === 'true';
@@ -202,6 +204,15 @@ export default function Swap() {
     setTokens([...process(chainTokens), ...process(imported)]);
   };
 
+  const handleDeleteToken = (address: string) => {
+    const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
+    const updated = imported.filter(t => t.address.toLowerCase() !== address.toLowerCase());
+    localStorage.setItem("importedTokens", JSON.stringify(updated));
+    setTokens(prev => prev.filter(t => t.address.toLowerCase() !== address.toLowerCase()));
+    if (fromToken?.address.toLowerCase() === address.toLowerCase()) setFromToken(null);
+    if (toToken?.address.toLowerCase() === address.toLowerCase()) setToToken(null);
+  };
+
   const handleImportToken = async (addr: string): Promise<Token | null> => {
     try {
       if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
@@ -240,6 +251,8 @@ export default function Swap() {
     }
     maxJustClickedRef.current = false;
     setImpactAcknowledged(false);
+    setFromImgError(false);
+    setToImgError(false);
     
     if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
     if (abortControllerRef.current) abortControllerRef.current.abort();
@@ -944,7 +957,7 @@ export default function Swap() {
                     <button data-testid="button-select-from-token" onClick={() => setShowFromSelector(true)} className={`sw-token-btn ${!fromToken ? "empty" : ""}`}>
                       {fromToken ? (
                         <>
-                          <img src={fromToken.logoURI} alt={fromToken.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.14)" }} onError={e => { e.currentTarget.style.display = "none"; }} />
+                          <img src={!fromImgError && fromToken.logoURI ? fromToken.logoURI : "/img/logos/unknown-token.png"} alt={fromToken.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.14)" }} onError={() => setFromImgError(true)} />
                           <span>{fromToken.symbol}</span>
                         </>
                       ) : <span>Select</span>}
@@ -988,7 +1001,7 @@ export default function Swap() {
                     <button data-testid="button-select-to-token" onClick={() => setShowToSelector(true)} className={`sw-token-btn ${!toToken ? "empty" : ""}`}>
                       {toToken ? (
                         <>
-                          <img src={toToken.logoURI} alt={toToken.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.14)" }} onError={e => { e.currentTarget.style.display = "none"; }} />
+                          <img src={!toImgError && toToken.logoURI ? toToken.logoURI : "/img/logos/unknown-token.png"} alt={toToken.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.14)" }} onError={() => setToImgError(true)} />
                           <span>{toToken.symbol}</span>
                         </>
                       ) : <span>Select</span>}
@@ -1087,8 +1100,8 @@ export default function Swap() {
         </div>
       </div>
 
-      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={t => { setFromToken(t); setShowFromSelector(false); }} tokens={tokens} onImport={handleImportToken} />
-      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={t => { setToToken(t); setShowToSelector(false); }} tokens={tokens} onImport={handleImportToken} />
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={t => { setFromToken(t); setShowFromSelector(false); }} tokens={tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={t => { setToToken(t); setShowToSelector(false); }} tokens={tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 
