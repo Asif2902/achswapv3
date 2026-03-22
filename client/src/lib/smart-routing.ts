@@ -61,19 +61,18 @@ export async function getV2Quote(
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
     const DECIMALS_SCALE = 10n ** BigInt(fromToken.decimals);
-    const TARGET_PROBE_TOKENS = 10_000n;
-    const PROBE_BASE = TARGET_PROBE_TOKENS * DECIMALS_SCALE;
     const MIN = 10_000_000_000n;
     const MAX = 10_000_000_000_000_000n;
     const testIn = amountIn > 0n
       ? (() => {
-          const scaled = PROBE_BASE / 1000n;
-          return scaled < MIN ? MIN : scaled > MAX ? MAX : scaled;
+          const probeCandidate = (amountIn * DECIMALS_SCALE) / 1000n;
+          const bounded = probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
+          return bounded;
         })()
       : MIN;
 
-    const calcV2Impact = (spotOut: bigint, outputAmount: bigint): number | undefined => {
-      if (spotOut === 0n) return undefined;
+    const calcV2Impact = (spotOut: bigint, outputAmount: bigint): number => {
+      if (spotOut === 0n) return Number.NaN;
       const num = spotOut * amountIn - outputAmount * testIn;
       if (num <= 0n) return 0;
       return Number((num * 10000n) / (spotOut * amountIn)) / 100;
@@ -185,19 +184,17 @@ export async function getV3Quote(
     const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
 
     const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
-    const TARGET_PROBE_TOKENS_IN = 10_000n;
-    const PROBE_IN_BASE = TARGET_PROBE_TOKENS_IN * DECIMALS_SCALE_IN;
     const MIN = 10_000_000_000n;
     const MAX = 10_000_000_000_000_000n;
     const testIn = amountIn > 0n
       ? (() => {
-          const scaled = PROBE_IN_BASE / 1000n;
-          return scaled < MIN ? MIN : scaled > MAX ? MAX : scaled;
+          const probeCandidate = (amountIn * DECIMALS_SCALE_IN) / 1000n;
+          return probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
         })()
       : MIN;
 
-    const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number | undefined => {
-      if (spotOut === 0n) return undefined;
+    const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number => {
+      if (spotOut === 0n) return Number.NaN;
       const num = spotOut * amountIn - outputAmount * testIn;
       if (num <= 0n) return 0;
       return Number((num * 10000n) / (spotOut * amountIn)) / 100;

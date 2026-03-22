@@ -117,8 +117,10 @@ export function RemoveLiquidityV2() {
         } else {
           const legacy = localStorage.getItem("importedTokens");
           if (legacy) {
-            importedTokens = JSON.parse(legacy);
-            localStorage.setItem(key, JSON.stringify(importedTokens));
+            const legacyTokens = JSON.parse(legacy);
+            const chainTokens = legacyTokens.filter((t: Token) => t.chainId === chainId);
+            localStorage.setItem(key, JSON.stringify(chainTokens));
+            importedTokens = chainTokens;
           }
         }
       } catch { importedTokens = []; }

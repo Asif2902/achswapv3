@@ -203,7 +203,24 @@ export default function Swap() {
   const loadTokens = async () => {
     if (!chainId) return;
     const chainTokens = getTokensByChainId(chainId);
-    const imported: Token[] = JSON.parse(localStorage.getItem(`importedTokens:${chainId}`) || "[]");
+
+    let imported: Token[] = [];
+    const key = `importedTokens:${chainId}`;
+    try {
+      const data = localStorage.getItem(key);
+      if (data) {
+        imported = JSON.parse(data);
+      } else {
+        const legacy = localStorage.getItem("importedTokens");
+        if (legacy) {
+          const legacyTokens = JSON.parse(legacy);
+          const chainTokens = legacyTokens.filter((t: Token) => t.chainId === chainId);
+          localStorage.setItem(key, JSON.stringify(chainTokens));
+          imported = chainTokens;
+        }
+      }
+    } catch { imported = []; }
+
     const process = (arr: Token[]) =>
       arr.filter(t => !chainId || t.chainId === chainId).map(t => ({ ...t, logoURI: t.logoURI || "/img/logos/unknown-token.png" }));
     setTokens([...process(chainTokens), ...process(imported)]);
