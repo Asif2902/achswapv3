@@ -582,42 +582,8 @@ export default function Swap() {
               const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
               return swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
             });
-          } catch (v3Err: any) {
-            const altQ = smartRoutingResult.alternativeQuotes?.find(q => q.protocol === "V2");
-            if (altQ) {
-              toast({ title: "Falling back to V2", description: "V3 failed, trying V2…" });
-              const V2_ABI = [
-                "function swapExactTokensForTokens(uint,uint,address[],address,uint) external returns (uint[])",
-                "function swapExactETHForTokens(uint,address[],address,uint) external payable returns (uint[])",
-                "function swapExactTokensForETH(uint,uint,address[],address,uint) external returns (uint[])",
-              ];
-              const router = new Contract(contracts.v2.router, V2_ABI, signer);
-              const path: string[] = [];
-              for (let i = 0; i < altQ.route.length; i++) {
-                const hop = altQ.route[i];
-                if (i === 0) path.push(isNativeToken(hop.tokenIn.address) ? wrappedAddr : hop.tokenIn.address);
-                const o = isNativeToken(hop.tokenOut.address) ? wrappedAddr : hop.tokenOut.address;
-                if (o !== path[path.length - 1]) path.push(o);
-              }
-              const altMin = (altQ.outputAmount * (10000n - slippageBps)) / 10000n;
-
-              if (fromNative) {
-                const g = await router.swapExactETHForTokens.estimateGas(altMin, path, recipient, deadlineTimestamp, { value: amountIn });
-                tx = await router.swapExactETHForTokens(altMin, path, recipient, deadlineTimestamp, { value: amountIn, gasLimit: g * 150n / 100n });
-              } else if (toNative) {
-                // Ensure approval for V2 router
-                const tc = new Contract(fromERC20, ERC20_ABI, signer);
-                if (await tc.allowance(address, contracts.v2.router) < amountIn) {
-                  const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn);
-                  await (await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n })).wait();
-                }
-                const g = await router.swapExactTokensForETH.estimateGas(amountIn, altMin, path, recipient, deadlineTimestamp);
-                tx = await router.swapExactTokensForETH(amountIn, altMin, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
-              } else {
-                const g = await router.swapExactTokensForTokens.estimateGas(amountIn, altMin, path, recipient, deadlineTimestamp);
-                tx = await router.swapExactTokensForTokens(amountIn, altMin, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
-              }
-            } else throw v3Err;
+          } catch (v3Err) {
+            throw v3Err;
           }
         } else {
           // Multi-hop V3 path
