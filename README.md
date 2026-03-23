@@ -190,6 +190,7 @@ The swap interface automatically finds the best route across V2 and V3 pools:
 - View all V2 LP positions
 - One-click migration to V3
 - Automatic approval and liquidity management
+- Fixed Max buttons
 
 ### Gasless Swaps
 - Users can enable "Zap" mode for gasless swaps
