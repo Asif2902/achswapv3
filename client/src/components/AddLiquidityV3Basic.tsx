@@ -5,6 +5,7 @@ import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
+import { createAlchemyProvider } from "@/lib/config";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
@@ -139,18 +140,19 @@ export function AddLiquidityV3Basic() {
       if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
       const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` }); return exists; }
-      const provider = new BrowserProvider({ request: async ({ method, params }: any) => {
-        const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-        const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result;
-      }});
+      if (!chainId) throw new Error("Chain ID not available");
+      const provider = createAlchemyProvider(chainId);
       const ERC20_META_ABI = ["function name() view returns (string)", "function symbol() view returns (string)", "function decimals() view returns (uint8)"];
       const contract = new Contract(addr, ERC20_META_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 10000))]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
       const key = `importedTokens:${chainId}`;
       let importedTokens: Token[] = [];
-      try { const data = localStorage.getItem(key); importedTokens = data ? JSON.parse(data) : []; } catch { importedTokens = []; }
+      try { 
+        const data = localStorage.getItem(key);
+        const parsed = data ? JSON.parse(data) : [];
+        importedTokens = Array.isArray(parsed) ? parsed : [];
+      } catch { importedTokens = []; }
       if (!importedTokens.find((t: Token) => t.address.toLowerCase() === addr.toLowerCase())) { importedTokens.push(newToken); localStorage.setItem(key, JSON.stringify(importedTokens)); }
       setTokens(prev => [...prev, newToken]);
       toast({ title: "Token imported", description: `${symbol} has been added to your token list` });

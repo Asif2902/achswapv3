@@ -60,6 +60,16 @@ export function AddLiquidityV2() {
 
   useEffect(() => { loadTokens(); }, [chainId]);
 
+  useEffect(() => {
+    setTokenA(null);
+    setTokenB(null);
+    setAmountA("");
+    setAmountB("");
+    setPairExists(false);
+    setReserveA(0n);
+    setReserveB(0n);
+  }, [chainId]);
+
   const openExplorer = (txHash: string) => {
     if (contracts) window.open(`${contracts.explorer}${txHash}`, "_blank");
   };
@@ -130,14 +140,14 @@ export function AddLiquidityV2() {
             const parsedLegacy = JSON.parse(legacy);
             const legacyTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
             localStorage.setItem(key, JSON.stringify(legacyTokens));
+            localStorage.removeItem("importedTokens");
             importedTokens = legacyTokens;
           }
         }
       } catch { importedTokens = []; }
-      const chainImportedTokens = Array.isArray(importedTokens) ? importedTokens.filter((t: Token) => t.chainId === chainId) : [];
       setTokens([
         ...chainTokens.map(t => ({ ...t, logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : `/img/logos/unknown-token.png` })),
-        ...chainImportedTokens.map((t: Token) => ({ ...t, logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : `/img/logos/unknown-token.png` }))
+        ...importedTokens.map((t: Token) => ({ ...t, logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : `/img/logos/unknown-token.png` }))
       ]);
     } catch (error) { console.error('Failed to load tokens:', error); }
   };

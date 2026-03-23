@@ -121,16 +121,16 @@ export function RemoveLiquidityV2() {
             const parsedLegacy = JSON.parse(legacy);
             const legacyTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
             localStorage.setItem(key, JSON.stringify(legacyTokens));
+            localStorage.removeItem("importedTokens");
             importedTokens = legacyTokens;
           }
         }
       } catch { importedTokens = []; }
-      const chainImportedTokens = Array.isArray(importedTokens) ? importedTokens.filter((t: Token) => t.chainId === chainId) : [];
       const processed = chainTokens.map((token) => ({
         ...token,
         logoURI: token.logoURI || "/img/logos/unknown-token.png",
       }));
-      setTokens([...processed, ...chainImportedTokens]);
+      setTokens([...processed, ...importedTokens]);
     });
   }, [chainId]);
 

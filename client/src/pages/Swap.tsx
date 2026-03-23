@@ -341,7 +341,7 @@ export default function Swap() {
       let result: SmartRoutingResult | null;
       if (cached) { result = cached; }
       else {
-        result = await getSmartRouteQuote(provider, contracts.v2.router, contracts.v3.quoter02, fromToken, toToken, amountIn, wrappedTokenData.address, v2Enabled, v3Enabled);
+        result = await getSmartRouteQuote(provider, contracts.v2.router, contracts.v3.quoter02, fromToken, toToken, amountIn, wrappedTokenData, v2Enabled, v3Enabled);
         if (signal.aborted) return;
         if (result) setCachedQuote(fromToken.address, toToken.address, fromAmount + (quoteRefreshNonceRef.current ? `#${quoteRefreshNonceRef.current}` : ""), v2Enabled, v3Enabled, result);
       }
@@ -624,13 +624,9 @@ export default function Swap() {
             calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
           }
 
-          try {
-            const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
+          const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
             tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
-          } catch (v3Err) {
-            throw v3Err;
-          }
-        } else {
+          } else {
           // Multi-hop V3 path
           const { encodePath } = await import("@/lib/v3-utils");
           const tks: string[] = [fromERC20];

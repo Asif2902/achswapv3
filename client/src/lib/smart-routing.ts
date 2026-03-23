@@ -60,7 +60,6 @@ export async function getV2Quote(
     const directPath = buildV2Path(fromToken, toToken, wrappedTokenAddress);
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
-    const DECIMALS_SCALE = 10n ** BigInt(fromToken.decimals);
     const MIN = 10_000n;
     const MAX = 10_000_000_000n;
     const testIn = amountIn > 0n
@@ -157,7 +156,7 @@ export async function getV3Quote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedTokenAddress?: string
+  wrappedTokenAddress: string
 ): Promise<QuoteResult | null> {
   try {
     if (!wrappedTokenAddress) {
@@ -168,6 +167,16 @@ export async function getV3Quote(
     if (fromToken.address.toLowerCase() === toToken.address.toLowerCase()) {
       return null;
     }
+
+    const wrappedToken: Token = {
+      address: wrappedTokenAddress,
+      symbol: "wUSDC",
+      name: "Wrapped USDC",
+      decimals: 18,
+      logoURI: "/img/logos/wusdc.png",
+      verified: true,
+      chainId: fromToken.chainId,
+    };
 
     const quoter = new Contract(quoterAddress, QUOTER_V2_ABI, provider);
     const { encodePath } = await import("./v3-utils");
@@ -351,11 +360,12 @@ export async function getSmartRouteQuote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedTokenAddress: string,
+  wrappedToken: Token,
   v2Enabled: boolean,
   v3Enabled: boolean
 ): Promise<SmartRoutingResult | null> {
   try {
+    const wrappedTokenAddress = wrappedToken.address;
     const quotes = await Promise.allSettled([
       v2Enabled ? getV2Quote(provider, v2RouterAddress, fromToken, toToken, amountIn, wrappedTokenAddress) : Promise.resolve(null),
       v3Enabled ? getV3Quote(provider, v3QuoterAddress, fromToken, toToken, amountIn, wrappedTokenAddress) : Promise.resolve(null),
