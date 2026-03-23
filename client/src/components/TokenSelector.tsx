@@ -475,36 +475,32 @@ function TokenRow({
   }, [resetHolding]);
 
   const startHold = () => {
-    if (!onDelete || token.verified || isEndingHold.current) return;
+    if (!onDelete || token.verified) return;
     isEndingHold.current = false;
     holdTimer.current = setTimeout(() => {
+      if (isEndingHold.current) return;
       setHolding(true);
       hideTimer.current = setTimeout(() => {
-        if (!isEndingHold.current) {
-          setFadingOut(true);
-          setTimeout(() => {
-            setHolding(false);
-            setFadingOut(false);
-          }, 300);
-        }
+        setFadingOut(true);
+        setTimeout(() => {
+          setHolding(false);
+          setFadingOut(false);
+          isEndingHold.current = false;
+        }, 300);
       }, 3000);
     }, 500);
   };
   const endHold = () => {
+    isEndingHold.current = true;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    if (!holding && hideTimer.current) { 
-      clearTimeout(hideTimer.current); 
-      hideTimer.current = null; 
-    }
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
       setFadingOut(true);
       hideTimer.current = setTimeout(() => {
-        isEndingHold.current = false;
         setHolding(false);
         setFadingOut(false);
       }, 300);
-    } else if (!holding) {
-      isEndingHold.current = false;
+    } else {
       setHolding(false);
       setFadingOut(false);
     }
@@ -682,33 +678,29 @@ function CommunityTokenRow({
     if (!onDelete || isEndingHold.current) return;
     isEndingHold.current = false;
     holdTimer.current = setTimeout(() => {
+      if (isEndingHold.current) return;
       setHolding(true);
       hideTimer.current = setTimeout(() => {
-        if (!isEndingHold.current) {
-          setFadingOut(true);
-          setTimeout(() => {
-            setHolding(false);
-            setFadingOut(false);
-          }, 300);
-        }
+        setFadingOut(true);
+        setTimeout(() => {
+          setHolding(false);
+          setFadingOut(false);
+          isEndingHold.current = false;
+        }, 300);
       }, 3000);
     }, 500);
   };
   const endHold = () => {
+    isEndingHold.current = true;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    if (!holding && hideTimer.current) { 
-      clearTimeout(hideTimer.current); 
-      hideTimer.current = null; 
-    }
+    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
       setFadingOut(true);
       hideTimer.current = setTimeout(() => {
-        isEndingHold.current = false;
         setHolding(false);
         setFadingOut(false);
       }, 300);
-    } else if (!holding) {
-      isEndingHold.current = false;
+    } else {
       setHolding(false);
       setFadingOut(false);
     }
