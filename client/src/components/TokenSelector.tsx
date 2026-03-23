@@ -492,7 +492,10 @@ function TokenRow({
   };
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    if (!holding && hideTimer.current) { 
+      clearTimeout(hideTimer.current); 
+      hideTimer.current = null; 
+    }
     if (holding && !fadingOut) {
       setFadingOut(true);
       hideTimer.current = setTimeout(() => {
@@ -693,7 +696,10 @@ function CommunityTokenRow({
   };
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    if (!holding && hideTimer.current) { 
+      clearTimeout(hideTimer.current); 
+      hideTimer.current = null; 
+    }
     if (holding && !fadingOut) {
       setFadingOut(true);
       hideTimer.current = setTimeout(() => {
