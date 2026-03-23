@@ -108,14 +108,55 @@ export function RemoveLiquidityV2() {
   useEffect(() => {
     if (!chainId) return;
     fetchTokensWithCommunity(chainId).then(chainTokens => {
-      const imported = localStorage.getItem("importedTokens");
-      const importedTokens = imported ? JSON.parse(imported) : [];
-      const chainImportedTokens = importedTokens.filter((t: Token) => t.chainId === chainId);
+      const key = `importedTokens:${chainId}`;
+      let importedTokens: Token[] = [];
+      try {
+        const data = localStorage.getItem(key);
+        if (data) {
+          const parsed = JSON.parse(data);
+          importedTokens = Array.isArray(parsed) ? parsed : [];
+        } else {
+          const legacy = localStorage.getItem("importedTokens");
+          if (legacy) {
+            const parsedLegacy = JSON.parse(legacy);
+            if (Array.isArray(parsedLegacy)) {
+              const byChainId: Record<string, Token[]> = {};
+              for (const t of parsedLegacy) {
+                const cid = String(t.chainId);
+                if (!byChainId[cid]) byChainId[cid] = [];
+                byChainId[cid].push(t);
+              }
+              for (const cid of Object.keys(byChainId)) {
+                const existingKey = `importedTokens:${cid}`;
+                const existingData = localStorage.getItem(existingKey);
+                if (existingData) {
+                  try {
+                    const existing = JSON.parse(existingData);
+                    if (Array.isArray(existing)) {
+                      const existingAddrs = new Set(existing.map((et: Token) => et.address.toLowerCase()));
+                      const merged = [...existing, ...byChainId[cid].filter((lt: Token) => !existingAddrs.has(lt.address.toLowerCase()))];
+                      localStorage.setItem(existingKey, JSON.stringify(merged));
+                    } else {
+                      localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                    }
+                  } catch {
+                    localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                  }
+                } else {
+                  localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                }
+              }
+            }
+            localStorage.removeItem("importedTokens");
+            importedTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
+          }
+        }
+      } catch { importedTokens = []; }
       const processed = chainTokens.map((token) => ({
         ...token,
         logoURI: token.logoURI || "/img/logos/unknown-token.png",
       }));
-      setTokens([...processed, ...chainImportedTokens]);
+      setTokens([...processed, ...importedTokens]);
     });
   }, [chainId]);
 
@@ -258,6 +299,13 @@ export function RemoveLiquidityV2() {
       loadPositions();
     }
   }, [isConnected, address, loadPositions]);
+
+  useEffect(() => {
+    importedPositionsRef.current = [];
+    hasAutoSelected.current = false;
+    setPositions([]);
+    setSelectedPosition(null);
+  }, [address, chainId]);
 
   const handleImportPool = async () => {
     if (!importTokenA || !importTokenB || !contracts || !chainId) return;

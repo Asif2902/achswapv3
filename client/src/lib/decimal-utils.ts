@@ -1,7 +1,18 @@
 import { formatUnits, parseUnits } from "ethers";
 
+const DISPLAY_DECIMALS = 4;
+
 function truncateDecimals(value: string, decimals: number): string {
-  const displayDecimals = Math.min(decimals, 18);
+  const displayDecimals = Math.min(DISPLAY_DECIMALS, decimals);
+  const num = parseFloat(value);
+  if (num > 0) {
+    const threshold = Math.pow(10, -displayDecimals);
+    if (num < threshold) {
+      const factor = Math.pow(10, displayDecimals);
+      const truncated = Math.floor(num * factor) / factor;
+      return truncated.toFixed(displayDecimals);
+    }
+  }
   const parts = value.split('.');
   if (parts.length === 1) return parts[0];
   const integer = parts[0];
@@ -41,7 +52,7 @@ export function getMaxAmount(balanceWei: bigint, decimals: number, symbol: strin
 
 /**
  * Format a numeric value for DISPLAY only
- * Uses token decimals for precision - use for UI display
+ * Uses DISPLAY_DECIMALS (4) for UI display while preserving full precision at smart contract level
  */
 export function formatAmount(value: string | number | bigint, decimals: number): string {
   try {

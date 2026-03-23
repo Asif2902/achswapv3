@@ -5,6 +5,7 @@ import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
+import { createAlchemyProvider } from "@/lib/config";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
@@ -101,14 +102,62 @@ export function AddLiquidityV3Basic() {
   useEffect(() => {
     if (!chainId) return;
     const chainTokens = getTokensByChainId(chainId);
-    const imported = localStorage.getItem("importedTokens");
-    const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
-    
+    const key = `importedTokens:${chainId}`;
+    let importedTokens: Token[] = [];
+    try {
+      const data = localStorage.getItem(key);
+      if (data) {
+        const parsed = JSON.parse(data);
+        importedTokens = Array.isArray(parsed) ? parsed : [];
+      } else {
+        const legacy = localStorage.getItem("importedTokens");
+        if (legacy) {
+          const parsedLegacy = JSON.parse(legacy);
+          if (Array.isArray(parsedLegacy)) {
+            const byChainId: Record<string, Token[]> = {};
+            for (const t of parsedLegacy) {
+              const cid = String(t.chainId);
+              if (!byChainId[cid]) byChainId[cid] = [];
+              byChainId[cid].push(t);
+            }
+            for (const cid of Object.keys(byChainId)) {
+              const existingKey = `importedTokens:${cid}`;
+              const existingData = localStorage.getItem(existingKey);
+              if (existingData) {
+                try {
+                  const existing = JSON.parse(existingData);
+                  if (Array.isArray(existing)) {
+                    const existingAddrs = new Set(existing.map((et: Token) => et.address.toLowerCase()));
+                    const merged = [...existing, ...byChainId[cid].filter((lt: Token) => !existingAddrs.has(lt.address.toLowerCase()))];
+                    localStorage.setItem(existingKey, JSON.stringify(merged));
+                  } else {
+                    localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                  }
+                } catch {
+                  localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                }
+              } else {
+                localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+              }
+            }
+          }
+          localStorage.removeItem("importedTokens");
+          importedTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
+        }
+      }
+    } catch { importedTokens = []; }
+
     const combinedTokens = [...chainTokens, ...importedTokens.filter(t => t.chainId === chainId)].map(t => ({
       ...t,
       logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : t.logoURI
     }));
     setTokens(combinedTokens);
+    setTokenA(null);
+    setTokenB(null);
+    setAmountA("");
+    setAmountB("");
+    maxAmountAWeiRef.current = null;
+    maxAmountBWeiRef.current = null;
   }, [chainId]);
 
   // ── Default tokens ─────────────────────────────────────────────────────────
@@ -124,18 +173,21 @@ export function AddLiquidityV3Basic() {
       if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
       const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` }); return exists; }
-      const provider = new BrowserProvider({ request: async ({ method, params }: any) => {
-        const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-        const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result;
-      }});
+      if (!chainId) throw new Error("Chain ID not available");
+      if (!getContractsForChain(chainId)) throw new Error("Unsupported network");
+      const provider = createAlchemyProvider(chainId);
       const ERC20_META_ABI = ["function name() view returns (string)", "function symbol() view returns (string)", "function decimals() view returns (uint8)"];
       const contract = new Contract(addr, ERC20_META_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise<never>((_, rej) => setTimeout(() => rej(new Error("timeout")), 10000))]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
-      const imported = localStorage.getItem("importedTokens");
-      const importedTokens: Token[] = imported ? JSON.parse(imported) : [];
-      if (!importedTokens.find((t: Token) => t.address.toLowerCase() === addr.toLowerCase())) { importedTokens.push(newToken); localStorage.setItem("importedTokens", JSON.stringify(importedTokens)); }
+      const key = `importedTokens:${chainId}`;
+      let importedTokens: Token[] = [];
+      try { 
+        const data = localStorage.getItem(key);
+        const parsed = data ? JSON.parse(data) : [];
+        importedTokens = Array.isArray(parsed) ? parsed : [];
+      } catch { importedTokens = []; }
+      if (!importedTokens.find((t: Token) => t.address.toLowerCase() === addr.toLowerCase())) { importedTokens.push(newToken); localStorage.setItem(key, JSON.stringify(importedTokens)); }
       setTokens(prev => [...prev, newToken]);
       toast({ title: "Token imported", description: `${symbol} has been added to your token list` });
       return newToken;
@@ -241,6 +293,7 @@ export function AddLiquidityV3Basic() {
     const [tok0] = sortTokens({ ...tokenA, address: getERC20Address(tokenA, chainId) }, { ...tokenB, address: getERC20Address(tokenB, chainId) });
     const isToken0A = getERC20Address(tokenA, chainId).toLowerCase() === tok0.address.toLowerCase();
     setAmountB((isToken0A ? v * currentPrice : v / currentPrice).toFixed(6));
+    maxAmountBWeiRef.current = null;
   }, [amountA, currentPrice, tokenA, tokenB, chainId]);
 
   const amountAExceedsBalance = isConnected && balanceA !== null && tokenA !== null && amountA !== "" && parseFloat(amountA) > 0 && parseAmount(amountA, tokenA.decimals) > balanceA;
@@ -265,15 +318,14 @@ export function AddLiquidityV3Basic() {
       let amount0Desired: bigint;
       let amount1Desired: bigint;
       
-      if (maxAmountAWeiRef.current !== null && maxAmountBWeiRef.current !== null) {
-        amount0Desired = isToken0A ? maxAmountAWeiRef.current : maxAmountBWeiRef.current;
-        amount1Desired = isToken0A ? maxAmountBWeiRef.current : maxAmountAWeiRef.current;
-        maxAmountAWeiRef.current = null;
-        maxAmountBWeiRef.current = null;
-      } else {
-        amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
-        amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
-      }
+      const parsedA = maxAmountAWeiRef.current !== null ? maxAmountAWeiRef.current : parseAmount(amountA, tokenA.decimals);
+      const parsedB = maxAmountBWeiRef.current !== null ? maxAmountBWeiRef.current : parseAmount(amountB, tokenB.decimals);
+      
+      amount0Desired = isToken0A ? parsedA : parsedB;
+      amount1Desired = isToken0A ? parsedB : parsedA;
+
+      maxAmountAWeiRef.current = null;
+      maxAmountBWeiRef.current = null;
       
       let nativeAmount = 0n;
       if (tokenAIsNative) nativeAmount = isToken0A ? amount0Desired : amount1Desired;
@@ -443,7 +495,12 @@ export function AddLiquidityV3Basic() {
               <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
                 Balance:{" "}
                 <span
-                  onClick={() => balanceA !== null && setAmountA(formatUnits(balanceA, tokenA.decimals))}
+                  onClick={() => {
+                    if (balanceA !== null) {
+                      setAmountA(formatUnits(balanceA, tokenA.decimals));
+                      maxAmountAWeiRef.current = null;
+                    }
+                  }}
                   style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600, cursor: balanceA !== null ? "pointer" : "default" }}
                 >
                   {balanceA !== null ? formatBalance(balanceA, tokenA.decimals) : "—"} {tokenA.symbol}
@@ -454,7 +511,7 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder="0.00" value={amountA}
-              onChange={e => setAmountA(e.target.value)}
+              onChange={e => { setAmountA(e.target.value); maxAmountAWeiRef.current = null; }}
               className="v3b-input" style={{ flex: 1, minWidth: 0 }}
             />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
@@ -466,7 +523,7 @@ export function AddLiquidityV3Basic() {
                   const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                   setAmountA(displayAmount);
                   let maxWei = balanceA;
-                  if (tokenA.symbol === "USDC") {
+                  if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
                     maxWei = (balanceA * 99n) / 100n;
                   }
                   maxAmountAWeiRef.current = maxWei;
@@ -494,7 +551,12 @@ export function AddLiquidityV3Basic() {
               <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
                 Balance:{" "}
                 <span
-                  onClick={() => balanceB !== null && !poolExists && setAmountB(formatUnits(balanceB, tokenB.decimals))}
+                  onClick={() => {
+                    if (balanceB !== null && !poolExists) {
+                      setAmountB(formatUnits(balanceB, tokenB.decimals));
+                      maxAmountBWeiRef.current = null;
+                    }
+                  }}
                   style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600, cursor: (balanceB !== null && !poolExists) ? "pointer" : "default" }}
                 >
                   {balanceB !== null ? formatBalance(balanceB, tokenB.decimals) : "—"} {tokenB.symbol}
@@ -505,7 +567,7 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder={poolExists && currentPrice ? "Auto-calculated" : "0.00"} value={amountB}
-              onChange={e => setAmountB(e.target.value)}
+              onChange={e => { setAmountB(e.target.value); maxAmountBWeiRef.current = null; }}
               disabled={poolExists && !!currentPrice}
               className="v3b-input" style={{ flex: 1, minWidth: 0, opacity: poolExists && currentPrice ? 0.7 : 1 }}
             />
@@ -518,7 +580,7 @@ export function AddLiquidityV3Basic() {
                   const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                   setAmountB(displayAmount);
                   let maxWei = balanceB;
-                  if (tokenB.symbol === "USDC") {
+                  if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
                     maxWei = (balanceB * 99n) / 100n;
                   }
                   maxAmountBWeiRef.current = maxWei;

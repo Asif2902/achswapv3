@@ -6,6 +6,7 @@ import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
+import { createAlchemyProvider } from "@/lib/config";
 import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
@@ -162,27 +163,78 @@ export function AddLiquidityV3Advanced() {
   useEffect(() => {
     if (!chainId) return;
     const chainTokens = getTokensByChainId(chainId);
+    const key = `importedTokens:${chainId}`;
     let importedTokens: Token[] = [];
     try {
-      const imported = localStorage.getItem("importedTokens");
-      if (imported) {
-        const parsed = JSON.parse(imported);
-        if (Array.isArray(parsed) && parsed.every(t => t && typeof t === 'object' && 'address' in t && 'chainId' in t)) {
-          importedTokens = parsed;
-        } else {
+      const data = localStorage.getItem(key);
+      if (data) {
+        const parsed = JSON.parse(data);
+        importedTokens = Array.isArray(parsed) ? parsed : [];
+      } else {
+        const legacy = localStorage.getItem("importedTokens");
+        if (legacy) {
+          const parsedLegacy = JSON.parse(legacy);
+          if (Array.isArray(parsedLegacy)) {
+            const byChainId: Record<string, Token[]> = {};
+            for (const t of parsedLegacy) {
+              const cid = String(t.chainId);
+              if (!byChainId[cid]) byChainId[cid] = [];
+              byChainId[cid].push(t);
+            }
+            for (const cid of Object.keys(byChainId)) {
+              const existingKey = `importedTokens:${cid}`;
+              const existingData = localStorage.getItem(existingKey);
+              if (existingData) {
+                try {
+                  const existing = JSON.parse(existingData);
+                  if (Array.isArray(existing)) {
+                    const existingAddrs = new Set(existing.map((et: Token) => et.address.toLowerCase()));
+                    const merged = [...existing, ...byChainId[cid].filter((lt: Token) => !existingAddrs.has(lt.address.toLowerCase()))];
+                    localStorage.setItem(existingKey, JSON.stringify(merged));
+                  } else {
+                    localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                  }
+                } catch {
+                  localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                }
+              } else {
+                localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+              }
+            }
+          }
           localStorage.removeItem("importedTokens");
+          importedTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
         }
       }
     } catch {
-      localStorage.removeItem("importedTokens");
       importedTokens = [];
     }
-    
+
     const combinedTokens = [...chainTokens, ...importedTokens.filter(t => t.chainId === chainId)].map(t => ({
       ...t,
       logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : t.logoURI
     }));
     setTokens(combinedTokens);
+  }, [chainId]);
+
+  useEffect(() => {
+    setTokenA(null);
+    setTokenB(null);
+    setAmountA("");
+    setAmountB("");
+    setMinPrice("");
+    setMaxPrice("");
+    setMinTick("");
+    setMaxTick("");
+    setPoolExists(false);
+    setCurrentPrice(null);
+    setCurrentSqrtPriceX96(null);
+    setCurrentTick(null);
+    setPoolLiquidity(0n);
+    setPoolToken0Reserve(null);
+    setPoolToken1Reserve(null);
+    setPoolAddress(null);
+    setAutoCalcAmounts(null);
   }, [chainId]);
 
   useEffect(() => {
@@ -196,14 +248,20 @@ export function AddLiquidityV3Advanced() {
       if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
       const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is in your list` }); return exists; }
-      const provider = new BrowserProvider({ request: async ({ method, params }: any) => { const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) }); const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result; } });
+      if (!chainId) throw new Error("Chain ID not available");
+      const provider = createAlchemyProvider(chainId);
       const META_ABI = ["function name() view returns (string)", "function symbol() view returns (string)", "function decimals() view returns (uint8)"];
       const contract = new Contract(addr, META_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), 10000))]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
-      const imported: Token[] = JSON.parse(localStorage.getItem("importedTokens") || "[]");
-      if (!imported.find(t => t.address.toLowerCase() === addr.toLowerCase())) { imported.push(newToken); localStorage.setItem("importedTokens", JSON.stringify(imported)); }
+      const key = `importedTokens:${chainId}`;
+      let imported: Token[] = [];
+      try { 
+        const data = localStorage.getItem(key);
+        const parsed = data ? JSON.parse(data) : [];
+        imported = Array.isArray(parsed) ? parsed : [];
+      } catch { imported = []; }
+      if (!imported.find(t => t.address.toLowerCase() === addr.toLowerCase())) { imported.push(newToken); localStorage.setItem(key, JSON.stringify(imported)); }
       setTokens(prev => [...prev, newToken]);
       toast({ title: "Token imported", description: `${symbol} added` });
       return newToken;
@@ -648,7 +706,7 @@ export function AddLiquidityV3Advanced() {
                 const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                 setAmountA(displayAmount);
                 let maxWei = balanceA;
-                if (tokenA.symbol === "USDC") {
+                if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
                   maxWei = (balanceA * 99n) / 100n;
                 }
                 maxAmountAWeiRef.current = maxWei;
@@ -668,7 +726,7 @@ export function AddLiquidityV3Advanced() {
                   const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                   setAmountA(displayAmount);
                   let maxWei = balanceA;
-                  if (tokenA.symbol === "USDC") {
+                  if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
                     maxWei = (balanceA * 99n) / 100n;
                   }
                   maxAmountAWeiRef.current = maxWei;
@@ -699,7 +757,7 @@ export function AddLiquidityV3Advanced() {
                 const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                 setAmountB(displayAmount);
                 let maxWei = balanceB;
-                if (tokenB.symbol === "USDC") {
+                if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
                   maxWei = (balanceB * 99n) / 100n;
                 }
                 maxAmountBWeiRef.current = maxWei;
@@ -719,7 +777,7 @@ export function AddLiquidityV3Advanced() {
                   const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                   setAmountB(displayAmount);
                   let maxWei = balanceB;
-                  if (tokenB.symbol === "USDC") {
+                  if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
                     maxWei = (balanceB * 99n) / 100n;
                   }
                   maxAmountBWeiRef.current = maxWei;

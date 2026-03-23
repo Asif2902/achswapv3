@@ -30,7 +30,7 @@ export interface QuoteResult {
   protocol: "V2" | "V3";
   outputAmount: bigint;
   route: RouteHop[];
-  priceImpact: number;
+  priceImpact: number | undefined;
   gasEstimate?: bigint;
 }
 
@@ -56,54 +56,74 @@ export async function getV2Quote(
 ): Promise<QuoteResult | null> {
   try {
     const router = new Contract(routerAddress, V2_ROUTER_ABI, provider);
-    
-    // Try direct path first (most efficient if direct pair exists)
+
     const directPath = buildV2Path(fromToken, toToken, wrappedTokenAddress);
-    
+    const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
+
+    const MIN = 10_000n;
+    const MAX = 10_000_000_000n;
+    const testIn = amountIn > 0n
+      ? (() => {
+          const probeCandidate = amountIn / 1000n;
+          const bounded = probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
+          return bounded > amountIn ? amountIn : bounded;
+        })()
+      : MIN;
+
+    const calcV2Impact = (spotOut: bigint, outputAmount: bigint): number => {
+      if (spotOut === 0n) return Number.NaN;
+      const num = spotOut * amountIn - outputAmount * testIn;
+      if (num <= 0n) return 0;
+      return Number((num * 10000n) / (spotOut * amountIn)) / 100;
+    };
+
+    const [directResult, hopResult] = await Promise.allSettled([
+      (async () => {
+        const amounts = await router.getAmountsOut(amountIn, directPath);
+        const outputAmount = amounts[amounts.length - 1];
+        if (outputAmount === 0n) throw new Error("zero output");
+        let priceImpact: number | undefined;
+        try {
+          const spotAmounts = await router.getAmountsOut(testIn, directPath);
+          priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
+        } catch { /* probe failed — impact unavailable */ }
+        return { outputAmount, path: directPath, priceImpact };
+      })(),
+      hopPath.length !== directPath.length
+        ? (async () => {
+            const amounts = await router.getAmountsOut(amountIn, hopPath);
+            const outputAmount = amounts[amounts.length - 1];
+            if (outputAmount === 0n) throw new Error("zero output");
+            let priceImpact: number | undefined;
+            try {
+              const spotAmounts = await router.getAmountsOut(testIn, hopPath);
+              priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
+            } catch { /* probe failed — impact unavailable */ }
+            return { outputAmount, path: hopPath, priceImpact };
+          })()
+        : Promise.resolve(null),
+    ]);
+
+    const direct = directResult.status === "fulfilled" ? directResult.value : null;
+    const hop = hopResult.status === "fulfilled" ? hopResult.value : null;
+
     let bestOutputAmount: bigint | null = null;
     let bestPath: string[] = [];
-    let bestPriceImpact = 0;
-    
-    // Try direct path
-    try {
-      const amounts = await router.getAmountsOut(amountIn, directPath);
-      const outputAmount = amounts[amounts.length - 1];
-      
-      if (outputAmount > 0n) {
-        bestOutputAmount = outputAmount;
-        bestPath = directPath;
-        bestPriceImpact = await calculateV2PriceImpact(router, amountIn, outputAmount, directPath);
-      }
-    } catch (directError) {
-      // Direct path doesn't exist, will try multi-hop
-      console.log("Direct V2 path not available, trying multi-hop through wrapped token");
+    let bestPriceImpact: number | undefined;
+
+    if (direct && (!bestOutputAmount || direct.outputAmount > bestOutputAmount)) {
+      bestOutputAmount = direct.outputAmount;
+      bestPath = direct.path;
+      bestPriceImpact = direct.priceImpact;
     }
-    
-    // Try multi-hop through wrapped token (if different from direct path)
-    const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
-    if (hopPath.length !== directPath.length) {
-      try {
-        const amounts = await router.getAmountsOut(amountIn, hopPath);
-        const outputAmount = amounts[amounts.length - 1];
-        
-        // Use this route if it's better than direct path or if direct path failed
-        if (outputAmount > 0n && (bestOutputAmount === null || outputAmount > bestOutputAmount)) {
-          bestOutputAmount = outputAmount;
-          bestPath = hopPath;
-          bestPriceImpact = await calculateV2PriceImpact(router, amountIn, outputAmount, hopPath);
-        }
-      } catch (hopError) {
-        // Multi-hop also failed
-        console.log("Multi-hop V2 path also not available");
-      }
+    if (hop && (!bestOutputAmount || hop.outputAmount > bestOutputAmount)) {
+      bestOutputAmount = hop.outputAmount;
+      bestPath = hop.path;
+      bestPriceImpact = hop.priceImpact;
     }
-    
-    // If no route found, return null
-    if (bestOutputAmount === null || bestPath.length === 0) {
-      return null;
-    }
-    
-    // Build route hops for visualization
+
+    if (!bestOutputAmount || bestPath.length === 0) return null;
+
     const route: RouteHop[] = [];
     for (let i = 0; i < bestPath.length - 1; i++) {
       route.push({
@@ -112,7 +132,7 @@ export async function getV2Quote(
         protocol: "V2",
       });
     }
-    
+
     return {
       protocol: "V2",
       outputAmount: bestOutputAmount,
@@ -128,6 +148,7 @@ export async function getV2Quote(
 /**
  * Get V3 quote for a swap (single-hop and multi-hop)
  * V3 only works with ERC20 tokens, so native tokens must use wrapped address
+ * All fee tier queries run in parallel for maximum speed.
  */
 export async function getV3Quote(
   provider: Provider,
@@ -135,163 +156,184 @@ export async function getV3Quote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedTokenAddress?: string
+  wrappedTokenAddress: string
 ): Promise<QuoteResult | null> {
   try {
-    // Check if quoter contract exists
-    try {
-      const code = await provider.getCode(quoterAddress);
-      if (!code || code === "0x" || code === "0x0") {
-        console.warn("V3 Quoter contract not found at", quoterAddress);
-        return null;
-      }
-    } catch (codeError) {
-      console.warn("Could not verify V3 Quoter contract:", codeError);
-      // Continue anyway - the contract call will fail if it doesn't exist
-    }
-
     if (!wrappedTokenAddress) {
       console.warn("Wrapped token address required for V3 quotes");
       return null;
     }
 
-    // Don't try V3 for the same token swap
     if (fromToken.address.toLowerCase() === toToken.address.toLowerCase()) {
-      console.warn("Cannot quote same token swap");
       return null;
     }
 
     const quoter = new Contract(quoterAddress, QUOTER_V2_ABI, provider);
-    
+    const { encodePath } = await import("./v3-utils");
+
     const feeTiers = [
-  V3_FEE_TIERS.LOWEST,     // 100
-  V3_FEE_TIERS.LOW,        // 500
-  V3_FEE_TIERS.MEDIUM,     // 3000
-  V3_FEE_TIERS.HIGH,       // 10000
-  V3_FEE_TIERS.ULTRA_HIGH, // 100000
-];
-    
-    let bestQuote: QuoteResult | null = null;
-    
-    // V3 only works with ERC20 tokens - use wrapped address for native tokens
-    const fromTokenERC20 = getERC20Address(fromToken.address, wrappedTokenAddress);
-    const toTokenERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
-    
-    // Try single-hop routes for all fee tiers
-    for (const fee of feeTiers) {
+      V3_FEE_TIERS.LOWEST,
+      V3_FEE_TIERS.LOW,
+      V3_FEE_TIERS.MEDIUM,
+      V3_FEE_TIERS.HIGH,
+      V3_FEE_TIERS.ULTRA_HIGH,
+    ];
+
+    const fromERC20 = getERC20Address(fromToken.address, wrappedTokenAddress);
+    const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
+
+    const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
+    const DECIMALS_SCALE_OUT = 10n ** BigInt(toToken.decimals);
+    const MIN = 10_000n;
+    const MAX = 10_000_000_000n;
+    const testIn = amountIn > 0n
+      ? (() => {
+          const probeCandidate = amountIn / 1000n;
+          return probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
+        })()
+      : MIN;
+
+    const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number => {
+      if (spotOut === 0n) return Number.NaN;
+      // Scale output amounts to same decimal base as input
+      const scaledOutputAmount = outputAmount * DECIMALS_SCALE_IN / DECIMALS_SCALE_OUT;
+      const scaledSpotOut = spotOut * DECIMALS_SCALE_IN / DECIMALS_SCALE_OUT;
+      const num = scaledSpotOut * amountIn - scaledOutputAmount * testIn;
+      if (num <= 0n) return 0;
+      return Number((num * 10000n) / (scaledSpotOut * amountIn)) / 100;
+    };
+
+    // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────
+    const singleHopPromises = feeTiers.map(async (fee) => {
       try {
-        const params = {
-          tokenIn: fromTokenERC20,
-          tokenOut: toTokenERC20,
-          amountIn: amountIn,
-          fee: fee,
+        const actualResult = await quoter.quoteExactInputSingle.staticCall({
+          tokenIn: fromERC20,
+          tokenOut: toERC20,
+          amountIn,
+          fee,
           sqrtPriceLimitX96: 0n,
-        };
-        
-        const result = await quoter.quoteExactInputSingle.staticCall(params);
-        const outputAmount = result[0];
-        const gasEstimate = result[3];
-        
-        if (!bestQuote || outputAmount > bestQuote.outputAmount) {
-          const priceImpact = await calculateV3PriceImpact(
-            quoter,
-            fromTokenERC20,
-            toTokenERC20,
-            amountIn,
-            outputAmount,
-            fee
-          );
-          
-          bestQuote = {
-            protocol: "V3",
-            outputAmount,
-            route: [{
-              tokenIn: fromToken, // Keep original token for display
-              tokenOut: toToken, // Keep original token for display
-              protocol: "V3",
-              fee,
-            }],
-            priceImpact,
-            gasEstimate,
-          };
-        }
-      } catch (error) {
-        // Pool doesn't exist for this fee tier or other error
-        continue;
+        });
+        const outputAmount = actualResult[0];
+        const gasEstimate = actualResult[3];
+
+        let priceImpact: number | undefined;
+        try {
+          const spotResult = await quoter.quoteExactInputSingle.staticCall({
+            tokenIn: fromERC20,
+            tokenOut: toERC20,
+            amountIn: testIn,
+            fee,
+            sqrtPriceLimitX96: 0n,
+          });
+          priceImpact = calcV3Impact(spotResult[0], outputAmount);
+        } catch { /* probe failed — impact unavailable */ }
+
+        return { fee, outputAmount, gasEstimate, priceImpact, isMultiHop: false };
+      } catch {
+        return null;
       }
-    }
-    
-    // Try multi-hop routes if needed (through wrapped token)
-    // Only if both tokens are not the wrapped token itself
-    if (wrappedTokenAddress.toLowerCase() !== fromTokenERC20.toLowerCase() && 
-        wrappedTokenAddress.toLowerCase() !== toTokenERC20.toLowerCase()) {
-      for (const fee1 of feeTiers) {
-        for (const fee2 of feeTiers) {
+    });
+
+    // ── Multi-hop: all 25 (fee1 × fee2) combos in parallel ────────────────────
+    const multiHopPromises = feeTiers.flatMap((fee1) =>
+      feeTiers.map(async (fee2) => {
+        try {
+          const path = encodePath([fromERC20, wrappedTokenAddress, toERC20], [fee1, fee2]);
+          const actualResult = await quoter.quoteExactInput.staticCall(path, amountIn);
+          const outputAmount = actualResult[0];
+          const gasEstimate = actualResult[3];
+
+          let priceImpact: number | undefined;
           try {
-            const { encodePath } = await import("./v3-utils");
-            const path = encodePath(
-              [fromTokenERC20, wrappedTokenAddress, toTokenERC20],
-              [fee1, fee2]
-            );
-            
-            const result = await quoter.quoteExactInput.staticCall(path, amountIn);
-            const outputAmount = result[0];
-            const gasEstimate = result[3];
-            
-            if (!bestQuote || outputAmount > bestQuote.outputAmount) {
-              // Calculate price impact for multi-hop route
-              const priceImpact = await calculateV3MultiHopPriceImpact(
-                quoter,
-                path,
-                amountIn,
-                outputAmount
-              );
-              
-              bestQuote = {
-                protocol: "V3",
-                outputAmount,
-                route: [
-                  {
-                    tokenIn: fromToken,
-                    tokenOut: { 
-                      address: wrappedTokenAddress, 
-                      symbol: "wUSDC", 
-                      name: "Wrapped USDC", 
-                      decimals: 18,
-                      logoURI: "/img/logos/wusdc.png",
-                      verified: true,
-                      chainId: fromToken.chainId
-                    } as Token,
-                    protocol: "V3",
-                    fee: fee1,
-                  },
-                  {
-                    tokenIn: { 
-                      address: wrappedTokenAddress, 
-                      symbol: "wUSDC", 
-                      name: "Wrapped USDC", 
-                      decimals: 18,
-                      logoURI: "/img/logos/wusdc.png",
-                      verified: true,
-                      chainId: fromToken.chainId
-                    } as Token,
-                    tokenOut: toToken,
-                    protocol: "V3",
-                    fee: fee2,
-                  },
-                ],
-                priceImpact,
-                gasEstimate,
-              };
-            }
-          } catch (error) {
-            continue;
-          }
+            const spotResult = await quoter.quoteExactInput.staticCall(path, testIn);
+            priceImpact = calcV3Impact(spotResult[0], outputAmount);
+          } catch { /* probe failed — impact unavailable */ }
+
+          return { fee1, fee2, path, outputAmount, gasEstimate, priceImpact };
+        } catch {
+          return null;
         }
+      })
+    );
+
+    // Run both in parallel
+    const [singleHopResults, multiHopResults] = await Promise.all([
+      Promise.all(singleHopPromises),
+      Promise.all(multiHopPromises),
+    ]);
+
+    // Find best single-hop
+    let best: {
+      outputAmount: bigint;
+      gasEstimate: bigint;
+      priceImpact: number | undefined;
+      fee: number;
+      isMultiHop: false;
+    } | null = null;
+
+    for (const r of singleHopResults) {
+      if (r && (!best || r.outputAmount > best.outputAmount)) {
+        best = { ...r, isMultiHop: false };
       }
     }
-    
-    return bestQuote;
+
+    // Find best multi-hop
+    let bestMultiHop: {
+      outputAmount: bigint;
+      gasEstimate: bigint;
+      priceImpact: number | undefined;
+      fee1: number;
+      fee2: number;
+      path: string;
+    } | null = null;
+
+    for (const r of multiHopResults) {
+      if (r && (!bestMultiHop || r.outputAmount > bestMultiHop.outputAmount)) {
+        bestMultiHop = r;
+      }
+    }
+
+    // Choose overall best (single-hop vs multi-hop)
+    if (best && bestMultiHop && bestMultiHop.outputAmount > best.outputAmount) {
+      const wrappedToken = getTokenForAddress(wrappedTokenAddress, fromToken, toToken, wrappedTokenAddress);
+      return {
+        protocol: "V3",
+        outputAmount: bestMultiHop.outputAmount,
+        gasEstimate: bestMultiHop.gasEstimate,
+        priceImpact: bestMultiHop.priceImpact,
+        route: [
+          {
+            tokenIn: fromToken,
+            tokenOut: wrappedToken,
+            protocol: "V3",
+            fee: bestMultiHop.fee1,
+          },
+          {
+            tokenIn: wrappedToken,
+            tokenOut: toToken,
+            protocol: "V3",
+            fee: bestMultiHop.fee2,
+          },
+        ],
+      };
+    }
+
+    if (best) {
+      return {
+        protocol: "V3",
+        outputAmount: best.outputAmount,
+        gasEstimate: best.gasEstimate,
+        priceImpact: best.priceImpact,
+        route: [{
+          tokenIn: fromToken,
+          tokenOut: toToken,
+          protocol: "V3",
+          fee: best.fee,
+        }],
+      };
+    }
+
+    return null;
   } catch (error) {
     console.error("V3 quote failed:", error);
     return null;
@@ -308,11 +350,12 @@ export async function getSmartRouteQuote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedTokenAddress: string,
+  wrappedToken: Token,
   v2Enabled: boolean,
   v3Enabled: boolean
 ): Promise<SmartRoutingResult | null> {
   try {
+    const wrappedTokenAddress = wrappedToken.address;
     const quotes = await Promise.allSettled([
       v2Enabled ? getV2Quote(provider, v2RouterAddress, fromToken, toToken, amountIn, wrappedTokenAddress) : Promise.resolve(null),
       v3Enabled ? getV3Quote(provider, v3QuoterAddress, fromToken, toToken, amountIn, wrappedTokenAddress) : Promise.resolve(null),
@@ -400,129 +443,6 @@ function buildV2PathWithHop(
 }
 
 /**
- * Calculate V2 price impact using midpoint method
- */
-async function calculateV2PriceImpact(
-  router: Contract,
-  amountIn: bigint,
-  outputAmount: bigint,
-  path: string[]
-): Promise<number> {
-  try {
-    const halfAmountBigInt = amountIn / 2n;
-    
-    if (halfAmountBigInt > 0n) {
-      const halfAmountQuotes = await router.getAmountsOut(halfAmountBigInt, path);
-      const halfAmountOutput = halfAmountQuotes[halfAmountQuotes.length - 1];
-      
-      const expectedOutput = halfAmountOutput * 2n;
-      
-      if (expectedOutput > 0n && outputAmount > 0n) {
-        const impactBasisPoints = expectedOutput > outputAmount
-          ? ((expectedOutput - outputAmount) * 10000n) / expectedOutput
-          : ((outputAmount - expectedOutput) * 10000n) / expectedOutput;
-        
-        return Math.max(0, Math.abs(Number(impactBasisPoints) / 100));
-      }
-    }
-    
-    return 0;
-  } catch (error) {
-    console.error("V2 price impact calculation failed:", error);
-    return 0;
-  }
-}
-
-/**
- * Calculate V3 price impact for single-hop
- */
-async function calculateV3PriceImpact(
-  quoter: Contract,
-  tokenInAddress: string,
-  tokenOutAddress: string,
-  amountIn: bigint,
-  outputAmount: bigint,
-  fee: number
-): Promise<number> {
-  try {
-    const halfAmountBigInt = amountIn / 2n;
-    
-    if (halfAmountBigInt > 0n) {
-      const params = {
-        tokenIn: tokenInAddress,
-        tokenOut: tokenOutAddress,
-        amountIn: halfAmountBigInt,
-        fee: fee,
-        sqrtPriceLimitX96: 0n,
-      };
-      
-      const result = await quoter.quoteExactInputSingle.staticCall(params);
-      const halfAmountOutput = result[0];
-      
-      const expectedOutput = halfAmountOutput * 2n;
-      
-      if (expectedOutput > 0n && outputAmount > 0n) {
-        const impactBasisPoints = expectedOutput > outputAmount
-          ? ((expectedOutput - outputAmount) * 10000n) / expectedOutput
-          : ((outputAmount - expectedOutput) * 10000n) / expectedOutput;
-        
-        return Math.max(0, Math.abs(Number(impactBasisPoints) / 100));
-      }
-    }
-    
-    return 0;
-  } catch (error) {
-    console.error("V3 price impact calculation failed:", error);
-    return 0;
-  }
-}
-
-/**
- * Calculate V3 price impact for multi-hop routes
- */
-async function calculateV3MultiHopPriceImpact(
-  quoter: Contract,
-  encodedPath: string,
-  amountIn: bigint,
-  outputAmount: bigint
-): Promise<number> {
-  try {
-    const halfAmountBigInt = amountIn / 2n;
-    
-    if (halfAmountBigInt > 0n) {
-      
-      const result = await quoter.quoteExactInput.staticCall(encodedPath, halfAmountBigInt);
-      const halfAmountOutput = result[0];
-      
-      const expectedOutput = halfAmountOutput * 2n;
-      
-      if (expectedOutput > 0n && outputAmount > 0n) {
-        const impactBasisPoints = expectedOutput > outputAmount
-          ? ((expectedOutput - outputAmount) * 10000n) / expectedOutput
-          : ((outputAmount - expectedOutput) * 10000n) / expectedOutput;
-        
-        return Math.max(0, Math.abs(Number(impactBasisPoints) / 100));
-      }
-    }
-    
-    return 0;
-  } catch (error) {
-    console.error("V3 multi-hop price impact calculation failed:", error);
-    return 0;
-  }
-}
-
-/**
- * Sort tokens by address (required for V3)
- */
-function sortTokensByAddress(tokenA: Token, tokenB: Token): [Token, Token] {
-  const addressA = tokenA.address.toLowerCase();
-  const addressB = tokenB.address.toLowerCase();
-  return addressA < addressB ? [tokenA, tokenB] : [tokenB, tokenA];
-}
-
-/**
- * Helper to get token object for an address in the path
  */
 function getTokenForAddress(
   address: string,
@@ -533,7 +453,6 @@ function getTokenForAddress(
   if (address.toLowerCase() === fromToken.address.toLowerCase()) return fromToken;
   if (address.toLowerCase() === toToken.address.toLowerCase()) return toToken;
   
-  // Return wrapped token placeholder
   return {
     address: wrappedTokenAddress,
     symbol: "wUSDC",
