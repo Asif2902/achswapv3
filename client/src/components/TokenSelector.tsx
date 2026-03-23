@@ -491,17 +491,17 @@ function TokenRow({
     }, 500);
   };
   const endHold = () => {
-    if (isEndingHold.current) return;
-    isEndingHold.current = true;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
       setFadingOut(true);
       hideTimer.current = setTimeout(() => {
+        isEndingHold.current = false;
         setHolding(false);
         setFadingOut(false);
       }, 300);
     } else if (!holding) {
+      isEndingHold.current = false;
       setHolding(false);
       setFadingOut(false);
     }
@@ -547,7 +547,6 @@ function TokenRow({
         onClick={holding ? endHold : onClick}
         onPointerDown={startHold}
         onPointerUp={endHold}
-        onPointerLeave={endHold}
         onFocus={() => { if (onDelete && !token.verified) setFocused(true); }}
         onBlur={() => { if (!holding) setFocused(false); }}
         onKeyDown={(e) => {
@@ -693,17 +692,17 @@ function CommunityTokenRow({
     }, 500);
   };
   const endHold = () => {
-    if (isEndingHold.current) return;
-    isEndingHold.current = true;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
       setFadingOut(true);
       hideTimer.current = setTimeout(() => {
+        isEndingHold.current = false;
         setHolding(false);
         setFadingOut(false);
       }, 300);
     } else if (!holding) {
+      isEndingHold.current = false;
       setHolding(false);
       setFadingOut(false);
     }
@@ -746,7 +745,6 @@ function CommunityTokenRow({
         onClick={holding ? endHold : onClick}
         onPointerDown={startHold}
         onPointerUp={endHold}
-        onPointerLeave={endHold}
         onFocus={() => { if (onDelete) setFocused(true); }}
         onBlur={() => { if (!holding) setFocused(false); }}
         onKeyDown={(e) => {
