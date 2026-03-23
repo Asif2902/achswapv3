@@ -706,7 +706,7 @@ export function AddLiquidityV3Advanced() {
                 const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                 setAmountA(displayAmount);
                 let maxWei = balanceA;
-                if (tokenA.symbol === "USDC") {
+                if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
                   maxWei = (balanceA * 99n) / 100n;
                 }
                 maxAmountAWeiRef.current = maxWei;
@@ -726,7 +726,7 @@ export function AddLiquidityV3Advanced() {
                   const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                   setAmountA(displayAmount);
                   let maxWei = balanceA;
-                  if (tokenA.symbol === "USDC") {
+                  if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
                     maxWei = (balanceA * 99n) / 100n;
                   }
                   maxAmountAWeiRef.current = maxWei;
@@ -757,7 +757,7 @@ export function AddLiquidityV3Advanced() {
                 const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                 setAmountB(displayAmount);
                 let maxWei = balanceB;
-                if (tokenB.symbol === "USDC") {
+                if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
                   maxWei = (balanceB * 99n) / 100n;
                 }
                 maxAmountBWeiRef.current = maxWei;
@@ -777,7 +777,7 @@ export function AddLiquidityV3Advanced() {
                   const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                   setAmountB(displayAmount);
                   let maxWei = balanceB;
-                  if (tokenB.symbol === "USDC") {
+                  if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
                     maxWei = (balanceB * 99n) / 100n;
                   }
                   maxAmountBWeiRef.current = maxWei;
