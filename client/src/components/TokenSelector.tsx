@@ -458,6 +458,7 @@ function TokenRow({
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isEndingHold = useRef(false);
+  const touchStartPos = useRef<{ x: number; y: number } | null>(null);
   const currentResetKey = useRef(resetHolding);
 
   useEffect(() => {
@@ -469,6 +470,7 @@ function TokenRow({
       setFadingOut(false);
       setFocused(false);
       isEndingHold.current = false;
+      touchStartPos.current = null;
     }
     return () => {
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -476,11 +478,12 @@ function TokenRow({
     };
   }, [resetHolding]);
 
-  const startHold = () => {
+  const startHold = (e: React.PointerEvent) => {
     if (!onDelete || token.verified) return;
+    touchStartPos.current = { x: e.clientX, y: e.clientY };
     isEndingHold.current = false;
     holdTimer.current = setTimeout(() => {
-      if (isEndingHold.current) return;
+      if (isEndingHold.current || !touchStartPos.current) return;
       setHolding(true);
       hideTimer.current = setTimeout(() => {
         setFadingOut(true);
@@ -491,8 +494,18 @@ function TokenRow({
       }, 3000);
     }, 500);
   };
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!touchStartPos.current || holdTimer.current) return;
+    const dx = Math.abs(e.clientX - touchStartPos.current.x);
+    const dy = Math.abs(e.clientY - touchStartPos.current.y);
+    if (dx > 10 || dy > 10) {
+      isEndingHold.current = true;
+      touchStartPos.current = null;
+    }
+  };
   const endHold = () => {
     isEndingHold.current = true;
+    touchStartPos.current = null;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
@@ -547,6 +560,7 @@ function TokenRow({
         onClick={holding ? endHold : onClick}
         onPointerDown={startHold}
         onPointerUp={endHold}
+        onPointerMove={handlePointerMove}
         onFocus={() => { if (onDelete && !token.verified) setFocused(true); }}
         onBlur={() => { if (!holding) setFocused(false); }}
         onKeyDown={(e) => {
@@ -659,6 +673,7 @@ function CommunityTokenRow({
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isEndingHold = useRef(false);
+  const touchStartPos = useRef<{ x: number; y: number } | null>(null);
   const currentResetKey = useRef(resetHolding);
 
   useEffect(() => {
@@ -670,6 +685,7 @@ function CommunityTokenRow({
       setFadingOut(false);
       setFocused(false);
       isEndingHold.current = false;
+      touchStartPos.current = null;
     }
     return () => {
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -677,11 +693,12 @@ function CommunityTokenRow({
     };
   }, [resetHolding]);
 
-  const startHold = () => {
+  const startHold = (e: React.PointerEvent) => {
     if (!onDelete) return;
+    touchStartPos.current = { x: e.clientX, y: e.clientY };
     isEndingHold.current = false;
     holdTimer.current = setTimeout(() => {
-      if (isEndingHold.current) return;
+      if (isEndingHold.current || !touchStartPos.current) return;
       setHolding(true);
       hideTimer.current = setTimeout(() => {
         setFadingOut(true);
@@ -692,8 +709,18 @@ function CommunityTokenRow({
       }, 3000);
     }, 500);
   };
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!touchStartPos.current || holdTimer.current) return;
+    const dx = Math.abs(e.clientX - touchStartPos.current.x);
+    const dy = Math.abs(e.clientY - touchStartPos.current.y);
+    if (dx > 10 || dy > 10) {
+      isEndingHold.current = true;
+      touchStartPos.current = null;
+    }
+  };
   const endHold = () => {
     isEndingHold.current = true;
+    touchStartPos.current = null;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
@@ -745,6 +772,7 @@ function CommunityTokenRow({
         onClick={holding ? endHold : onClick}
         onPointerDown={startHold}
         onPointerUp={endHold}
+        onPointerMove={handlePointerMove}
         onFocus={() => { if (onDelete) setFocused(true); }}
         onBlur={() => { if (!holding) setFocused(false); }}
         onKeyDown={(e) => {
