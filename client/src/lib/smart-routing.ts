@@ -61,10 +61,8 @@ export async function getV2Quote(
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
     const DECIMALS_SCALE = 10n ** BigInt(fromToken.decimals);
-    const MIN_TOKENS = 10_000n;
-    const MAX_TOKENS = 10_000_000_000_000_000n;
-    const MIN = MIN_TOKENS * DECIMALS_SCALE;
-    const MAX = MAX_TOKENS * DECIMALS_SCALE;
+    const MIN = 10_000n;
+    const MAX = 10_000_000_000n;
     const testIn = amountIn > 0n
       ? (() => {
           const probeCandidate = amountIn / 1000n;
@@ -187,10 +185,8 @@ export async function getV3Quote(
 
     const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
     const DECIMALS_SCALE_OUT = 10n ** BigInt(toToken.decimals);
-    const MIN_TOKENS = 10_000n;
-    const MAX_TOKENS = 10_000_000_000_000_000n;
-    const MIN = MIN_TOKENS * DECIMALS_SCALE_IN;
-    const MAX = MAX_TOKENS * DECIMALS_SCALE_IN;
+    const MIN = 10_000n;
+    const MAX = 10_000_000_000n;
     const testIn = amountIn > 0n
       ? (() => {
           const probeCandidate = amountIn / 1000n;

@@ -277,6 +277,8 @@ export function RemoveLiquidityV2() {
   useEffect(() => {
     importedPositionsRef.current = [];
     hasAutoSelected.current = false;
+    setPositions([]);
+    setSelectedPosition(null);
   }, [address, chainId]);
 
   const handleImportPool = async () => {

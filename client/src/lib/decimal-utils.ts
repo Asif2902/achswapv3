@@ -8,7 +8,9 @@ function truncateDecimals(value: string, decimals: number): string {
   if (num > 0) {
     const threshold = Math.pow(10, -displayDecimals);
     if (num < threshold) {
-      return threshold.toFixed(displayDecimals);
+      const factor = Math.pow(10, displayDecimals);
+      const truncated = Math.floor(num * factor) / factor;
+      return truncated.toFixed(displayDecimals);
     }
   }
   const parts = value.split('.');

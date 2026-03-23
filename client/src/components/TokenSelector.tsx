@@ -526,7 +526,7 @@ function TokenRow({
         onFocus={() => { if (onDelete && !token.verified) setFocused(true); }}
         onBlur={() => { if (!holding) setFocused(false); }}
         onKeyDown={(e) => {
-          if ((e.key === "Delete" || e.key === "Backspace" || e.key === "Enter") && onDelete && !token.verified) {
+          if ((e.key === "Delete" || e.key === "Backspace") && onDelete && !token.verified) {
             e.preventDefault();
             onDelete(token.address);
           }
@@ -703,7 +703,7 @@ function CommunityTokenRow({
         onFocus={() => { if (onDelete) setFocused(true); }}
         onBlur={() => { if (!holding) setFocused(false); }}
         onKeyDown={(e) => {
-          if ((e.key === "Delete" || e.key === "Backspace" || e.key === "Enter") && onDelete) {
+          if ((e.key === "Delete" || e.key === "Backspace") && onDelete) {
             e.preventDefault();
             onDelete(token.address);
           }
