@@ -453,6 +453,7 @@ function TokenRow({
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [holding, setHolding] = useState(false);
+  const [fadingOut, setFadingOut] = useState(false);
   const [focused, setFocused] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -462,6 +463,7 @@ function TokenRow({
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
       if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
       setHolding(false);
+      setFadingOut(false);
       setFocused(false);
     }
     return () => {
@@ -477,36 +479,43 @@ function TokenRow({
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-    if (holding) {
-      hideTimer.current = setTimeout(() => setHolding(false), 5000);
-    } else {
+    if (holding && !fadingOut) {
+      setFadingOut(true);
+      hideTimer.current = setTimeout(() => {
+        setHolding(false);
+        setFadingOut(false);
+      }, 300);
+    } else if (!holding) {
       setHolding(false);
+      setFadingOut(false);
     }
   };
 
-  const showDelete = !!(onDelete && !token.verified && (holding || focused));
+  const showDelete = !!(onDelete && !token.verified && (holding || focused || fadingOut));
   const dismissDelete = () => {
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     setHolding(false);
+    setFadingOut(false);
     setFocused(false);
   };
 
   return (
     <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
       {/* Delete slide-in from left */}
-      {showDelete && (
+      {(holding || focused || fadingOut) && (
         <div
           className="absolute inset-y-0 left-0 flex items-center pl-2"
           style={{
             width: 52,
-            transform: "translateX(0)",
-            transition: "transform 0.22s cubic-bezier(0.32,0.72,0,1)",
+            transform: fadingOut ? "translateX(-100%)" : "translateX(0)",
+            transition: "transform 0.3s cubic-bezier(0.32,0.72,0,1), opacity 0.3s ease-out",
+            opacity: fadingOut ? 0 : 1,
             zIndex: 2,
             background: "rgba(239,68,68,0.12)",
           }}
         >
           <button
-            onClick={(e) => { e.stopPropagation(); dismissDelete(); onDelete(token.address); }}
+            onClick={(e) => { e.stopPropagation(); dismissDelete(); onDelete?.(token.address); }}
             className="w-9 h-9 rounded-lg flex items-center justify-center"
             style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
             title="Remove token"
@@ -633,6 +642,7 @@ function CommunityTokenRow({
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [holding, setHolding] = useState(false);
+  const [fadingOut, setFadingOut] = useState(false);
   const [focused, setFocused] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -642,6 +652,7 @@ function CommunityTokenRow({
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
       if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
       setHolding(false);
+      setFadingOut(false);
       setFocused(false);
     }
     return () => {
@@ -657,35 +668,42 @@ function CommunityTokenRow({
   const endHold = () => {
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-    if (holding) {
-      hideTimer.current = setTimeout(() => setHolding(false), 5000);
-    } else {
+    if (holding && !fadingOut) {
+      setFadingOut(true);
+      hideTimer.current = setTimeout(() => {
+        setHolding(false);
+        setFadingOut(false);
+      }, 300);
+    } else if (!holding) {
       setHolding(false);
+      setFadingOut(false);
     }
   };
 
-  const showDelete = !!(onDelete && (holding || focused));
+  const showDelete = !!(onDelete && (holding || focused || fadingOut));
   const dismissDelete = () => {
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     setHolding(false);
+    setFadingOut(false);
     setFocused(false);
   };
 
   return (
     <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
-      {showDelete && (
+      {(holding || focused || fadingOut) && (
         <div
           className="absolute inset-y-0 left-0 flex items-center pl-2"
           style={{
             width: 52,
-            transform: "translateX(0)",
-            transition: "transform 0.22s cubic-bezier(0.32,0.72,0,1)",
+            transform: fadingOut ? "translateX(-100%)" : "translateX(0)",
+            transition: "transform 0.3s cubic-bezier(0.32,0.72,0,1), opacity 0.3s ease-out",
+            opacity: fadingOut ? 0 : 1,
             zIndex: 2,
             background: "rgba(139,92,246,0.1)",
           }}
         >
           <button
-            onClick={(e) => { e.stopPropagation(); dismissDelete(); onDelete(token.address); }}
+            onClick={(e) => { e.stopPropagation(); dismissDelete(); onDelete?.(token.address); }}
             className="w-9 h-9 rounded-lg flex items-center justify-center"
             style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
             title="Remove token"

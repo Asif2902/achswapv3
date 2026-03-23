@@ -215,9 +215,36 @@ export default function Swap() {
         const legacy = localStorage.getItem("importedTokens");
         if (legacy) {
           const parsedLegacy = JSON.parse(legacy);
-          const legacyTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
-          localStorage.setItem(key, JSON.stringify(legacyTokens));
-          imported = legacyTokens;
+          if (Array.isArray(parsedLegacy)) {
+            const byChainId: Record<string, Token[]> = {};
+            for (const t of parsedLegacy) {
+              const cid = String(t.chainId);
+              if (!byChainId[cid]) byChainId[cid] = [];
+              byChainId[cid].push(t);
+            }
+            for (const cid of Object.keys(byChainId)) {
+              const existingKey = `importedTokens:${cid}`;
+              const existingData = localStorage.getItem(existingKey);
+              if (existingData) {
+                try {
+                  const existing = JSON.parse(existingData);
+                  if (Array.isArray(existing)) {
+                    const existingAddrs = new Set(existing.map((et: Token) => et.address.toLowerCase()));
+                    const merged = [...existing, ...byChainId[cid].filter((lt: Token) => !existingAddrs.has(lt.address.toLowerCase()))];
+                    localStorage.setItem(existingKey, JSON.stringify(merged));
+                  } else {
+                    localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                  }
+                } catch {
+                  localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+                }
+              } else {
+                localStorage.setItem(existingKey, JSON.stringify(byChainId[cid]));
+              }
+            }
+          }
+          localStorage.removeItem("importedTokens");
+          imported = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
         }
       }
     } catch { imported = []; }
