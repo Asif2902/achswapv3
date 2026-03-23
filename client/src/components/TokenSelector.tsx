@@ -518,13 +518,13 @@ function TokenRow({
   return (
     <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
       {/* Delete slide-in from left */}
-      {(holding || focused || fadingOut) && (
+      {(holding || focused) && (
         <div
           className="absolute inset-y-0 left-0 flex items-center pl-2"
           style={{
             width: 52,
-            transform: fadingOut ? "translateX(-100%)" : "translateX(0)",
-            transition: "transform 0.3s cubic-bezier(0.32,0.72,0,1), opacity 0.3s ease-out",
+            transform: "translateX(0)",
+            transition: "transform 0.25s ease-out, opacity 0.2s ease-out",
             opacity: fadingOut ? 0 : 1,
             zIndex: 2,
             background: "rgba(239,68,68,0.12)",
@@ -559,11 +559,8 @@ function TokenRow({
         className="w-full flex items-center justify-between px-3 py-2.5 text-left relative active:scale-[0.98]"
         style={{
           background: pressed ? "rgba(255,255,255,0.08)" : "transparent",
-          transition: "background 0.12s ease, transform 0.1s ease",
-          transform: holding ? "translateX(52px)" : "translateX(0)",
-          transitionProperty: "background, transform",
-          transitionDuration: holding ? "0s, 0.22s" : "0.12s, 0.18s",
-          transitionTimingFunction: holding ? "linear" : "ease",
+          transition: "background 0.12s ease, transform 0.25s ease-out",
+          transform: (holding || fadingOut) ? "translateX(52px)" : "translateX(0)",
           borderRadius: 14,
           position: "relative",
           zIndex: 1,
@@ -722,13 +719,13 @@ function CommunityTokenRow({
 
   return (
     <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
-      {(holding || focused || fadingOut) && (
+      {(holding || focused) && (
         <div
           className="absolute inset-y-0 left-0 flex items-center pl-2"
           style={{
             width: 52,
-            transform: fadingOut ? "translateX(-100%)" : "translateX(0)",
-            transition: "transform 0.3s cubic-bezier(0.32,0.72,0,1), opacity 0.3s ease-out",
+            transform: "translateX(0)",
+            transition: "transform 0.25s ease-out, opacity 0.2s ease-out",
             opacity: fadingOut ? 0 : 1,
             zIndex: 2,
             background: "rgba(139,92,246,0.1)",
@@ -761,11 +758,8 @@ function CommunityTokenRow({
         className="w-full flex items-center justify-between px-3 py-2.5 text-left relative active:scale-[0.98]"
         style={{
           background: pressed ? "rgba(139,92,246,0.1)" : "transparent",
-          transition: "background 0.12s ease, transform 0.1s ease",
-          transform: holding ? "translateX(52px)" : "translateX(0)",
-          transitionProperty: "background, transform",
-          transitionDuration: holding ? "0s, 0.22s" : "0.12s, 0.18s",
-          transitionTimingFunction: holding ? "linear" : "ease",
+          transition: "background 0.12s ease, transform 0.25s ease-out",
+          transform: (holding || fadingOut) ? "translateX(52px)" : "translateX(0)",
           borderRadius: 14,
           position: "relative",
           zIndex: 1,
