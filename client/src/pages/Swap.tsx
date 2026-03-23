@@ -138,12 +138,12 @@ export default function Swap() {
     const next = quoteRefreshNonceRef.current + 1;
     quoteRefreshNonceRef.current = next;
     setQuoteRefreshNonce(next);
-    const displayAmount = getMaxAmount(balance.value, balance.decimals, token.symbol);
     let maxWei = balance.value;
     if (token.symbol === "USDC") {
       maxWei = (balance.value * 99n) / 100n;
     }
     maxAmountWeiRef.current = maxWei;
+    const displayAmount = getMaxAmount(maxWei, balance.decimals, token.symbol);
     return displayAmount;
   };
 
@@ -256,7 +256,15 @@ export default function Swap() {
 
   const handleDeleteToken = (address: string) => {
     const key = `importedTokens:${chainId}`;
-    const imported: Token[] = JSON.parse(localStorage.getItem(key) || "[]");
+    let imported: Token[] = [];
+    try {
+      const raw = localStorage.getItem(key);
+      const parsed = raw ? JSON.parse(raw) : [];
+      imported = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      localStorage.removeItem(key);
+      imported = [];
+    }
     const updated = imported.filter(t => !(t.address.toLowerCase() === address.toLowerCase() && t.chainId === chainId));
     localStorage.setItem(key, JSON.stringify(updated));
     setTokens(prev => prev.filter(t => !(t.address.toLowerCase() === address.toLowerCase() && t.chainId === chainId)));
@@ -451,6 +459,7 @@ export default function Swap() {
     if (fromToken.symbol === "USDC" && toToken.symbol === "wUSDC") { await handleWrap(fromAmount); return; }
     if (fromToken.symbol === "wUSDC" && toToken.symbol === "USDC") { await handleUnwrap(fromAmount); return; }
     setIsSwapping(true);
+    let swapSucceeded = false;
     try {
       if (!address || !window.ethereum) throw new Error("Please connect your wallet");
       if (!contracts) throw new Error("Chain contracts not configured");
@@ -652,8 +661,8 @@ export default function Swap() {
           }
 
           const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-            tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
-          } else {
+          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
+        } else {
           // Multi-hop V3 path
           const { encodePath } = await import("@/lib/v3-utils");
           const tks: string[] = [fromERC20];
@@ -732,6 +741,7 @@ export default function Swap() {
           </div>
         ),
       });
+      swapSucceeded = true;
     } catch (error: any) {
       const errorInfo = getErrorForToast(error);
       toast({ 
@@ -740,11 +750,11 @@ export default function Swap() {
         rawError: errorInfo.rawError,
         variant: "destructive" 
       });
-    } finally { setIsSwapping(false); }
+    } finally { setIsSwapping(false); if (!swapSucceeded) setImpactAcknowledged(false); }
   };
 
   const handleSwap = async () => {
-    if ((priceImpact === null || priceImpact >= HIGH_IMPACT_THRESHOLD) && !impactAcknowledged) {
+    if (priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged) {
       setHighImpactConfirm(true);
       return;
     }
