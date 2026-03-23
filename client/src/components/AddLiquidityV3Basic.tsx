@@ -152,6 +152,12 @@ export function AddLiquidityV3Basic() {
       logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : t.logoURI
     }));
     setTokens(combinedTokens);
+    setTokenA(null);
+    setTokenB(null);
+    setAmountA("");
+    setAmountB("");
+    maxAmountAWeiRef.current = null;
+    maxAmountBWeiRef.current = null;
   }, [chainId]);
 
   // ── Default tokens ─────────────────────────────────────────────────────────
@@ -168,6 +174,7 @@ export function AddLiquidityV3Basic() {
       const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` }); return exists; }
       if (!chainId) throw new Error("Chain ID not available");
+      if (!getContractsForChain(chainId)) throw new Error("Unsupported network");
       const provider = createAlchemyProvider(chainId);
       const ERC20_META_ABI = ["function name() view returns (string)", "function symbol() view returns (string)", "function decimals() view returns (uint8)"];
       const contract = new Contract(addr, ERC20_META_ABI, provider);
@@ -286,6 +293,7 @@ export function AddLiquidityV3Basic() {
     const [tok0] = sortTokens({ ...tokenA, address: getERC20Address(tokenA, chainId) }, { ...tokenB, address: getERC20Address(tokenB, chainId) });
     const isToken0A = getERC20Address(tokenA, chainId).toLowerCase() === tok0.address.toLowerCase();
     setAmountB((isToken0A ? v * currentPrice : v / currentPrice).toFixed(6));
+    maxAmountBWeiRef.current = null;
   }, [amountA, currentPrice, tokenA, tokenB, chainId]);
 
   const amountAExceedsBalance = isConnected && balanceA !== null && tokenA !== null && amountA !== "" && parseFloat(amountA) > 0 && parseAmount(amountA, tokenA.decimals) > balanceA;
@@ -310,15 +318,14 @@ export function AddLiquidityV3Basic() {
       let amount0Desired: bigint;
       let amount1Desired: bigint;
       
-      if (maxAmountAWeiRef.current !== null && maxAmountBWeiRef.current !== null) {
-        amount0Desired = isToken0A ? maxAmountAWeiRef.current : maxAmountBWeiRef.current;
-        amount1Desired = isToken0A ? maxAmountBWeiRef.current : maxAmountAWeiRef.current;
-        maxAmountAWeiRef.current = null;
-        maxAmountBWeiRef.current = null;
-      } else {
-        amount0Desired = parseAmount(isToken0A ? amountA : amountB, token0.decimals);
-        amount1Desired = parseAmount(isToken0A ? amountB : amountA, token1.decimals);
-      }
+      const parsedA = maxAmountAWeiRef.current !== null ? maxAmountAWeiRef.current : parseAmount(amountA, tokenA.decimals);
+      const parsedB = maxAmountBWeiRef.current !== null ? maxAmountBWeiRef.current : parseAmount(amountB, tokenB.decimals);
+      
+      amount0Desired = isToken0A ? parsedA : parsedB;
+      amount1Desired = isToken0A ? parsedB : parsedA;
+
+      maxAmountAWeiRef.current = null;
+      maxAmountBWeiRef.current = null;
       
       let nativeAmount = 0n;
       if (tokenAIsNative) nativeAmount = isToken0A ? amount0Desired : amount1Desired;
@@ -488,7 +495,12 @@ export function AddLiquidityV3Basic() {
               <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
                 Balance:{" "}
                 <span
-                  onClick={() => balanceA !== null && setAmountA(formatUnits(balanceA, tokenA.decimals))}
+                  onClick={() => {
+                    if (balanceA !== null) {
+                      setAmountA(formatUnits(balanceA, tokenA.decimals));
+                      maxAmountAWeiRef.current = null;
+                    }
+                  }}
                   style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600, cursor: balanceA !== null ? "pointer" : "default" }}
                 >
                   {balanceA !== null ? formatBalance(balanceA, tokenA.decimals) : "—"} {tokenA.symbol}
@@ -499,7 +511,7 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder="0.00" value={amountA}
-              onChange={e => setAmountA(e.target.value)}
+              onChange={e => { setAmountA(e.target.value); maxAmountAWeiRef.current = null; }}
               className="v3b-input" style={{ flex: 1, minWidth: 0 }}
             />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
@@ -539,7 +551,12 @@ export function AddLiquidityV3Basic() {
               <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
                 Balance:{" "}
                 <span
-                  onClick={() => balanceB !== null && !poolExists && setAmountB(formatUnits(balanceB, tokenB.decimals))}
+                  onClick={() => {
+                    if (balanceB !== null && !poolExists) {
+                      setAmountB(formatUnits(balanceB, tokenB.decimals));
+                      maxAmountBWeiRef.current = null;
+                    }
+                  }}
                   style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600, cursor: (balanceB !== null && !poolExists) ? "pointer" : "default" }}
                 >
                   {balanceB !== null ? formatBalance(balanceB, tokenB.decimals) : "—"} {tokenB.symbol}
@@ -550,7 +567,7 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder={poolExists && currentPrice ? "Auto-calculated" : "0.00"} value={amountB}
-              onChange={e => setAmountB(e.target.value)}
+              onChange={e => { setAmountB(e.target.value); maxAmountBWeiRef.current = null; }}
               disabled={poolExists && !!currentPrice}
               className="v3b-input" style={{ flex: 1, minWidth: 0, opacity: poolExists && currentPrice ? 0.7 : 1 }}
             />
