@@ -66,7 +66,7 @@ export async function getV2Quote(
       ? (() => {
           const probeCandidate = amountIn / 1000n;
           const bounded = probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
-          return bounded;
+          return bounded > amountIn ? amountIn : bounded;
         })()
       : MIN;
 
@@ -167,16 +167,6 @@ export async function getV3Quote(
     if (fromToken.address.toLowerCase() === toToken.address.toLowerCase()) {
       return null;
     }
-
-    const wrappedToken: Token = {
-      address: wrappedTokenAddress,
-      symbol: "wUSDC",
-      name: "Wrapped USDC",
-      decimals: 18,
-      logoURI: "/img/logos/wusdc.png",
-      verified: true,
-      chainId: fromToken.chainId,
-    };
 
     const quoter = new Contract(quoterAddress, QUOTER_V2_ABI, provider);
     const { encodePath } = await import("./v3-utils");

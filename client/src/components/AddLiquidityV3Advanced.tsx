@@ -174,9 +174,19 @@ export function AddLiquidityV3Advanced() {
         const legacy = localStorage.getItem("importedTokens");
         if (legacy) {
           const parsedLegacy = JSON.parse(legacy);
-          const legacyTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
-          localStorage.setItem(key, JSON.stringify(legacyTokens));
-          importedTokens = legacyTokens;
+          if (Array.isArray(parsedLegacy)) {
+            const byChainId: Record<string, Token[]> = {};
+            for (const t of parsedLegacy) {
+              const cid = String(t.chainId);
+              if (!byChainId[cid]) byChainId[cid] = [];
+              byChainId[cid].push(t);
+            }
+            for (const cid of Object.keys(byChainId)) {
+              localStorage.setItem(`importedTokens:${cid}`, JSON.stringify(byChainId[cid]));
+            }
+          }
+          localStorage.removeItem("importedTokens");
+          importedTokens = Array.isArray(parsedLegacy) ? parsedLegacy.filter((t: Token) => t.chainId === chainId) : [];
         }
       }
     } catch {

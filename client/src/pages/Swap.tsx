@@ -717,7 +717,7 @@ export default function Swap() {
   };
 
   const handleSwap = async () => {
-    if (priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged) {
+    if ((priceImpact === null || priceImpact >= HIGH_IMPACT_THRESHOLD) && !impactAcknowledged) {
       setHighImpactConfirm(true);
       return;
     }
