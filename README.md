@@ -180,7 +180,7 @@ The swap interface automatically finds the best route across V2 and V3 pools:
 - Compares quotes from both V2 and V3 pools
 - Routes through the pool with the best price
 - Visualizes the routing path for transparency
-
+- Price impact protection
 ### V3 Concentrated Liquidity
 - **Basic Mode**: Preset fee tiers (0.05%, 0.3%, 1%) with suggested price ranges
 - **Advanced Mode**: Custom tick selection with full control
