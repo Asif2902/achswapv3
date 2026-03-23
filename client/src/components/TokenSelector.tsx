@@ -458,15 +458,11 @@ function TokenRow({
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isEndingHold = useRef(false);
-  const isMounted = useRef(true);
+  const currentResetKey = useRef(resetHolding);
 
   useEffect(() => {
-    return () => { isMounted.current = false; };
-  }, []);
-
-  useEffect(() => {
-    if (resetHolding) {
-      isMounted.current = false;
+    if (resetHolding !== currentResetKey.current) {
+      currentResetKey.current = resetHolding;
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
       if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
       setHolding(false);
@@ -474,19 +470,21 @@ function TokenRow({
       setFocused(false);
       isEndingHold.current = false;
     }
+    return () => {
+      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
+      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    };
   }, [resetHolding]);
 
   const startHold = () => {
-    if (!onDelete || token.verified || !isMounted.current) return;
+    if (!onDelete || token.verified) return;
     isEndingHold.current = false;
     holdTimer.current = setTimeout(() => {
-      if (!isMounted.current || isEndingHold.current) return;
+      if (isEndingHold.current) return;
       setHolding(true);
       hideTimer.current = setTimeout(() => {
-        if (!isMounted.current) return;
         setFadingOut(true);
         setTimeout(() => {
-          if (!isMounted.current) return;
           setHolding(false);
           setFadingOut(false);
         }, 300);
@@ -494,14 +492,12 @@ function TokenRow({
     }, 500);
   };
   const endHold = () => {
-    if (!isMounted.current) return;
     isEndingHold.current = true;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
       setFadingOut(true);
       hideTimer.current = setTimeout(() => {
-        if (!isMounted.current) return;
         setHolding(false);
         setFadingOut(false);
       }, 300);
@@ -663,15 +659,11 @@ function CommunityTokenRow({
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isEndingHold = useRef(false);
-  const isMounted = useRef(true);
+  const currentResetKey = useRef(resetHolding);
 
   useEffect(() => {
-    return () => { isMounted.current = false; };
-  }, []);
-
-  useEffect(() => {
-    if (resetHolding) {
-      isMounted.current = false;
+    if (resetHolding !== currentResetKey.current) {
+      currentResetKey.current = resetHolding;
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
       if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
       setHolding(false);
@@ -679,19 +671,21 @@ function CommunityTokenRow({
       setFocused(false);
       isEndingHold.current = false;
     }
+    return () => {
+      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
+      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
+    };
   }, [resetHolding]);
 
   const startHold = () => {
-    if (!onDelete || !isMounted.current) return;
+    if (!onDelete) return;
     isEndingHold.current = false;
     holdTimer.current = setTimeout(() => {
-      if (!isMounted.current || isEndingHold.current) return;
+      if (isEndingHold.current) return;
       setHolding(true);
       hideTimer.current = setTimeout(() => {
-        if (!isMounted.current) return;
         setFadingOut(true);
         setTimeout(() => {
-          if (!isMounted.current) return;
           setHolding(false);
           setFadingOut(false);
         }, 300);
@@ -699,14 +693,12 @@ function CommunityTokenRow({
     }, 500);
   };
   const endHold = () => {
-    if (!isMounted.current) return;
     isEndingHold.current = true;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
       setFadingOut(true);
       hideTimer.current = setTimeout(() => {
-        if (!isMounted.current) return;
         setHolding(false);
         setFadingOut(false);
       }, 300);
