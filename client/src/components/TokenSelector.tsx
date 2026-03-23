@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2 } from "lucide-react";
 import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
@@ -413,6 +413,138 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   );
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// ─── HoldToRevealRow Wrapper ──────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────────
+
+export const HoldToRevealRow: React.FC<{
+  isUnverified: boolean;
+  onDelete?: () => void;
+  children: React.ReactNode;
+}> = ({ isUnverified, onDelete, children }) => {
+  const [isRevealed, setIsRevealed] = useState(false);
+  const startCoords = useRef({ x: 0, y: 0 });
+  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const preventClick = useRef(false);
+
+  const clearTimers = useCallback(() => {
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+    if (resetTimer.current) clearTimeout(resetTimer.current);
+    holdTimer.current = null;
+    resetTimer.current = null;
+  }, []);
+
+  useEffect(() => clearTimers, [clearTimers]);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isRevealed || !onDelete) return;
+    
+    startCoords.current = { x: e.clientX, y: e.clientY };
+    preventClick.current = false;
+    
+    if (holdTimer.current) clearTimeout(holdTimer.current);
+    
+    holdTimer.current = setTimeout(() => {
+      setIsRevealed(true);
+      preventClick.current = true;
+      holdTimer.current = null;
+      
+      if (resetTimer.current) clearTimeout(resetTimer.current);
+      resetTimer.current = setTimeout(() => {
+        setIsRevealed(false);
+        resetTimer.current = null;
+      }, 3000);
+    }, 500);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!holdTimer.current || isRevealed) return;
+    const dx = e.clientX - startCoords.current.x;
+    const dy = e.clientY - startCoords.current.y;
+    if (dx * dx + dy * dy > 100) {
+      clearTimeout(holdTimer.current);
+      holdTimer.current = null;
+    }
+  };
+
+  const handlePointerUpOrCancel = () => {
+    if (holdTimer.current) {
+      clearTimeout(holdTimer.current);
+      holdTimer.current = null;
+    }
+    setTimeout(() => { preventClick.current = false; }, 50);
+  };
+
+  const handleClickCapture = (e: React.MouseEvent) => {
+    if (isRevealed || preventClick.current) {
+      e.stopPropagation();
+      e.preventDefault();
+      // If user taps the row while revealed, we hide it immediately rather than waiting 3s
+      if (isRevealed) {
+        clearTimers();
+        setIsRevealed(false);
+      }
+    }
+  };
+
+  const handleDelete = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    e.preventDefault();
+    clearTimers();
+    setIsRevealed(false);
+    onDelete?.();
+  };
+
+  if (!isUnverified) return <>{children}</>;
+
+  return (
+    <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
+      <div 
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          bottom: 0,
+          width: 52,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: "rgba(239, 68, 68, 0.2)",
+          zIndex: 0,
+          opacity: isRevealed ? 1 : 0,
+          transition: "opacity 200ms ease-out",
+          pointerEvents: isRevealed ? "auto" : "none",
+        }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onPointerUp={handleDelete}
+      >
+        <Trash2 style={{ width: 18, height: 18, color: "#ef4444" }} />
+      </div>
+
+      <div
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUpOrCancel}
+        onPointerCancel={handlePointerUpOrCancel}
+        onClickCapture={handleClickCapture}
+        style={{
+          position: "relative",
+          zIndex: 1,
+          transform: isRevealed ? "translateX(52px)" : "translateX(0px)",
+          transition: "transform 200ms ease-out",
+          width: "100%",
+          touchAction: "pan-y",
+          userSelect: "none",
+          WebkitUserSelect: "none"
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+};
+
 // ─── Token Row (existing/listed tokens) ──────────────────────────────────────
 
 function TokenRow({
@@ -452,117 +584,18 @@ function TokenRow({
 
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
-  const [holding, setHolding] = useState(false);
-  const [fadingOut, setFadingOut] = useState(false);
-  const [focused, setFocused] = useState(false);
-  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isEndingHold = useRef(false);
-  const touchStartPos = useRef<{ x: number; y: number } | null>(null);
-  const currentResetKey = useRef(resetHolding);
-
-  useEffect(() => {
-    if (resetHolding !== currentResetKey.current) {
-      currentResetKey.current = resetHolding;
-      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-      setHolding(false);
-      setFadingOut(false);
-      setFocused(false);
-      isEndingHold.current = false;
-      touchStartPos.current = null;
-    }
-    return () => {
-      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-    };
-  }, [resetHolding]);
-
-  const startHold = (e: React.PointerEvent) => {
-    if (!onDelete || token.verified) return;
-    touchStartPos.current = { x: e.clientX, y: e.clientY };
-    isEndingHold.current = false;
-    holdTimer.current = setTimeout(() => {
-      if (isEndingHold.current || !touchStartPos.current) return;
-      setHolding(true);
-      hideTimer.current = setTimeout(() => {
-        setFadingOut(true);
-        setTimeout(() => {
-          setHolding(false);
-          setFadingOut(false);
-        }, 300);
-      }, 3000);
-    }, 500);
-  };
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (!touchStartPos.current || holdTimer.current) return;
-    const dx = Math.abs(e.clientX - touchStartPos.current.x);
-    const dy = Math.abs(e.clientY - touchStartPos.current.y);
-    if (dx > 10 || dy > 10) {
-      isEndingHold.current = true;
-      touchStartPos.current = null;
-    }
-  };
-  const endHold = () => {
-    isEndingHold.current = true;
-    touchStartPos.current = null;
-    if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-    if (holding && !fadingOut) {
-      setFadingOut(true);
-      hideTimer.current = setTimeout(() => {
-        setHolding(false);
-        setFadingOut(false);
-      }, 300);
-    } else {
-      setHolding(false);
-      setFadingOut(false);
-    }
-  };
-
-  const showDelete = !!(onDelete && !token.verified && (holding || focused || fadingOut));
-  const dismissDelete = () => {
-    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-    setHolding(false);
-    setFadingOut(false);
-    setFocused(false);
-  };
 
   return (
-    <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
-      {/* Delete slide-in from left */}
-      {(holding || focused) && (
-        <div
-          className="absolute inset-y-0 left-0 flex items-center pl-2"
-          style={{
-            width: 52,
-            transform: "translateX(0)",
-            transition: "transform 0.25s ease-out, opacity 0.2s ease-out",
-            opacity: fadingOut ? 0 : 1,
-            zIndex: 2,
-            background: "rgba(239,68,68,0.12)",
-          }}
-        >
-          <button
-            onClick={(e) => { e.stopPropagation(); dismissDelete(); onDelete?.(token.address); }}
-            className="w-9 h-9 rounded-lg flex items-center justify-center"
-            style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
-            title="Remove token"
-            aria-label={`Remove ${token.symbol}`}
-          >
-            <Trash2 style={{ width: 15, height: 15, color: "#f87171" }} />
-          </button>
-        </div>
-      )}
-      {/* Main row — slides right when holding */}
+    <HoldToRevealRow 
+      isUnverified={!!(onDelete && !token.verified)} 
+      onDelete={() => onDelete?.(token.address)}
+    >
       <button
         data-testid={`button-select-token-${token.symbol}`}
-        onClick={holding ? endHold : onClick}
-        onPointerDown={startHold}
-        onPointerUp={endHold}
-        onPointerMove={handlePointerMove}
-        onFocus={() => { if (onDelete && !token.verified) setFocused(true); }}
-        onBlur={() => { if (!holding) setFocused(false); }}
+        onClick={onClick}
+        onPointerDown={() => setPressed(true)}
+        onPointerUp={() => setPressed(false)}
+        onPointerLeave={() => setPressed(false)}
         onKeyDown={(e) => {
           if ((e.key === "Delete" || e.key === "Backspace") && onDelete && !token.verified) {
             e.preventDefault();
@@ -572,11 +605,8 @@ function TokenRow({
         className="w-full flex items-center justify-between px-3 py-2.5 text-left relative active:scale-[0.98]"
         style={{
           background: pressed ? "rgba(255,255,255,0.08)" : "transparent",
-          transition: "background 0.12s ease, transform 0.25s ease-out",
-          transform: (holding || fadingOut) ? "translateX(52px)" : "translateX(0)",
+          transition: "background 0.12s ease",
           borderRadius: 14,
-          position: "relative",
-          zIndex: 1,
         }}
       >
         <div
@@ -630,7 +660,7 @@ function TokenRow({
           </div>
         )}
       </button>
-    </div>
+    </HoldToRevealRow>
   );
 }
 
@@ -667,114 +697,17 @@ function CommunityTokenRow({
 
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
-  const [holding, setHolding] = useState(false);
-  const [fadingOut, setFadingOut] = useState(false);
-  const [focused, setFocused] = useState(false);
-  const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isEndingHold = useRef(false);
-  const touchStartPos = useRef<{ x: number; y: number } | null>(null);
-  const currentResetKey = useRef(resetHolding);
-
-  useEffect(() => {
-    if (resetHolding !== currentResetKey.current) {
-      currentResetKey.current = resetHolding;
-      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-      setHolding(false);
-      setFadingOut(false);
-      setFocused(false);
-      isEndingHold.current = false;
-      touchStartPos.current = null;
-    }
-    return () => {
-      if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-      if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-    };
-  }, [resetHolding]);
-
-  const startHold = (e: React.PointerEvent) => {
-    if (!onDelete) return;
-    touchStartPos.current = { x: e.clientX, y: e.clientY };
-    isEndingHold.current = false;
-    holdTimer.current = setTimeout(() => {
-      if (isEndingHold.current || !touchStartPos.current) return;
-      setHolding(true);
-      hideTimer.current = setTimeout(() => {
-        setFadingOut(true);
-        setTimeout(() => {
-          setHolding(false);
-          setFadingOut(false);
-        }, 300);
-      }, 3000);
-    }, 500);
-  };
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (!touchStartPos.current || holdTimer.current) return;
-    const dx = Math.abs(e.clientX - touchStartPos.current.x);
-    const dy = Math.abs(e.clientY - touchStartPos.current.y);
-    if (dx > 10 || dy > 10) {
-      isEndingHold.current = true;
-      touchStartPos.current = null;
-    }
-  };
-  const endHold = () => {
-    isEndingHold.current = true;
-    touchStartPos.current = null;
-    if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
-    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-    if (holding && !fadingOut) {
-      setFadingOut(true);
-      hideTimer.current = setTimeout(() => {
-        setHolding(false);
-        setFadingOut(false);
-      }, 300);
-    } else {
-      setHolding(false);
-      setFadingOut(false);
-    }
-  };
-
-  const showDelete = !!(onDelete && (holding || focused || fadingOut));
-  const dismissDelete = () => {
-    if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
-    setHolding(false);
-    setFadingOut(false);
-    setFocused(false);
-  };
 
   return (
-    <div style={{ position: "relative", overflow: "hidden", borderRadius: 14 }}>
-      {(holding || focused) && (
-        <div
-          className="absolute inset-y-0 left-0 flex items-center pl-2"
-          style={{
-            width: 52,
-            transform: "translateX(0)",
-            transition: "transform 0.25s ease-out, opacity 0.2s ease-out",
-            opacity: fadingOut ? 0 : 1,
-            zIndex: 2,
-            background: "rgba(139,92,246,0.1)",
-          }}
-        >
-          <button
-            onClick={(e) => { e.stopPropagation(); dismissDelete(); onDelete?.(token.address); }}
-            className="w-9 h-9 rounded-lg flex items-center justify-center"
-            style={{ background: "rgba(239,68,68,0.25)", border: "1px solid rgba(239,68,68,0.4)" }}
-            title="Remove token"
-            aria-label={`Remove ${token.symbol}`}
-          >
-            <Trash2 style={{ width: 15, height: 15, color: "#f87171" }} />
-          </button>
-        </div>
-      )}
+    <HoldToRevealRow 
+      isUnverified={!!onDelete} 
+      onDelete={() => onDelete?.(token.address)}
+    >
       <button
-        onClick={holding ? endHold : onClick}
-        onPointerDown={startHold}
-        onPointerUp={endHold}
-        onPointerMove={handlePointerMove}
-        onFocus={() => { if (onDelete) setFocused(true); }}
-        onBlur={() => { if (!holding) setFocused(false); }}
+        onClick={onClick}
+        onPointerDown={() => setPressed(true)}
+        onPointerUp={() => setPressed(false)}
+        onPointerLeave={() => setPressed(false)}
         onKeyDown={(e) => {
           if ((e.key === "Delete" || e.key === "Backspace") && onDelete) {
             e.preventDefault();
@@ -784,11 +717,8 @@ function CommunityTokenRow({
         className="w-full flex items-center justify-between px-3 py-2.5 text-left relative active:scale-[0.98]"
         style={{
           background: pressed ? "rgba(139,92,246,0.1)" : "transparent",
-          transition: "background 0.12s ease, transform 0.25s ease-out",
-          transform: (holding || fadingOut) ? "translateX(52px)" : "translateX(0)",
+          transition: "background 0.12s ease",
           borderRadius: 14,
-          position: "relative",
-          zIndex: 1,
         }}
       >
         <div
@@ -845,6 +775,7 @@ function CommunityTokenRow({
           </div>
         )}
       </button>
-    </div>
+    </HoldToRevealRow>
   );
 }
+
