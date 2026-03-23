@@ -457,6 +457,7 @@ function TokenRow({
   const [focused, setFocused] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isEndingHold = useRef(false);
 
   useEffect(() => {
     if (resetHolding) {
@@ -465,6 +466,7 @@ function TokenRow({
       setHolding(false);
       setFadingOut(false);
       setFocused(false);
+      isEndingHold.current = false;
     }
     return () => {
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -473,10 +475,24 @@ function TokenRow({
   }, [resetHolding]);
 
   const startHold = () => {
-    if (!onDelete || token.verified) return;
-    holdTimer.current = setTimeout(() => setHolding(true), 500);
+    if (!onDelete || token.verified || isEndingHold.current) return;
+    isEndingHold.current = false;
+    holdTimer.current = setTimeout(() => {
+      setHolding(true);
+      hideTimer.current = setTimeout(() => {
+        if (!isEndingHold.current) {
+          setFadingOut(true);
+          setTimeout(() => {
+            setHolding(false);
+            setFadingOut(false);
+          }, 300);
+        }
+      }, 3000);
+    }, 500);
   };
   const endHold = () => {
+    if (isEndingHold.current) return;
+    isEndingHold.current = true;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
@@ -646,6 +662,7 @@ function CommunityTokenRow({
   const [focused, setFocused] = useState(false);
   const holdTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isEndingHold = useRef(false);
 
   useEffect(() => {
     if (resetHolding) {
@@ -654,6 +671,7 @@ function CommunityTokenRow({
       setHolding(false);
       setFadingOut(false);
       setFocused(false);
+      isEndingHold.current = false;
     }
     return () => {
       if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
@@ -662,10 +680,24 @@ function CommunityTokenRow({
   }, [resetHolding]);
 
   const startHold = () => {
-    if (!onDelete) return;
-    holdTimer.current = setTimeout(() => setHolding(true), 500);
+    if (!onDelete || isEndingHold.current) return;
+    isEndingHold.current = false;
+    holdTimer.current = setTimeout(() => {
+      setHolding(true);
+      hideTimer.current = setTimeout(() => {
+        if (!isEndingHold.current) {
+          setFadingOut(true);
+          setTimeout(() => {
+            setHolding(false);
+            setFadingOut(false);
+          }, 300);
+        }
+      }, 3000);
+    }, 500);
   };
   const endHold = () => {
+    if (isEndingHold.current) return;
+    isEndingHold.current = true;
     if (holdTimer.current) { clearTimeout(holdTimer.current); holdTimer.current = null; }
     if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; }
     if (holding && !fadingOut) {
