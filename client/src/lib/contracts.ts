@@ -13,9 +13,15 @@ export interface V3Contracts {
   tickLens: string;
 }
 
+export interface RWAContracts {
+  registry: string;
+  vault: string;
+}
+
 export interface ChainContracts {
   v2: V2Contracts;
   v3: V3Contracts;
+  rwa?: RWAContracts;
   explorer: string;
 }
 
@@ -33,6 +39,10 @@ export const contractsByChainId: Record<number, ChainContracts> = {
       migrator: "0x859d886319C75eD6Ec3d9f31e8d68802Fdb04D1B",
       positionDescriptor: "0xB84c064010144a83d2D044A00395B7aDEd1101a3",
       tickLens: "0x3ac9B673114477CEf52bfc8E3f9a7dcb767C8c3a",
+    },
+    rwa: {
+      registry: "0x94FD894C1678f9bd9eD5F4af91c03aCBe9E75707",
+      vault: "0xA6B73f72620A7DC0E2B335e49F97785131779584",
     },
     explorer: "https://testnet.arcscan.app/tx/"
   },

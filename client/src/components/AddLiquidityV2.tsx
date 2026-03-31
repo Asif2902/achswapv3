@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Plus, ExternalLink, RefreshCw, Info, Droplets, AlertTriangle } from "lucide-react";
+import { Plus, ExternalLink, RefreshCw, Info, Droplets, AlertTriangle, AlertOctagon } from "lucide-react";
 import { TokenSelector } from "@/components/TokenSelector";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
-import { defaultTokens, getTokensByChainId } from "@/data/tokens";
+import { defaultTokens, getTokensByChainId, isRWAToken } from "@/data/tokens";
 import { formatAmount, parseAmount, calculateRatio, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -323,7 +323,8 @@ export function AddLiquidityV2() {
     ? { label: "Empty Pool", color: "rgba(245,158,11,0.12)", text: "#fbbf24", dot: "#f59e0b" }
     : { label: "New Pool", color: "rgba(99,102,241,0.12)", text: "#818cf8", dot: "#6366f1" };
 
-  const canSubmit = tokenA && tokenB && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding;
+  const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
+  const canSubmit = tokenA && tokenB && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !hasRwaToken;
 
   return (
     <>
@@ -712,6 +713,25 @@ export function AddLiquidityV2() {
           </div>
         )}
 
+        {/* ── RWA Warning ── */}
+        {hasRwaToken && (
+          <div style={{
+            display: "flex", alignItems: "flex-start", gap: 10,
+            padding: "14px 16px", borderRadius: 14,
+            background: "rgba(239,68,68,0.06)",
+            border: "1px solid rgba(239,68,68,0.2)",
+            marginTop: 16,
+          }}>
+            <AlertOctagon style={{ width: 16, height: 16, color: "#f87171", flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <p style={{ fontSize: 12, fontWeight: 700, color: "#f87171", margin: 0 }}>RWA tokens cannot be used for liquidity</p>
+              <p style={{ fontSize: 11, color: "rgba(248,113,113,0.6)", margin: "4px 0 0", lineHeight: 1.5 }}>
+                RWA synthetic tokens are backed by the AchRWA vault, not AMM pools. Use the Swap page to buy or redeem RWA tokens directly.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* ── Submit button ── */}
         {isConnected ? (
           <button
@@ -743,14 +763,14 @@ export function AddLiquidityV2() {
         open={showTokenASelector}
         onClose={() => setShowTokenASelector(false)}
         onSelect={token => { setTokenA(token); setShowTokenASelector(false); }}
-        tokens={tokens}
+        tokens={tokens.filter(t => !isRWAToken(t))}
         onImport={handleImportToken}
       />
       <TokenSelector
         open={showTokenBSelector}
         onClose={() => setShowTokenBSelector(false)}
         onSelect={token => { setTokenB(token); setShowTokenBSelector(false); }}
-        tokens={tokens}
+        tokens={tokens.filter(t => !isRWAToken(t))}
         onImport={handleImportToken}
       />
     </>

@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from "react";
-import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2 } from "lucide-react";
+import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2, BarChart3 } from "lucide-react";
 import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import type { Token } from "@shared/schema";
@@ -13,10 +13,11 @@ interface TokenSelectorProps {
   tokens: Token[];
   onImport?: (address: string) => Promise<Token | null>;
   onDelete?: (address: string) => void;
+  rwaOnly?: boolean; // When true, only show RWA tokens
 }
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete }: TokenSelectorProps) {
+export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete, rwaOnly }: TokenSelectorProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState("");
@@ -98,18 +99,36 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     });
   };
 
-  const { filteredVerified, filteredImported } = useMemo(() => {
+  const { filteredVerified, filteredImported, filteredRWA } = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
     const matches = (t: Token) =>
       !q ||
       t.symbol.toLowerCase().includes(q) ||
       t.name.toLowerCase().includes(q) ||
       t.address.toLowerCase().includes(q);
-    return {
-      filteredVerified: tokens.filter((t) => t.verified && matches(t)),
-      filteredImported: tokens.filter((t) => !t.verified && matches(t)),
-    };
-  }, [tokens, searchQuery]);
+
+    // When rwaOnly mode, only show RWA tokens
+    if (rwaOnly) {
+      return {
+        filteredVerified: tokens.filter((t) => t.verified && t.rwa && matches(t)),
+        filteredImported: [] as Token[],
+        filteredRWA: [] as Token[],
+      };
+    }
+
+    const verified = tokens.filter((t) => t.verified && !t.rwa && matches(t));
+    const imported = tokens.filter((t) => !t.verified && matches(t));
+    // RWA tokens sorted by category then symbol
+    const rwa = tokens
+      .filter((t) => t.verified && t.rwa && matches(t))
+      .sort((a, b) => {
+        const catA = a.rwaCategory || "";
+        const catB = b.rwaCategory || "";
+        if (catA !== catB) return catA.localeCompare(catB);
+        return a.symbol.localeCompare(b.symbol);
+      });
+    return { filteredVerified: verified, filteredImported: imported, filteredRWA: rwa };
+  }, [tokens, searchQuery, rwaOnly]);
 
   const isValidAddress = Boolean(searchQuery.trim() && isAddress(searchQuery.trim()));
   const tokenExists =
@@ -325,6 +344,28 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
               </>
             )}
 
+            {/* ── RWA tokens ── */}
+            {filteredRWA.length > 0 && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 4px", marginBottom: 2 }}>
+                  <BarChart3 style={{ width: 11, height: 11, color: "#10b981" }} />
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    RWA
+                  </span>
+                </div>
+                {filteredRWA.map((token, i) => (
+                  <TokenRow
+                    key={token.address}
+                    token={token}
+                    userAddress={userAddress}
+                    index={i}
+                    onClick={() => handleSelect(token)}
+                    showRwaBadge
+                  />
+                ))}
+              </>
+            )}
+
             {/* ── Imported tokens ── */}
             {filteredImported.length > 0 && (
               <>
@@ -380,7 +421,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             )}
 
             {/* Empty state */}
-            {filteredVerified.length === 0 && filteredImported.length === 0 && filteredCommunityTokens.length === 0 && !showImportButton && !loadingCommunity && (
+            {filteredVerified.length === 0 && filteredImported.length === 0 && filteredRWA.length === 0 && filteredCommunityTokens.length === 0 && !showImportButton && !loadingCommunity && (
               <div className="flex flex-col items-center justify-center py-16 gap-3">
                 <div className="w-12 h-12 rounded-2xl flex items-center justify-center" style={{ background: "rgba(255,255,255,0.04)" }}>
                   <Search className="w-5 h-5 text-white/20" />
@@ -554,6 +595,7 @@ function TokenRow({
   onClick,
   onDelete,
   resetHolding,
+  showRwaBadge,
 }: {
   token: Token;
   userAddress?: string;
@@ -561,6 +603,7 @@ function TokenRow({
   onClick: () => void;
   onDelete?: (address: string) => void;
   resetHolding?: number;
+  showRwaBadge?: boolean;
 }) {
   const isNativeToken = token.address === "0x0000000000000000000000000000000000000000";
   const { data: balance } = useBalance({
@@ -640,7 +683,19 @@ function TokenRow({
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
               <span className="font-semibold text-sm text-white tracking-tight">{token.symbol}</span>
-              {!token.verified && (
+              {showRwaBadge && (
+                <span
+                  className="text-[9px] px-1.5 py-0.5 rounded-full font-bold"
+                  style={{
+                    background: "rgba(16,185,129,0.15)",
+                    color: "#6ee7b7",
+                    border: "1px solid rgba(16,185,129,0.25)",
+                  }}
+                >
+                  RWA
+                </span>
+              )}
+              {!token.verified && !showRwaBadge && (
                 <span
                   className="text-[9px] px-1.5 py-0.5 rounded-full font-medium"
                   style={{ background: "rgba(255,255,255,0.06)", color: "rgba(255,255,255,0.3)", border: "1px solid rgba(255,255,255,0.06)" }}
@@ -649,7 +704,12 @@ function TokenRow({
                 </span>
               )}
             </div>
-            <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>{token.name}</p>
+            <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>
+              {token.name}
+              {showRwaBadge && token.rwaCategory && (
+                <span style={{ color: "rgba(16,185,129,0.5)", marginLeft: 4 }}>({token.rwaCategory})</span>
+              )}
+            </p>
           </div>
         </div>
         {userAddress && displayBalance && (

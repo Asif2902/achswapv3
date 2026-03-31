@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { createAlchemyProvider } from "@/lib/config";
-import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
+import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -526,7 +526,8 @@ export function AddLiquidityV3Advanced() {
     } finally { setIsAdding(false); }
   };
 
-  const canSubmit = isConnected && tokenA && tokenB && ticksValid && !isAdding &&
+  const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
+  const canSubmit = isConnected && tokenA && tokenB && ticksValid && !isAdding && !hasRwaToken &&
     (depositMode !== "token1-only" ? !!amountA && parseFloat(amountA) > 0 : true) &&
     ((depositMode === "dual" || depositMode === "unknown" || depositMode === "token1-only") ? parseFloat(amountB) >= 0 : true);
 
@@ -1050,8 +1051,8 @@ export function AddLiquidityV3Advanced() {
         )}
       </div>
 
-      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens} onImport={handleImportToken} />
-      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens} onImport={handleImportToken} />
+      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
+      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
     </>
   );
 }

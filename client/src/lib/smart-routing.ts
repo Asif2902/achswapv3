@@ -2,6 +2,7 @@ import { Contract, type Provider } from "ethers";
 import { Token } from "@shared/schema";
 import { parseAmount } from "./decimal-utils";
 import { QUOTER_V2_ABI, V3_FEE_TIERS } from "./abis/v3";
+import { RWA_VAULT_ABI } from "./abis/rwa";
 import type { RouteHop } from "@/components/PathVisualizer";
 
 // V2 Router ABI
@@ -462,4 +463,99 @@ function getTokenForAddress(
     verified: true,
     chainId: fromToken.chainId,
   };
+}
+
+// ── RWA Vault Routing ─────────────────────────────────────────────────────────
+
+export interface RWAQuoteResult {
+  protocol: "RWA";
+  outputAmount: bigint;
+  route: RouteHop[];
+  priceImpact: number;
+  fee: bigint;
+  price: bigint;
+  isStale: boolean;
+  pairId: number;
+  isBuy: boolean; // true = USDC→RWA, false = RWA→USDC
+}
+
+/**
+ * Get RWA quote for USDC→RWA (buy) or RWA→USDC (redeem)
+ */
+export async function getRWAQuote(
+  provider: Provider,
+  vaultAddress: string,
+  fromToken: Token,
+  toToken: Token,
+  amountIn: bigint
+): Promise<RWAQuoteResult | null> {
+  try {
+    const vault = new Contract(vaultAddress, RWA_VAULT_ABI, provider);
+    const isBuy = !fromToken.rwa && !!toToken.rwa; // USDC→RWA
+    const rwaToken = isBuy ? toToken : fromToken;
+    const pairId = rwaToken.rwaPairId;
+
+    if (!pairId) {
+      console.warn("RWA token missing pairId:", rwaToken.symbol);
+      return null;
+    }
+
+    if (isBuy) {
+      // quoteBuy(pairId, usdcIn) returns (synthOut, fee, netUsdc, price, isStale)
+      const result = await vault.quoteBuy(pairId, amountIn);
+      const synthOut = result[0];
+      const fee = result[1];
+      const price = result[3];
+      const isStale = result[4];
+
+      const netUsdc = amountIn - fee;
+      // Price impact is 0 for vault swaps (no slippage from pool depth, only fee)
+      // But we show fee impact for transparency
+      const priceImpact = amountIn > 0n ? Number((fee * 10000n) / amountIn) / 100 : 0;
+
+      return {
+        protocol: "RWA",
+        outputAmount: synthOut,
+        route: [{
+          tokenIn: fromToken,
+          tokenOut: toToken,
+          protocol: "RWA" as any,
+        }],
+        priceImpact,
+        fee,
+        price,
+        isStale,
+        pairId,
+        isBuy: true,
+      };
+    } else {
+      // Redeem: quoteRedeem(pairId, synthAmount) returns (usdcOut, fee, grossUsdc, price, isStale)
+      const result = await vault.quoteRedeem(pairId, amountIn);
+      const usdcOut = result[0];
+      const fee = result[1];
+      const price = result[3];
+      const isStale = result[4];
+
+      const priceImpact = usdcOut > 0n ? Number((fee * 10000n) / (usdcOut + fee)) / 100 : 0;
+
+      return {
+        protocol: "RWA",
+        outputAmount: usdcOut,
+        route: [{
+          tokenIn: fromToken,
+          tokenOut: toToken,
+          protocol: "RWA" as any,
+        }],
+        priceImpact,
+        fee,
+        price,
+        isStale,
+        pairId,
+        isBuy: false,
+      };
+    }
+  } catch (error) {
+    console.error("RWA quote failed:", error);
+    return null;
+  }
 }

@@ -98,7 +98,68 @@ const arcTestnetTokens: Token[] = [
     logoURI: "/img/logos/achs-token.png",
     verified: true,
     chainId: 5042002
-  }
+  },
+  // ── RWA Synth Tokens ───────────────────────────────────────────────────
+  {
+    address: "0x7EFcd8aBc1bAB7211d35c6685Deb218b3055b751",
+    name: "Synth Apple Inc.",
+    symbol: "sAAPL",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-aapl.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 1,
+    rwaCategory: "Stock",
+  },
+  {
+    address: "0x5828E890072A20959e1E095f0f76A244D9CB2563",
+    name: "Synth Alphabet Inc.",
+    symbol: "sGOOGL",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-googl.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 2,
+    rwaCategory: "Stock",
+  },
+  {
+    address: "0x828102e99706470D91716021b54F1D792098Cdb0",
+    name: "Synth Crude Oil WTI",
+    symbol: "sWTI",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-wti.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 3,
+    rwaCategory: "Commodity",
+  },
+  {
+    address: "0xE4413d59694E6e790D769ed74E13e80CE01a777a",
+    name: "Synth Gold",
+    symbol: "sGOLD",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-gold.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 4,
+    rwaCategory: "Commodity",
+  },
+  {
+    address: "0xfc084589e1C38a179AE1a5A7307B5FcDFFc7d296",
+    name: "Synth Silver",
+    symbol: "sSILVER",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-silver.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 5,
+    rwaCategory: "Commodity",
+  },
 ];
 
 // Wrapped token mappings: native -> wrapped address
@@ -170,4 +231,31 @@ export async function fetchTokensWithCommunity(chainId: number): Promise<Token[]
     ...t,
     logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : "/img/logos/unknown-token.png"
   }));
+}
+
+// ── RWA Helpers ───────────────────────────────────────────────────────────────
+
+export function isRWAToken(token: Token | null | undefined): boolean {
+  return !!token?.rwa;
+}
+
+export function getRWATokens(chainId: number): Token[] {
+  return getTokensByChainId(chainId).filter(t => t.rwa === true);
+}
+
+export function getNonRWATokens(chainId: number): Token[] {
+  return getTokensByChainId(chainId).filter(t => !t.rwa);
+}
+
+export function getUSDC(chainId: number): Token | undefined {
+  return getTokensByChainId(chainId).find(t => t.symbol === "USDC");
+}
+
+export function isRWASwapPair(from: Token | null, to: Token | null): boolean {
+  if (!from || !to) return false;
+  const fromIsRWA = isRWAToken(from);
+  const toIsRWA = isRWAToken(to);
+  const fromIsUSDC = from.symbol === "USDC";
+  const toIsUSDC = to.symbol === "USDC";
+  return (fromIsRWA && toIsUSDC) || (fromIsUSDC && toIsRWA);
 }
