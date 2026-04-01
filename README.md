@@ -34,7 +34,7 @@ npm run dev
 
 ---
 
-## Environment Setup
+## Environment Setups
 
 Create a `.env` file in the root directory:
 
