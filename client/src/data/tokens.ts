@@ -101,7 +101,7 @@ const arcTestnetTokens: Token[] = [
   },
   // ── RWA Synth Tokens ───────────────────────────────────────────────────
   {
-    address: "0x7EFcd8aBc1bAB7211d35c6685Deb218b3055b751",
+    address: "0xB7d0e4FBB6C31997aeBc8070f9BF326Bb0ef859E",
     name: "Synth Apple Inc.",
     symbol: "sAAPL",
     decimals: 18,
@@ -113,7 +113,7 @@ const arcTestnetTokens: Token[] = [
     rwaCategory: "Stock",
   },
   {
-    address: "0x5828E890072A20959e1E095f0f76A244D9CB2563",
+    address: "0x22Dd732d8bf020d1Cd6D2ec3342ce43f15a982b1",
     name: "Synth Alphabet Inc.",
     symbol: "sGOOGL",
     decimals: 18,
@@ -125,7 +125,7 @@ const arcTestnetTokens: Token[] = [
     rwaCategory: "Stock",
   },
   {
-    address: "0x828102e99706470D91716021b54F1D792098Cdb0",
+    address: "0x3fEa75ABE23B1C01F00F03eb6a7a9f75d9De957e",
     name: "Synth Crude Oil WTI",
     symbol: "sWTI",
     decimals: 18,
@@ -137,7 +137,7 @@ const arcTestnetTokens: Token[] = [
     rwaCategory: "Commodity",
   },
   {
-    address: "0xE4413d59694E6e790D769ed74E13e80CE01a777a",
+    address: "0x77643b9D8470C8959B92651F57cEcA08D770b89c",
     name: "Synth Gold",
     symbol: "sGOLD",
     decimals: 18,
@@ -149,7 +149,7 @@ const arcTestnetTokens: Token[] = [
     rwaCategory: "Commodity",
   },
   {
-    address: "0xfc084589e1C38a179AE1a5A7307B5FcDFFc7d296",
+    address: "0x80Ca3b18F75702B0626Eb7441aCaA33a8e24100d",
     name: "Synth Silver",
     symbol: "sSILVER",
     decimals: 18,

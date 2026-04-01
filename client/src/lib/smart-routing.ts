@@ -475,6 +475,7 @@ export interface RWAQuoteResult {
   fee: bigint;
   price: bigint;
   isStale: boolean;
+  reserveOk: boolean;
   pairId: number;
   isBuy: boolean; // true = USDC→RWA, false = RWA→USDC
 }
@@ -525,16 +526,18 @@ export async function getRWAQuote(
         fee,
         price,
         isStale,
+        reserveOk: true,
         pairId,
         isBuy: true,
       };
     } else {
-      // Redeem: quoteRedeem(pairId, synthAmount) returns (usdcOut, fee, grossUsdc, price, isStale)
+      // Redeem: quoteRedeem(pairId, synthAmount) returns (usdcOut, fee, grossUsdc, price, isStale, reserveOk)
       const result = await vault.quoteRedeem(pairId, amountIn);
       const usdcOut = result[0];
       const fee = result[1];
       const price = result[3];
       const isStale = result[4];
+      const reserveOk = result[5];
 
       const priceImpact = usdcOut > 0n ? Number((fee * 10000n) / (usdcOut + fee)) / 100 : 0;
 
@@ -550,6 +553,7 @@ export async function getRWAQuote(
         fee,
         price,
         isStale,
+        reserveOk,
         pairId,
         isBuy: false,
       };

@@ -18,7 +18,7 @@ import { getSmartRouteQuote, getRWAQuote, type SmartRoutingResult, type RWAQuote
 import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
 import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
 import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
-import { RWA_VAULT_ABI, RWASynth_ABI } from "@/lib/abis/rwa";
+import { RWA_VAULT_ABI } from "@/lib/abis/rwa";
 import { createAlchemyProvider, FALLBACK_RPC } from "@/lib/config";
 import { getErrorForToast } from "@/lib/error-utils";
 import {
@@ -575,15 +575,7 @@ export default function Swap() {
             ),
           });
         } else {
-          // RWA → USDC: needs approve first, then vault.redeem(pairId, synthAmount, minUsdc)
-          const synthAddress = fromToken.address;
-          const synthContract = new Contract(synthAddress, RWASynth_ABI, signer);
-          const currentAllowance = await synthContract.allowance(address, contracts.rwa.vault);
-          if (currentAllowance < amountIn) {
-            toast({ title: "Approving token…" });
-            const ag = await synthContract.approve.estimateGas(contracts.rwa.vault, amountIn);
-            await (await synthContract.approve(contracts.rwa.vault, amountIn, { gasLimit: ag * 150n / 100n })).wait();
-          }
+          // RWA → USDC: vault.redeem burns directly from balanceOf (no approve needed)
           const minUsdc = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Redeeming RWA token…", description: `Redeeming ${fromToken.symbol} for USDC` });
           const g = await vault.redeem.estimateGas(rwaQuoteResult.pairId, amountIn, minUsdc);
