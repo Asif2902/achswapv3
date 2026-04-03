@@ -602,6 +602,10 @@ export function AddLiquidityV3Advanced() {
       : depositMode === "token1-only"
         ? (isToken0A ? amountBValid : amountAValid)
         : amountAValid && amountBValid;
+  const token0CanDeposit = depositMode !== "token1-only";
+  const token1CanDeposit = depositMode !== "token0-only";
+  const tokenACanDeposit = isToken0A ? token0CanDeposit : token1CanDeposit;
+  const tokenBCanDeposit = isToken0A ? token1CanDeposit : token0CanDeposit;
   const canSubmit = isConnected && tokenA && tokenB && !sameTokenSelected && ticksValid && !isAdding && !hasRwaToken && hasRequiredAmounts;
 
   const tickSpacing = getTickSpacing(selectedFee);
@@ -771,12 +775,12 @@ export function AddLiquidityV3Advanced() {
         </div>
 
         {/* ── Token A ── */}
-        <div className={`v3a-token-box ${depositMode === "token1-only" && isToken0A ? "disabled-box" : ""}`} style={{ padding: 16 }}>
+        <div className={`v3a-token-box ${!tokenACanDeposit ? "disabled-box" : ""}`} style={{ padding: 16 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <span className="v3a-label">Token A{token0DisplaySymbol && tokenA ? ` · ${isToken0A ? "token0" : "token1"}` : ""}</span>
             {balanceA !== null && tokenA && (
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: "pointer" }} onClick={() => {
-                if (depositMode === "token1-only" && isToken0A) return;
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: tokenACanDeposit ? "pointer" : "default" }} onClick={() => {
+                if (!tokenACanDeposit) return;
                 const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                 setAmountA(displayAmount);
                 let maxWei = balanceA;
@@ -790,12 +794,12 @@ export function AddLiquidityV3Advanced() {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <input type="number" placeholder="0.00" value={amountA} onChange={e => setAmountA(e.target.value)} disabled={depositMode === "token1-only" && isToken0A} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
+            <input type="number" placeholder="0.00" value={amountA} onChange={e => setAmountA(e.target.value)} disabled={!tokenACanDeposit} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
               <button onClick={() => setShowTokenASelector(true)} className={`v3a-token-btn ${!tokenA ? "empty" : ""}`}>
                 {tokenA ? (<><img src={tokenA.logoURI} alt={tokenA.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenA.symbol}</span></>) : <span>Select token</span>}
               </button>
-              {balanceA !== null && tokenA && !(depositMode === "token1-only" && isToken0A) && (
+              {balanceA !== null && tokenA && tokenACanDeposit && (
                 <button className="v3a-max-btn" onClick={() => {
                   const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                   setAmountA(displayAmount);
@@ -808,10 +812,14 @@ export function AddLiquidityV3Advanced() {
               )}
             </div>
           </div>
-          {depositMode === "token1-only" && isToken0A && (
+          {!tokenACanDeposit && (
             <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
               <AlertTriangle style={{ width: 12, height: 12, color: "#fbbf24", flexShrink: 0 }} />
-              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>Price above range — only {token1DisplaySymbol} can be deposited</span>
+              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>
+                {depositMode === "token0-only"
+                  ? `Price below range — only ${token0DisplaySymbol} can be deposited`
+                  : `Price above range — only ${token1DisplaySymbol} can be deposited`}
+              </span>
             </div>
           )}
         </div>
@@ -822,12 +830,12 @@ export function AddLiquidityV3Advanced() {
         </div>
 
         {/* ── Token B ── */}
-        <div className={`v3a-token-box ${depositMode === "token0-only" && !isToken0A ? "disabled-box" : ""}`} style={{ padding: 16 }}>
+        <div className={`v3a-token-box ${!tokenBCanDeposit ? "disabled-box" : ""}`} style={{ padding: 16 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
             <span className="v3a-label">Token B{token1DisplaySymbol && tokenB ? ` · ${isToken0A ? "token1" : "token0"}` : ""}</span>
             {balanceB !== null && tokenB && (
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: !(depositMode === "token0-only" && !isToken0A) ? "pointer" : "default" }} onClick={() => {
-                if (depositMode === "token0-only" && !isToken0A) return;
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: tokenBCanDeposit ? "pointer" : "default" }} onClick={() => {
+                if (!tokenBCanDeposit) return;
                 const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                 setAmountB(displayAmount);
                 let maxWei = balanceB;
@@ -841,12 +849,12 @@ export function AddLiquidityV3Advanced() {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <input type="number" placeholder="0.00" value={amountB} onChange={e => { setAmountB(e.target.value); setAmountBIsAuto(false); setAutoCalcAmounts(null); }} disabled={depositMode === "token0-only" && !isToken0A} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
+            <input type="number" placeholder="0.00" value={amountB} onChange={e => { setAmountB(e.target.value); setAmountBIsAuto(false); setAutoCalcAmounts(null); }} disabled={!tokenBCanDeposit} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
               <button onClick={() => setShowTokenBSelector(true)} className={`v3a-token-btn ${!tokenB ? "empty" : ""}`}>
                 {tokenB ? (<><img src={tokenB.logoURI} alt={tokenB.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenB.symbol}</span></>) : <span>Select token</span>}
               </button>
-              {balanceB !== null && tokenB && !(depositMode === "token0-only" && !isToken0A) && (
+              {balanceB !== null && tokenB && tokenBCanDeposit && (
                 <button className="v3a-max-btn" onClick={() => {
                   const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                   setAmountB(displayAmount);
@@ -859,10 +867,14 @@ export function AddLiquidityV3Advanced() {
               )}
             </div>
           </div>
-          {depositMode === "token0-only" && !isToken0A && (
+          {!tokenBCanDeposit && (
             <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
               <AlertTriangle style={{ width: 12, height: 12, color: "#fbbf24", flexShrink: 0 }} />
-              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>Price below range — only {token0DisplaySymbol} can be deposited</span>
+              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>
+                {depositMode === "token0-only"
+                  ? `Price below range — only ${token0DisplaySymbol} can be deposited`
+                  : `Price above range — only ${token1DisplaySymbol} can be deposited`}
+              </span>
             </div>
           )}
           {amountBIsAuto && depositMode === "dual" && (
