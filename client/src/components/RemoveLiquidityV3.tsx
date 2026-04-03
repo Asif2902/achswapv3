@@ -664,10 +664,57 @@ export function RemoveLiquidityV3() {
         signer,
       );
 
-      const liquidityToRemove = selectedPosition.liquidity * BigInt(percentage[0]) / 100n;
+      // Re-fetch latest on-chain position/pool state before deriving mins
+      const readProvider = createAlchemyProvider(chainId);
+      const readPositionManager = new Contract(
+        contracts.v3.nonfungiblePositionManager,
+        NONFUNGIBLE_POSITION_MANAGER_ABI,
+        readProvider,
+      );
+      const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, readProvider);
+      const latestPositionRaw = await readPositionManager.positions(selectedPosition.tokenId);
+      const latestToken0Address: string = latestPositionRaw[2];
+      const latestToken1Address: string = latestPositionRaw[3];
+      const latestFee = Number(latestPositionRaw[4]);
+      const latestTickLower = Number(latestPositionRaw[5]);
+      const latestTickUpper = Number(latestPositionRaw[6]);
+      const latestLiquidity: bigint = latestPositionRaw[7];
+
+      if (latestLiquidity === 0n) {
+        throw new Error("Position has no liquidity to remove");
+      }
+
+      const [tokenA, tokenB] =
+        latestToken0Address.toLowerCase() < latestToken1Address.toLowerCase()
+          ? [latestToken0Address, latestToken1Address]
+          : [latestToken1Address, latestToken0Address];
+      const poolAddress = await factory.getPool(tokenA, tokenB, latestFee);
+      if (!poolAddress || poolAddress === "0x0000000000000000000000000000000000000000") {
+        throw new Error("Pool not found for position");
+      }
+
+      const pool = new Contract(poolAddress, V3_POOL_ABI, readProvider);
+      const slot0 = await pool.slot0();
+      let currentSqrtPriceX96: bigint = slot0[0];
+      if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
+
+      const tokenAmounts = getTokensFromLiquidity(
+        latestLiquidity,
+        currentSqrtPriceX96,
+        latestTickLower,
+        latestTickUpper,
+      );
+      const latestAmount0 = latestToken0Address.toLowerCase() === tokenB.toLowerCase()
+        ? tokenAmounts.amount1
+        : tokenAmounts.amount0;
+      const latestAmount1 = latestToken0Address.toLowerCase() === tokenB.toLowerCase()
+        ? tokenAmounts.amount0
+        : tokenAmounts.amount1;
+
+      const liquidityToRemove = latestLiquidity * BigInt(percentage[0]) / 100n;
       const isFullRemove = percentage[0] === 100;
-      const expectedAmount0Out = (selectedPosition.amount0 * BigInt(percentage[0])) / 100n;
-      const expectedAmount1Out = (selectedPosition.amount1 * BigInt(percentage[0])) / 100n;
+      const expectedAmount0Out = (latestAmount0 * BigInt(percentage[0])) / 100n;
+      const expectedAmount1Out = (latestAmount1 * BigInt(percentage[0])) / 100n;
       const amount0Min = applySlippageMin(expectedAmount0Out);
       const amount1Min = applySlippageMin(expectedAmount1Out);
 
@@ -689,8 +736,8 @@ export function RemoveLiquidityV3() {
       ]);
 
       // Detect if either token is wUSDC so we can auto-unwrap to native USDC
-      const token0IsWrapped = isWrappedToken(chainId, selectedPosition.token0Address);
-      const token1IsWrapped = isWrappedToken(chainId, selectedPosition.token1Address);
+      const token0IsWrapped = isWrappedToken(chainId, latestToken0Address);
+      const token1IsWrapped = isWrappedToken(chainId, latestToken1Address);
       const hasWrappedToken = token0IsWrapped || token1IsWrapped;
 
       // If a wrapped token is involved, collect to the position manager (so it can unwrap),
@@ -721,8 +768,8 @@ export function RemoveLiquidityV3() {
 
         // sweepToken sends the non-wUSDC token held by the contract back to user
         const otherToken = token0IsWrapped
-          ? selectedPosition.token1Address
-          : selectedPosition.token0Address;
+          ? latestToken1Address
+          : latestToken0Address;
         const sweepData = positionManager.interface.encodeFunctionData("sweepToken", [
           otherToken,
           0n,
