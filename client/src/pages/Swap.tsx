@@ -11,7 +11,7 @@ import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, JsonRpcProvider, getAddress } from "ethers";
-import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isRWASwapPair, getUSDC } from "@/data/tokens";
+import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isRWASwapPair, getUSDC, isCanonicalUSDC, isCanonicalWUSDC } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getSmartRouteQuote, getRWAQuote, type SmartRoutingResult, type RWAQuoteResult } from "@/lib/smart-routing";
@@ -1310,8 +1310,8 @@ export default function Swap() {
         </div>
       </div>
 
-      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => t.symbol === "USDC" || t.symbol === "wUSDC") : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
-      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => t.symbol === "USDC" || t.symbol === "wUSDC") : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 

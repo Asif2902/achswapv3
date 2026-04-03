@@ -525,7 +525,7 @@ export async function getRWAQuote(
         route: [{
           tokenIn: fromToken,
           tokenOut: toToken,
-          protocol: "RWA" as any,
+          protocol: "RWA",
         }],
         priceImpact,
         fee,
@@ -552,7 +552,7 @@ export async function getRWAQuote(
         route: [{
           tokenIn: fromToken,
           tokenOut: toToken,
-          protocol: "RWA" as any,
+          protocol: "RWA",
         }],
         priceImpact,
         fee,

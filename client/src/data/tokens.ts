@@ -251,11 +251,30 @@ export function getUSDC(chainId: number): Token | undefined {
   return getTokensByChainId(chainId).find(t => t.symbol === "USDC");
 }
 
+const USDC_ADDRESS = "0x0000000000000000000000000000000000000000";
+const WUSDC_ADDRESS = "0xDe5DB9049a8dd344dC1B7Bbb098f9da60930A6dA";
+
+function normalize(addr: string): string {
+  return addr.toLowerCase();
+}
+
+export function isCanonicalUSDC(token: Token | null | undefined): boolean {
+  if (!token) return false;
+  const a = normalize(token.address);
+  return a === normalize(USDC_ADDRESS);
+}
+
+export function isCanonicalWUSDC(token: Token | null | undefined): boolean {
+  if (!token) return false;
+  const a = normalize(token.address);
+  return a === normalize(WUSDC_ADDRESS);
+}
+
 export function isRWASwapPair(from: Token | null, to: Token | null): boolean {
   if (!from || !to) return false;
   const fromIsRWA = isRWAToken(from);
   const toIsRWA = isRWAToken(to);
-  const fromIsUSDC = from.symbol === "USDC";
-  const toIsUSDC = to.symbol === "USDC";
+  const fromIsUSDC = isCanonicalUSDC(from);
+  const toIsUSDC = isCanonicalUSDC(to);
   return (fromIsRWA && toIsUSDC) || (fromIsUSDC && toIsRWA);
 }
