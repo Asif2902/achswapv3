@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { createAlchemyProvider } from "@/lib/config";
-import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken } from "@/data/tokens";
+import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isCanonicalUSDC, getUSDC } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -239,7 +239,7 @@ export function AddLiquidityV3Advanced() {
 
   useEffect(() => {
     if (tokens.length === 0) return;
-    if (!tokenA) { const t = tokens.find(t => t.symbol === "USDC"); if (t) setTokenA(t); }
+    if (!tokenA) { const t = getUSDC(chainId); if (t) setTokenA(t); }
     if (!tokenB) { const t = tokens.find(t => t.symbol === "ACHS"); if (t) setTokenB(t); }
   }, [tokens, tokenA, tokenB]);
 
@@ -292,6 +292,19 @@ export function AddLiquidityV3Advanced() {
     try {
       const provider = new BrowserProvider(window.ethereum);
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
+      const erc20A = getERC20Address(tokenA, chainId);
+      const erc20B = getERC20Address(tokenB, chainId);
+      if (erc20A.toLowerCase() === erc20B.toLowerCase()) {
+        setPoolExists(false);
+        setCurrentPrice(null);
+        setCurrentSqrtPriceX96(null);
+        setCurrentTick(null);
+        setPoolLiquidity(0n);
+        setPoolAddress(null);
+        setPoolToken0Reserve(null);
+        setPoolToken1Reserve(null);
+        return;
+      }
       const s = getSortedTokens(); if (!s) return;
       const { tok0, tok1 } = s;
       setToken0Symbol(tok0.symbol); setToken1Symbol(tok1.symbol);
@@ -313,7 +326,7 @@ export function AddLiquidityV3Advanced() {
         const [res0, res1] = await Promise.all([new Contract(tok0.address, ERC20_ABI, provider).balanceOf(poolAddr), new Contract(tok1.address, ERC20_ABI, provider).balanceOf(poolAddr)]);
         setPoolToken0Reserve(res0 as bigint); setPoolToken1Reserve(res1 as bigint);
       } catch { setPoolToken0Reserve(null); setPoolToken1Reserve(null); }
-      if (!minPrice && !maxPrice) applyRangePresetValues("wide", price, tick, tok0 as any, tok1 as any);
+      if (!minPrice && !maxPrice) applyRangePresetValues("wide", price, tick, tok0, tok1);
     } catch (err) { console.error("Pool check error:", err); setPoolExists(false); setPoolToken0Reserve(null); setPoolToken1Reserve(null); }
     finally { setIsCheckingPool(false); }
   };
@@ -385,7 +398,7 @@ export function AddLiquidityV3Advanced() {
   const handleMinTickChange  = (v: string) => { setMinTick(v); const t = parseInt(v); if (isNaN(t)) return; const s = getSortedTokens(); if (!s) return; setMinPrice(tickToPrice(t, s.tok0.decimals, s.tok1.decimals).toFixed(6)); };
   const handleMaxTickChange  = (v: string) => { setMaxTick(v); const t = parseInt(v); if (isNaN(t)) return; const s = getSortedTokens(); if (!s) return; setMaxPrice(tickToPrice(t, s.tok0.decimals, s.tok1.decimals).toFixed(6)); };
 
-  const applyRangePresetValues = useCallback((preset: "full" | "wide" | "narrow" | "current", price: number, tick: number, tok0: any, tok1: any) => {
+  const applyRangePresetValues = useCallback((preset: "full" | "wide" | "narrow" | "current", price: number, tick: number, tok0: Token, tok1: Token) => {
     const ts = getTickSpacing(selectedFee);
     if (preset === "full") {
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
@@ -421,6 +434,10 @@ export function AddLiquidityV3Advanced() {
 
   const isInRange = currentTick !== null && minTick && maxTick ? isPositionInRange(currentTick, parseInt(minTick), parseInt(maxTick)) : null;
   const ticksValid = !!(minTick && maxTick && !isNaN(parseInt(minTick)) && !isNaN(parseInt(maxTick)) && parseInt(minTick) < parseInt(maxTick));
+  const sorted = getSortedTokens();
+  const isToken0A = sorted?.isToken0A ?? false;
+  const token0DisplaySymbol = sorted?.tok0.symbol || token0Symbol || tokenA?.symbol || "Token0";
+  const token1DisplaySymbol = sorted?.tok1.symbol || token1Symbol || tokenB?.symbol || "Token1";
   const priceLabel = token0Symbol && token1Symbol ? `${token1Symbol} per ${token0Symbol}` : tokenA && tokenB ? `${tokenB.symbol} / ${tokenA.symbol}` : "Price";
 
   const poolReservesLabel = useMemo(() => {
@@ -430,12 +447,33 @@ export function AddLiquidityV3Advanced() {
 
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !address || !contracts || !window.ethereum || !chainId) return;
+    const tokenAERC20Check = getERC20Address(tokenA, chainId);
+    const tokenBERC20Check = getERC20Address(tokenB, chainId);
+    if (tokenAERC20Check.toLowerCase() === tokenBERC20Check.toLowerCase()) {
+      toast({ title: "Invalid pair", description: "Select two different tokens", variant: "destructive" });
+      return;
+    }
     const tickLowerRaw = parseInt(minTick), tickUpperRaw = parseInt(maxTick);
     if (isNaN(tickLowerRaw) || isNaN(tickUpperRaw) || tickLowerRaw >= tickUpperRaw) { toast({ title: "Invalid price range", description: "Min price must be less than max price", variant: "destructive" }); return; }
     const aVal = parseFloat(amountA), bVal = parseFloat(amountB);
-    if ((depositMode === "dual" || depositMode === "unknown") && (!amountA || aVal <= 0)) { toast({ title: "Enter amount", description: "Enter Token A amount", variant: "destructive" }); return; }
-    if (depositMode === "token0-only" && (!amountA || aVal <= 0)) { toast({ title: "Enter amount", description: `Enter ${token0Symbol} amount`, variant: "destructive" }); return; }
-    if (depositMode === "token1-only" && (!amountB || bVal <= 0)) { toast({ title: "Enter amount", description: `Enter ${token1Symbol} amount`, variant: "destructive" }); return; }
+    if (depositMode === "dual" || depositMode === "unknown") {
+      if (!amountA || aVal <= 0) { toast({ title: "Enter amount", description: "Enter Token A amount", variant: "destructive" }); return; }
+      if (!amountB || bVal <= 0) { toast({ title: "Enter amount", description: "Enter Token B amount", variant: "destructive" }); return; }
+    }
+    if (depositMode === "token0-only") {
+      if (isToken0A) {
+        if (!amountA || aVal <= 0) { toast({ title: "Enter amount", description: `Enter ${token0DisplaySymbol} amount`, variant: "destructive" }); return; }
+      } else {
+        if (!amountB || bVal <= 0) { toast({ title: "Enter amount", description: `Enter ${token0DisplaySymbol} amount`, variant: "destructive" }); return; }
+      }
+    }
+    if (depositMode === "token1-only") {
+      if (isToken0A) {
+        if (!amountB || bVal <= 0) { toast({ title: "Enter amount", description: `Enter ${token1DisplaySymbol} amount`, variant: "destructive" }); return; }
+      } else {
+        if (!amountA || aVal <= 0) { toast({ title: "Enter amount", description: `Enter ${token1DisplaySymbol} amount`, variant: "destructive" }); return; }
+      }
+    }
     setIsAdding(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
@@ -462,12 +500,16 @@ export function AddLiquidityV3Advanced() {
       
       let amount0Desired: bigint, amount1Desired: bigint;
       if (depositMode === "token0-only") { 
-        amount0Desired = usedMaxA ? (isToken0A ? maxAmountA : 0n) : parseAmount(isToken0A ? amountA : amountB, token0.decimals); 
+        amount0Desired = isToken0A
+          ? (usedMaxA ? maxAmountA : parseAmount(amountA, token0.decimals))
+          : (usedMaxB ? maxAmountB : parseAmount(amountB, token0.decimals));
         amount1Desired = 0n; 
       }
       else if (depositMode === "token1-only") { 
         amount0Desired = 0n; 
-        amount1Desired = usedMaxB ? (isToken0A ? maxAmountB : maxAmountB) : parseAmount(isToken0A ? amountB : amountA, token1.decimals); 
+        amount1Desired = isToken0A
+          ? (usedMaxB ? maxAmountB : parseAmount(amountB, token1.decimals))
+          : (usedMaxA ? maxAmountA : parseAmount(amountA, token1.decimals));
       }
       else {
         if (amountBIsAuto && autoCalcAmounts?.forAmountA === amountA && autoCalcAmounts) { amount0Desired = autoCalcAmounts.amount0; amount1Desired = autoCalcAmounts.amount1; }
@@ -478,12 +520,20 @@ export function AddLiquidityV3Advanced() {
             amount0Desired = amount0; amount1Desired = amount1; 
           }
           catch { 
-            amount0Desired = usedMaxA ? (isToken0A ? maxAmountA : parseAmount(amountB, token1.decimals)) : parseAmount(isToken0A ? amountA : amountB, token0.decimals); 
-            amount1Desired = usedMaxB ? (isToken0A ? maxAmountB : maxAmountB) : parseAmount(isToken0A ? amountB : amountA, token1.decimals); 
+            amount0Desired = isToken0A
+              ? (usedMaxA ? maxAmountA : parseAmount(amountA, token0.decimals))
+              : (usedMaxB ? maxAmountB : parseAmount(amountB, token0.decimals));
+            amount1Desired = isToken0A
+              ? (usedMaxB ? maxAmountB : parseAmount(amountB, token1.decimals))
+              : (usedMaxA ? maxAmountA : parseAmount(amountA, token1.decimals));
           }
         } else { 
-          amount0Desired = usedMaxA ? (isToken0A ? maxAmountA : (usedMaxB ? maxAmountB : parseAmount(amountB, token1.decimals))) : parseAmount(isToken0A ? amountA : amountB, token0.decimals); 
-          amount1Desired = usedMaxB ? (isToken0A ? maxAmountB : maxAmountB) : parseAmount(isToken0A ? amountB : amountA, token1.decimals); 
+          amount0Desired = isToken0A
+            ? (usedMaxA ? maxAmountA : parseAmount(amountA, token0.decimals))
+            : (usedMaxB ? maxAmountB : parseAmount(amountB, token0.decimals));
+          amount1Desired = isToken0A
+            ? (usedMaxB ? maxAmountB : parseAmount(amountB, token1.decimals))
+            : (usedMaxA ? maxAmountA : parseAmount(amountA, token1.decimals));
         }
       }
       
@@ -501,7 +551,23 @@ export function AddLiquidityV3Advanced() {
       const pmAddr = contracts.v3.nonfungiblePositionManager;
       if (amount0Desired > 0n && !(tokenAIsNative && isToken0A) && !(tokenBIsNative && !isToken0A)) { const c = new Contract(token0.address, ERC20_ABI, signer); if (await c.allowance(address, pmAddr) < amount0Desired) await (await c.approve(pmAddr, amount0Desired)).wait(); }
       if (amount1Desired > 0n && !(tokenAIsNative && !isToken0A) && !(tokenBIsNative && isToken0A)) { const c = new Contract(token1.address, ERC20_ABI, signer); if (await c.allowance(address, pmAddr) < amount1Desired) await (await c.approve(pmAddr, amount1Desired)).wait(); }
-      const params = { token0: token0.address, token1: token1.address, fee: selectedFee, tickLower, tickUpper, amount0Desired, amount1Desired, amount0Min: 0n, amount1Min: 0n, recipient: address, deadline: Math.floor(Date.now() / 1000) + 1200 };
+      const slipPct = Number.isFinite(parseFloat(slippage)) ? Math.max(0, Math.min(50, parseFloat(slippage))) : 2;
+      const slippageBps = BigInt(Math.floor(slipPct * 100));
+      const amount0Min = (amount0Desired * (10000n - slippageBps)) / 10000n;
+      const amount1Min = (amount1Desired * (10000n - slippageBps)) / 10000n;
+      const params = {
+        token0: token0.address,
+        token1: token1.address,
+        fee: selectedFee,
+        tickLower,
+        tickUpper,
+        amount0Desired,
+        amount1Desired,
+        amount0Min,
+        amount1Min,
+        recipient: address,
+        deadline: Math.floor(Date.now() / 1000) + 1200,
+      };
       toast({ title: !poolExists ? "Creating pool & adding liquidity…" : "Adding liquidity…", description: !poolExists ? "Creating V3 pool and position in one transaction" : "Creating your V3 position" });
       let receipt;
       // Build multicall: optionally create pool + mint + refundETH in a single transaction
@@ -527,9 +593,16 @@ export function AddLiquidityV3Advanced() {
   };
 
   const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
-  const canSubmit = isConnected && tokenA && tokenB && ticksValid && !isAdding && !hasRwaToken &&
-    (depositMode !== "token1-only" ? !!amountA && parseFloat(amountA) > 0 : true) &&
-    ((depositMode === "dual" || depositMode === "unknown" || depositMode === "token1-only") ? parseFloat(amountB) >= 0 : true);
+  const sameTokenSelected = !!(tokenA && tokenB && chainId && getERC20Address(tokenA, chainId).toLowerCase() === getERC20Address(tokenB, chainId).toLowerCase());
+  const amountAValid = !!amountA && parseFloat(amountA) > 0;
+  const amountBValid = !!amountB && parseFloat(amountB) > 0;
+  const hasRequiredAmounts =
+    depositMode === "token0-only"
+      ? (isToken0A ? amountAValid : amountBValid)
+      : depositMode === "token1-only"
+        ? (isToken0A ? amountBValid : amountAValid)
+        : amountAValid && amountBValid;
+  const canSubmit = isConnected && tokenA && tokenB && !sameTokenSelected && ticksValid && !isAdding && !hasRwaToken && hasRequiredAmounts;
 
   const tickSpacing = getTickSpacing(selectedFee);
 
@@ -698,16 +771,16 @@ export function AddLiquidityV3Advanced() {
         </div>
 
         {/* ── Token A ── */}
-        <div className={`v3a-token-box ${depositMode === "token1-only" ? "disabled-box" : ""}`} style={{ padding: 16 }}>
+        <div className={`v3a-token-box ${depositMode === "token1-only" && isToken0A ? "disabled-box" : ""}`} style={{ padding: 16 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <span className="v3a-label">Token A{token0Symbol && tokenA ? ` · ${tokenA.symbol === token0Symbol ? "token0" : "token1"}` : ""}</span>
+            <span className="v3a-label">Token A{token0DisplaySymbol && tokenA ? ` · ${isToken0A ? "token0" : "token1"}` : ""}</span>
             {balanceA !== null && tokenA && (
               <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: "pointer" }} onClick={() => {
-                if (depositMode === "token1-only") return;
+                if (depositMode === "token1-only" && isToken0A) return;
                 const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                 setAmountA(displayAmount);
                 let maxWei = balanceA;
-                if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
+                if (isCanonicalUSDC(tokenA) || isNativeToken(tokenA.address)) {
                   maxWei = (balanceA * 99n) / 100n;
                 }
                 maxAmountAWeiRef.current = maxWei;
@@ -717,17 +790,17 @@ export function AddLiquidityV3Advanced() {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <input type="number" placeholder="0.00" value={amountA} onChange={e => setAmountA(e.target.value)} disabled={depositMode === "token1-only"} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
+            <input type="number" placeholder="0.00" value={amountA} onChange={e => setAmountA(e.target.value)} disabled={depositMode === "token1-only" && isToken0A} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
               <button onClick={() => setShowTokenASelector(true)} className={`v3a-token-btn ${!tokenA ? "empty" : ""}`}>
                 {tokenA ? (<><img src={tokenA.logoURI} alt={tokenA.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenA.symbol}</span></>) : <span>Select token</span>}
               </button>
-              {balanceA !== null && tokenA && depositMode !== "token1-only" && (
+              {balanceA !== null && tokenA && !(depositMode === "token1-only" && isToken0A) && (
                 <button className="v3a-max-btn" onClick={() => {
                   const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                   setAmountA(displayAmount);
                   let maxWei = balanceA;
-                  if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
+                  if (isCanonicalUSDC(tokenA) || isNativeToken(tokenA.address)) {
                     maxWei = (balanceA * 99n) / 100n;
                   }
                   maxAmountAWeiRef.current = maxWei;
@@ -735,10 +808,10 @@ export function AddLiquidityV3Advanced() {
               )}
             </div>
           </div>
-          {depositMode === "token1-only" && (
+          {depositMode === "token1-only" && isToken0A && (
             <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
               <AlertTriangle style={{ width: 12, height: 12, color: "#fbbf24", flexShrink: 0 }} />
-              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>Price above range — only {token1Symbol || tokenB?.symbol} can be deposited</span>
+              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>Price above range — only {token1DisplaySymbol} can be deposited</span>
             </div>
           )}
         </div>
@@ -749,16 +822,16 @@ export function AddLiquidityV3Advanced() {
         </div>
 
         {/* ── Token B ── */}
-        <div className={`v3a-token-box ${depositMode === "token0-only" ? "disabled-box" : ""}`} style={{ padding: 16 }}>
+        <div className={`v3a-token-box ${depositMode === "token0-only" && !isToken0A ? "disabled-box" : ""}`} style={{ padding: 16 }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-            <span className="v3a-label">Token B{token1Symbol && tokenB ? ` · ${tokenB.symbol === token1Symbol ? "token1" : "token0"}` : ""}</span>
+            <span className="v3a-label">Token B{token1DisplaySymbol && tokenB ? ` · ${isToken0A ? "token1" : "token0"}` : ""}</span>
             {balanceB !== null && tokenB && (
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: depositMode !== "token0-only" ? "pointer" : "default" }} onClick={() => {
-                if (depositMode === "token0-only") return;
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: !(depositMode === "token0-only" && !isToken0A) ? "pointer" : "default" }} onClick={() => {
+                if (depositMode === "token0-only" && !isToken0A) return;
                 const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                 setAmountB(displayAmount);
                 let maxWei = balanceB;
-                if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
+                if (isCanonicalUSDC(tokenB) || isNativeToken(tokenB.address)) {
                   maxWei = (balanceB * 99n) / 100n;
                 }
                 maxAmountBWeiRef.current = maxWei;
@@ -768,17 +841,17 @@ export function AddLiquidityV3Advanced() {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <input type="number" placeholder="0.00" value={amountB} onChange={e => { setAmountB(e.target.value); setAmountBIsAuto(false); setAutoCalcAmounts(null); }} disabled={depositMode === "token0-only"} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
+            <input type="number" placeholder="0.00" value={amountB} onChange={e => { setAmountB(e.target.value); setAmountBIsAuto(false); setAutoCalcAmounts(null); }} disabled={depositMode === "token0-only" && !isToken0A} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
               <button onClick={() => setShowTokenBSelector(true)} className={`v3a-token-btn ${!tokenB ? "empty" : ""}`}>
                 {tokenB ? (<><img src={tokenB.logoURI} alt={tokenB.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenB.symbol}</span></>) : <span>Select token</span>}
               </button>
-              {balanceB !== null && tokenB && depositMode !== "token0-only" && (
+              {balanceB !== null && tokenB && !(depositMode === "token0-only" && !isToken0A) && (
                 <button className="v3a-max-btn" onClick={() => {
                   const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                   setAmountB(displayAmount);
                   let maxWei = balanceB;
-                  if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
+                  if (isCanonicalUSDC(tokenB) || isNativeToken(tokenB.address)) {
                     maxWei = (balanceB * 99n) / 100n;
                   }
                   maxAmountBWeiRef.current = maxWei;
@@ -786,10 +859,10 @@ export function AddLiquidityV3Advanced() {
               )}
             </div>
           </div>
-          {depositMode === "token0-only" && (
+          {depositMode === "token0-only" && !isToken0A && (
             <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6 }}>
               <AlertTriangle style={{ width: 12, height: 12, color: "#fbbf24", flexShrink: 0 }} />
-              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>Price below range — only {token0Symbol || tokenA?.symbol} can be deposited</span>
+              <span style={{ fontSize: 11, color: "rgba(251,191,36,0.7)" }}>Price below range — only {token0DisplaySymbol} can be deposited</span>
             </div>
           )}
           {amountBIsAuto && depositMode === "dual" && (
@@ -881,7 +954,7 @@ export function AddLiquidityV3Advanced() {
             {poolExists && currentPrice !== null && (
               <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 6 }}>
                 {RANGE_PRESETS.map(({ key, label, Icon }) => (
-                  <button key={key} onClick={() => applyRangePreset(key as any)} disabled={!currentPrice} className="v3a-preset-btn">
+                  <button key={key} onClick={() => applyRangePreset(key)} disabled={!currentPrice} className="v3a-preset-btn">
                     <Icon style={{ width: 13, height: 13 }} />
                     <span>{label}</span>
                   </button>
@@ -977,13 +1050,33 @@ export function AddLiquidityV3Advanced() {
                       <p style={{ margin: 0 }}>Out of Range — no fees until price re-enters</p>
                       <p style={{ fontSize: 11, opacity: 0.7, margin: "2px 0 0" }}>
                         {depositMode === "token0-only"
-                          ? `Only ${token0Symbol} deposited. Earns fees when price rises above ${parseFloat(minPrice).toFixed(4)}.`
-                          : `Only ${token1Symbol} deposited. Earns fees when price falls below ${parseFloat(maxPrice).toFixed(4)}.`
+                          ? `Only ${token0DisplaySymbol} deposited. Earns fees when price rises above ${parseFloat(minPrice).toFixed(4)}.`
+                          : `Only ${token1DisplaySymbol} deposited. Earns fees when price falls below ${parseFloat(maxPrice).toFixed(4)}.`
                         }
                       </p>
                     </div>
                   </>
                 )}
+              </div>
+            )}
+
+            {/* Invalid pair warning */}
+            {tokenA && tokenB && chainId && getERC20Address(tokenA, chainId).toLowerCase() === getERC20Address(tokenB, chainId).toLowerCase() && (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 12px", background: "rgba(251,191,36,0.07)", border: "1px solid rgba(251,191,36,0.2)", borderRadius: 11 }}>
+                <AlertTriangle style={{ width: 13, height: 13, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
+                <p style={{ fontSize: 11, color: "rgba(251,191,36,0.8)", margin: 0, lineHeight: 1.5 }}>
+                  Select two different tokens. Both selected tokens resolve to the same underlying asset.
+                </p>
+              </div>
+            )}
+
+            {/* RWA warning */}
+            {hasRwaToken && (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "10px 12px", background: "rgba(239,68,68,0.07)", border: "1px solid rgba(239,68,68,0.2)", borderRadius: 11 }}>
+                <AlertTriangle style={{ width: 13, height: 13, color: "#f87171", flexShrink: 0, marginTop: 1 }} />
+                <p style={{ fontSize: 11, color: "rgba(248,113,113,0.8)", margin: 0, lineHeight: 1.5 }}>
+                  RWA synthetic tokens are vault-backed and cannot be used for liquidity provisioning.
+                </p>
               </div>
             )}
 
@@ -1024,7 +1117,7 @@ export function AddLiquidityV3Advanced() {
               </div>
             )}
             <p style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", lineHeight: 1.5, margin: 0 }}>
-              Note: slippage is for display only. V3 mint uses 0 minimums — the contract adjusts to the exact pool ratio.
+              Slippage sets minimum token amounts on mint to protect you from unfavorable price movement.
             </p>
           </div>
         </div>
@@ -1039,9 +1132,9 @@ export function AddLiquidityV3Advanced() {
             {isAdding ? (
               <><span style={{ width: 16, height: 16, border: "2px solid rgba(255,255,255,0.2)", borderTopColor: "white", borderRadius: "50%", display: "inline-block" }} className="v3a-spin" />{poolExists ? "Adding Liquidity…" : "Creating Pool & Adding…"}</>
             ) : depositMode === "token0-only" ? (
-              <><Zap style={{ width: 17, height: 17 }} />Deposit {token0Symbol || tokenA?.symbol} Only</>
+              <><Zap style={{ width: 17, height: 17 }} />Deposit {token0DisplaySymbol} Only</>
             ) : depositMode === "token1-only" ? (
-              <><Zap style={{ width: 17, height: 17 }} />Deposit {token1Symbol || tokenB?.symbol} Only</>
+              <><Zap style={{ width: 17, height: 17 }} />Deposit {token1DisplaySymbol} Only</>
             ) : (
               <><Zap style={{ width: 17, height: 17 }} />Add V3 Liquidity</>
             )}
