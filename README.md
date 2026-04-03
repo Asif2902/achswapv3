@@ -13,7 +13,6 @@ A modern decentralized exchange (DEX) frontend built with React, Vite, and Web3 
 - **Wrap/Unwrap**: Convert between native USDC and wrapped wUSDC
 - **Transaction History**: Track your recent transactions
 - **Smart Routing**: Automatic best path selection across V2/V3 pools
-
 ## Quick Start
 
 ```bash
