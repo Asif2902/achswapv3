@@ -5,7 +5,7 @@ const ABI = [
 ];
 
 const RPC_URL = "https://rpc.testnet.arc.network";
-const CONTRACT_ADDRESS = "0x28021558B4f60d90A97bE77D9462f06EAf92A1b9";
+const CONTRACT_ADDRESS = "0x32a484dfFB67F4aABB14048248E1DC31F40FF957";
 
 const provider = new ethers.JsonRpcProvider(RPC_URL);
 
