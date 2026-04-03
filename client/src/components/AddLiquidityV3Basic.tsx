@@ -6,7 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { createAlchemyProvider } from "@/lib/config";
-import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken } from "@/data/tokens";
+import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isCanonicalUSDC, getUSDC } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -163,7 +163,7 @@ export function AddLiquidityV3Basic() {
   // ── Default tokens ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (tokens.length === 0) return;
-    if (!tokenA) { const u = tokens.find(t => t.symbol === "USDC"); if (u) setTokenA(u); }
+    if (!tokenA) { const u = getUSDC(chainId); if (u) setTokenA(u); }
     if (!tokenB) { const a = tokens.find(t => t.symbol === "ACHS"); if (a) setTokenB(a); }
   }, [tokens, tokenA, tokenB]);
 
@@ -226,6 +226,15 @@ export function AddLiquidityV3Basic() {
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const erc20A = getERC20Address(tokenA, chainId);
       const erc20B = getERC20Address(tokenB, chainId);
+      if (erc20A.toLowerCase() === erc20B.toLowerCase()) {
+        setPoolAddress(null);
+        setPoolExists(false);
+        setCurrentPrice(null);
+        setCurrentSqrtPriceX96(null);
+        setCurrentTick(null);
+        setActiveLiquidity(null);
+        return;
+      }
       const [tok0, tok1] = sortTokens({ ...tokenA, address: erc20A }, { ...tokenB, address: erc20B });
       setToken0Symbol(tok0.symbol); setToken1Symbol(tok1.symbol);
       const addr = await factory.getPool(tok0.address, tok1.address, selectedFee);
@@ -302,6 +311,12 @@ export function AddLiquidityV3Basic() {
   // ── Add liquidity ──────────────────────────────────────────────────────────
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !amountA || !amountB || !address || !contracts || !window.ethereum || !chainId) return;
+    const tokenAERC20Check = getERC20Address(tokenA, chainId);
+    const tokenBERC20Check = getERC20Address(tokenB, chainId);
+    if (tokenAERC20Check.toLowerCase() === tokenBERC20Check.toLowerCase()) {
+      toast({ title: "Invalid pair", description: "Select two different tokens", variant: "destructive" });
+      return;
+    }
     setIsAdding(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
@@ -370,7 +385,8 @@ export function AddLiquidityV3Basic() {
   };
 
   const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
-  const canSubmit = tokenA && tokenB && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !amountAExceedsBalance && !amountBExceedsBalance && poolHealth?.severity !== "error" && !hasRwaToken;
+  const sameTokenSelected = !!(tokenA && tokenB && chainId && getERC20Address(tokenA, chainId).toLowerCase() === getERC20Address(tokenB, chainId).toLowerCase());
+  const canSubmit = tokenA && tokenB && !sameTokenSelected && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !amountAExceedsBalance && !amountBExceedsBalance && poolHealth?.severity !== "error" && !hasRwaToken;
 
   return (
     <>
@@ -524,7 +540,7 @@ export function AddLiquidityV3Basic() {
                   const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
                   setAmountA(displayAmount);
                   let maxWei = balanceA;
-                  if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
+                  if (isCanonicalUSDC(tokenA) || isNativeToken(tokenA.address)) {
                     maxWei = (balanceA * 99n) / 100n;
                   }
                   maxAmountAWeiRef.current = maxWei;
@@ -581,7 +597,7 @@ export function AddLiquidityV3Basic() {
                   const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
                   setAmountB(displayAmount);
                   let maxWei = balanceB;
-                  if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
+                  if (isCanonicalUSDC(tokenB) || isNativeToken(tokenB.address)) {
                     maxWei = (balanceB * 99n) / 100n;
                   }
                   maxAmountBWeiRef.current = maxWei;
@@ -743,6 +759,42 @@ export function AddLiquidityV3Basic() {
             onHealthChange={setPoolHealth}
             onFixed={fetchPoolState}
           />
+        )}
+
+        {/* ── RWA warning ── */}
+        {hasRwaToken && (
+          <div style={{
+            display: "flex", alignItems: "flex-start", gap: 10,
+            padding: "14px 16px", borderRadius: 14,
+            background: "rgba(239,68,68,0.06)",
+            border: "1px solid rgba(239,68,68,0.2)",
+          }}>
+            <AlertTriangle style={{ width: 16, height: 16, color: "#f87171", flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <p style={{ fontSize: 12, fontWeight: 700, color: "#f87171", margin: 0 }}>RWA tokens cannot be used for liquidity</p>
+              <p style={{ fontSize: 11, color: "rgba(248,113,113,0.6)", margin: "4px 0 0", lineHeight: 1.5 }}>
+                RWA synthetic tokens are vault-backed and are only supported in USDC swap mode.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Same token warning ── */}
+        {sameTokenSelected && tokenA && tokenB && (
+          <div style={{
+            display: "flex", alignItems: "flex-start", gap: 10,
+            padding: "14px 16px", borderRadius: 14,
+            background: "rgba(251,191,36,0.06)",
+            border: "1px solid rgba(251,191,36,0.2)",
+          }}>
+            <AlertTriangle style={{ width: 16, height: 16, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <p style={{ fontSize: 12, fontWeight: 700, color: "#fbbf24", margin: 0 }}>Select two different tokens</p>
+              <p style={{ fontSize: 11, color: "rgba(251,191,36,0.65)", margin: "4px 0 0", lineHeight: 1.5 }}>
+                {tokenA.symbol} and {tokenB.symbol} resolve to the same underlying token.
+              </p>
+            </div>
+          </div>
         )}
 
         {/* ── Submit ── */}
