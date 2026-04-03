@@ -61,8 +61,6 @@ export async function getV2Quote(
     const directPath = buildV2Path(fromToken, toToken, wrappedTokenAddress);
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
-    const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
-    const DECIMALS_SCALE_OUT = 10n ** BigInt(toToken.decimals);
     const MIN = 10_000n;
     const MAX = 10_000_000_000n;
     const testIn = amountIn > 0n
@@ -75,12 +73,9 @@ export async function getV2Quote(
 
     const calcV2Impact = (spotOut: bigint, outputAmount: bigint): number => {
       if (spotOut === 0n) return Number.NaN;
-      // Scale output amounts to same decimal base as input
-      const scaledOutputAmount = outputAmount * DECIMALS_SCALE_IN / DECIMALS_SCALE_OUT;
-      const scaledSpotOut = spotOut * DECIMALS_SCALE_IN / DECIMALS_SCALE_OUT;
-      const num = scaledSpotOut * amountIn - scaledOutputAmount * testIn;
+      const num = spotOut * amountIn - outputAmount * testIn;
       if (num <= 0n) return 0;
-      return Number((num * 10000n) / (scaledSpotOut * amountIn)) / 100;
+      return Number((num * 10000n) / (spotOut * amountIn)) / 100;
     };
 
     const [directResult, hopResult] = await Promise.allSettled([
@@ -188,8 +183,6 @@ export async function getV3Quote(
     const fromERC20 = getERC20Address(fromToken.address, wrappedTokenAddress);
     const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
 
-    const DECIMALS_SCALE_IN = 10n ** BigInt(fromToken.decimals);
-    const DECIMALS_SCALE_OUT = 10n ** BigInt(toToken.decimals);
     const MIN = 10_000n;
     const MAX = 10_000_000_000n;
     const testIn = amountIn > 0n
@@ -201,12 +194,9 @@ export async function getV3Quote(
 
     const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number => {
       if (spotOut === 0n) return Number.NaN;
-      // Scale output amounts to same decimal base as input
-      const scaledOutputAmount = outputAmount * DECIMALS_SCALE_IN / DECIMALS_SCALE_OUT;
-      const scaledSpotOut = spotOut * DECIMALS_SCALE_IN / DECIMALS_SCALE_OUT;
-      const num = scaledSpotOut * amountIn - scaledOutputAmount * testIn;
+      const num = spotOut * amountIn - outputAmount * testIn;
       if (num <= 0n) return 0;
-      return Number((num * 10000n) / (scaledSpotOut * amountIn)) / 100;
+      return Number((num * 10000n) / (spotOut * amountIn)) / 100;
     };
 
     // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────
@@ -497,11 +487,17 @@ export async function getRWAQuote(
 ): Promise<RWAQuoteResult | null> {
   try {
     const vault = new Contract(vaultAddress, RWA_VAULT_ABI, provider);
+    const fromIsRWA = !!fromToken.rwa;
+    const toIsRWA = !!toToken.rwa;
+    if (fromIsRWA === toIsRWA) {
+      console.warn("Invalid RWA quote direction:", fromToken.symbol, "->", toToken.symbol);
+      return null;
+    }
     const isBuy = !fromToken.rwa && !!toToken.rwa; // USDC→RWA
     const rwaToken = isBuy ? toToken : fromToken;
     const pairId = rwaToken.rwaPairId;
 
-    if (!pairId) {
+    if (pairId == null) {
       console.warn("RWA token missing pairId:", rwaToken.symbol);
       return null;
     }
