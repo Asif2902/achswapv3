@@ -51,6 +51,13 @@ const ERC20_ABI = [
   "function decimals() view returns (uint8)",
 ];
 
+const MIGRATION_SLIPPAGE_BPS = 100n; // 1%
+
+function applySlippageMin(amount: bigint, bps: bigint = MIGRATION_SLIPPAGE_BPS): bigint {
+  if (amount <= 0n) return 0n;
+  return (amount * (10_000n - bps)) / 10_000n;
+}
+
 interface V2Position {
   pairAddress: string;
   token0: Token;
@@ -171,7 +178,7 @@ export function MigrateV2ToV3() {
       const factory = new Contract(contracts.v2.factory, V2_FACTORY_ABI, provider);
       const pairsLength = await factory.allPairsLength();
       const userPositions: V2Position[] = [];
-      const maxPairs = Math.min(Number(pairsLength), 50);
+      const maxPairs = Number(pairsLength);
 
       for (let i = 0; i < maxPairs; i++) {
         try {
@@ -227,6 +234,8 @@ export function MigrateV2ToV3() {
       }
 
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
+      const expectedAmount0 = (selectedPosition.reserve0 * liquidityToMigrate) / selectedPosition.totalSupply;
+      const expectedAmount1 = (selectedPosition.reserve1 * liquidityToMigrate) / selectedPosition.totalSupply;
       const migrateParams = {
         pair: selectedPosition.pairAddress,
         liquidityToMigrate,
@@ -236,8 +245,8 @@ export function MigrateV2ToV3() {
         fee: selectedFee,
         tickLower,
         tickUpper,
-        amount0Min: 0n,
-        amount1Min: 0n,
+        amount0Min: applySlippageMin(expectedAmount0),
+        amount1Min: applySlippageMin(expectedAmount1),
         recipient: address,
         deadline: Math.floor(Date.now() / 1000) + 1200,
         refundAsETH: false,

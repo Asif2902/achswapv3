@@ -179,9 +179,7 @@ export function RemoveLiquidityV2() {
       const pairsLength = await factory.allPairsLength();
       console.log("Total V2 pairs:", pairsLength.toString());
 
-      // Cap the number of pairs to fetch to avoid too many RPC calls
-      const MAX_PAIRS = 50;
-      const pairsToFetch = Math.min(Number(pairsLength), MAX_PAIRS);
+      const pairsToFetch = Number(pairsLength);
 
       // Get pair addresses first (capped)
       const pairAddresses: string[] = await Promise.all(
