@@ -7,7 +7,7 @@ import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
-import { defaultTokens, getTokensByChainId, isRWAToken } from "@/data/tokens";
+import { defaultTokens, getTokensByChainId, isRWAToken, isCanonicalUSDC, getWUSDC } from "@/data/tokens";
 import { formatAmount, parseAmount, calculateRatio, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -79,12 +79,15 @@ export function AddLiquidityV2() {
       if (!tokenA || !tokenB || !window.ethereum) {
         setPairExists(false); setReserveA(0n); setReserveB(0n); return;
       }
+      if (tokenA.address.toLowerCase() === tokenB.address.toLowerCase()) {
+        setPairExists(false); setReserveA(0n); setReserveB(0n); return;
+      }
       setIsLoadingPair(true);
       try {
         if (!contracts) return;
         const provider = new BrowserProvider(window.ethereum);
         const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
-        const wrappedToken = tokens.find(t => t.symbol === 'wUSDC');
+        const wrappedToken = getWUSDC(chainId);
         const wrappedAddress = wrappedToken?.address;
         if (!wrappedAddress) { setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return; }
         const isTokenANative = tokenA.address === "0x0000000000000000000000000000000000000000";
@@ -258,9 +261,8 @@ export function AddLiquidityV2() {
       const amountAMin = (!pairExists || reserveA === 0n || reserveB === 0n) ? 0n : amountADesired * 95n / 100n;
       const amountBMin = (!pairExists || reserveA === 0n || reserveB === 0n) ? 0n : amountBDesired * 95n / 100n;
       const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
-      const wrappedSymbol = 'wUSDC';
-      const wrappedToken = tokens.find(t => t.symbol === wrappedSymbol);
-      if (!wrappedToken?.address) throw new Error(`${wrappedSymbol} token not found`);
+      const wrappedToken = getWUSDC(chainId);
+      if (!wrappedToken?.address) throw new Error("wUSDC token not found");
       const tokenAAddress = isTokenANative ? wrappedToken.address : tokenA.address;
       const tokenBAddress = isTokenBNative ? wrappedToken.address : tokenB.address;
       toast({ title: "Adding liquidity", description: `Adding ${amountA} ${tokenA.symbol} and ${amountB} ${tokenB.symbol}` });
@@ -324,7 +326,8 @@ export function AddLiquidityV2() {
     : { label: "New Pool", color: "rgba(99,102,241,0.12)", text: "#818cf8", dot: "#6366f1" };
 
   const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
-  const canSubmit = tokenA && tokenB && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !hasRwaToken;
+  const sameTokenSelected = !!(tokenA && tokenB && tokenA.address.toLowerCase() === tokenB.address.toLowerCase());
+  const canSubmit = tokenA && tokenB && !sameTokenSelected && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !hasRwaToken;
 
   return (
     <>
@@ -537,7 +540,7 @@ export function AddLiquidityV2() {
                   const displayAmount = getMaxAmount(balanceA.value, balanceA.decimals, tokenA.symbol);
                   setAmountA(displayAmount);
                   let maxWei = balanceA.value;
-                  if (tokenA.symbol === "USDC") {
+                  if (isCanonicalUSDC(tokenA)) {
                     maxWei = (balanceA.value * 99n) / 100n;
                   }
                   maxAmountAWeiRef.current = maxWei;
@@ -596,7 +599,7 @@ export function AddLiquidityV2() {
                   const displayAmount = getMaxAmount(balanceB.value, balanceB.decimals, tokenB.symbol);
                   setAmountB(displayAmount);
                   let maxWei = balanceB.value;
-                  if (tokenB.symbol === "USDC") {
+                  if (isCanonicalUSDC(tokenB)) {
                     maxWei = (balanceB.value * 99n) / 100n;
                   }
                   maxAmountBWeiRef.current = maxWei;
@@ -727,6 +730,25 @@ export function AddLiquidityV2() {
               <p style={{ fontSize: 12, fontWeight: 700, color: "#f87171", margin: 0 }}>RWA tokens cannot be used for liquidity</p>
               <p style={{ fontSize: 11, color: "rgba(248,113,113,0.6)", margin: "4px 0 0", lineHeight: 1.5 }}>
                 RWA synthetic tokens are backed by the AchRWA vault, not AMM pools. Use the Swap page to buy or redeem RWA tokens directly.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Same token warning ── */}
+        {sameTokenSelected && tokenA && tokenB && (
+          <div style={{
+            display: "flex", alignItems: "flex-start", gap: 10,
+            padding: "14px 16px", borderRadius: 14,
+            background: "rgba(251,191,36,0.06)",
+            border: "1px solid rgba(251,191,36,0.2)",
+            marginTop: 16,
+          }}>
+            <AlertTriangle style={{ width: 16, height: 16, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <p style={{ fontSize: 12, fontWeight: 700, color: "#fbbf24", margin: 0 }}>Select two different tokens</p>
+              <p style={{ fontSize: 11, color: "rgba(251,191,36,0.65)", margin: "4px 0 0", lineHeight: 1.5 }}>
+                {tokenA.symbol} and {tokenB.symbol} are the same token. V2 liquidity requires two different assets.
               </p>
             </div>
           </div>
