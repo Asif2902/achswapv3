@@ -247,38 +247,48 @@ export function getNonRWATokens(chainId: number): Token[] {
   return getTokensByChainId(chainId).filter(t => !t.rwa);
 }
 
-export function getUSDC(chainId: number): Token | undefined {
-  return getTokensByChainId(chainId).find(t => normalize(t.address) === normalize(USDC_ADDRESS));
-}
-
-export function getWUSDC(chainId: number): Token | undefined {
-  return getTokensByChainId(chainId).find(t => normalize(t.address) === normalize(WUSDC_ADDRESS));
-}
-
-const USDC_ADDRESS = "0x0000000000000000000000000000000000000000";
-const WUSDC_ADDRESS = "0xDe5DB9049a8dd344dC1B7Bbb098f9da60930A6dA";
+const CANONICAL_USDC_ADDRESSES: Record<number, { usdc: string; wusdc: string }> = {
+  5042002: {
+    usdc: "0x0000000000000000000000000000000000000000",
+    wusdc: "0xDe5DB9049a8dd344dC1B7Bbb098f9da60930A6dA",
+  },
+};
 
 function normalize(addr: string): string {
   return addr.toLowerCase();
 }
 
+export function getUSDC(chainId: number): Token | undefined {
+  const canonical = CANONICAL_USDC_ADDRESSES[chainId];
+  if (!canonical) return undefined;
+  return getTokensByChainId(chainId).find(t => normalize(t.address) === normalize(canonical.usdc));
+}
+
+export function getWUSDC(chainId: number): Token | undefined {
+  const canonical = CANONICAL_USDC_ADDRESSES[chainId];
+  if (!canonical) return undefined;
+  return getTokensByChainId(chainId).find(t => normalize(t.address) === normalize(canonical.wusdc));
+}
+
 export function isCanonicalUSDC(token: Token | null | undefined): boolean {
   if (!token) return false;
-  const a = normalize(token.address);
-  return a === normalize(USDC_ADDRESS);
+  const canonical = CANONICAL_USDC_ADDRESSES[token.chainId];
+  if (!canonical) return false;
+  return normalize(token.address) === normalize(canonical.usdc);
 }
 
 export function isCanonicalWUSDC(token: Token | null | undefined): boolean {
   if (!token) return false;
-  const a = normalize(token.address);
-  return a === normalize(WUSDC_ADDRESS);
+  const canonical = CANONICAL_USDC_ADDRESSES[token.chainId];
+  if (!canonical) return false;
+  return normalize(token.address) === normalize(canonical.wusdc);
 }
 
 export function isRWASwapPair(from: Token | null, to: Token | null): boolean {
   if (!from || !to) return false;
   const fromIsRWA = isRWAToken(from);
   const toIsRWA = isRWAToken(to);
-  const fromIsUSDC = isCanonicalUSDC(from);
-  const toIsUSDC = isCanonicalUSDC(to);
+  const fromIsUSDC = isCanonicalUSDC(from) || isCanonicalWUSDC(from);
+  const toIsUSDC = isCanonicalUSDC(to) || isCanonicalWUSDC(to);
   return (fromIsRWA && toIsUSDC) || (fromIsUSDC && toIsRWA);
 }
