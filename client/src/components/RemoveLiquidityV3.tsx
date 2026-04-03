@@ -360,159 +360,169 @@ export function RemoveLiquidityV3() {
         return;
       }
 
-      // Step 2: Fetch ALL tokenIds in parallel (batch provider packs these into ~1 HTTP request)
-      const tokenIds: bigint[] = await Promise.all(
-        Array.from({ length: count }, (_, i) =>
-          positionManager.tokenOfOwnerByIndex(address, i),
-        ),
-      );
+      // Step 2: Fetch tokenIds in bounded batches
+      const tokenIds: bigint[] = [];
+      const tokenIdBatchSize = 40;
+      for (let start = 0; start < count; start += tokenIdBatchSize) {
+        const end = Math.min(start + tokenIdBatchSize, count);
+        const indices = Array.from({ length: end - start }, (_, i) => start + i);
+        const idChunk = await Promise.all(indices.map((i) => positionManager.tokenOfOwnerByIndex(address, i)));
+        tokenIds.push(...idChunk);
+      }
 
-      // Step 3: Fetch ALL position data in parallel (another ~1 HTTP batch)
-      const rawPositions = await Promise.all(
-        tokenIds.map((id) => positionManager.positions(id)),
-      );
+      // Step 3: Fetch raw position structs in bounded batches
+      const rawPositions: any[] = [];
+      const positionBatchSize = 30;
+      for (let start = 0; start < tokenIds.length; start += positionBatchSize) {
+        const chunk = tokenIds.slice(start, start + positionBatchSize);
+        const posChunk = await Promise.all(chunk.map((id) => positionManager.positions(id)));
+        rawPositions.push(...posChunk);
+      }
 
-      // Step 4: For each position, fetch token metadata + pool state in parallel.
-      // All positions are loaded concurrently — the batch provider packs all
-      // eth_calls into minimal HTTP requests automatically.
-      const userPositions = await Promise.all(
-        rawPositions.map(async (position, idx): Promise<V3Position | null> => {
-          try {
-            const tokenId = tokenIds[idx];
-            const token0Address: string = position[2];
-            const token1Address: string = position[3];
-            const fee = Number(position[4]);
-            const tickLower = Number(position[5]);
-            const tickUpper = Number(position[6]);
-            const liquidity: bigint = position[7];
-            const feeGrowthInside0LastX128: bigint = position[8];
-            const feeGrowthInside1LastX128: bigint = position[9];
-            const tokensOwed0: bigint = position[10];
-            const tokensOwed1: bigint = position[11];
-
-            // Token metadata (uses cache → knownTokens → RPC)
-            const [info0, info1] = await Promise.all([
-              safeTokenInfo(token0Address, provider, knownTokenList),
-              safeTokenInfo(token1Address, provider, knownTokenList),
-            ]);
-
-            let amount0 = 0n;
-            let amount1 = 0n;
-            let unclaimedFees0 = tokensOwed0;
-            let unclaimedFees1 = tokensOwed1;
-            let currentTick: number | undefined = undefined;
-
+      // Step 4: Fetch token metadata + pool state in smaller concurrent batches
+      const userPositions: (V3Position | null)[] = [];
+      const detailsBatchSize = 10;
+      for (let start = 0; start < rawPositions.length; start += detailsBatchSize) {
+        const rawChunk = rawPositions.slice(start, start + detailsBatchSize);
+        const chunkResults = await Promise.all(
+          rawChunk.map(async (position, idx): Promise<V3Position | null> => {
+            const absoluteIdx = start + idx;
             try {
-              const [tokenA, tokenB] =
-                token0Address.toLowerCase() < token1Address.toLowerCase()
-                  ? [token0Address, token1Address]
-                  : [token1Address, token0Address];
+              const tokenId = tokenIds[absoluteIdx];
+              const token0Address: string = position[2];
+              const token1Address: string = position[3];
+              const fee = Number(position[4]);
+              const tickLower = Number(position[5]);
+              const tickUpper = Number(position[6]);
+              const liquidity: bigint = position[7];
+              const feeGrowthInside0LastX128: bigint = position[8];
+              const feeGrowthInside1LastX128: bigint = position[9];
+              const tokensOwed0: bigint = position[10];
+              const tokensOwed1: bigint = position[11];
 
-              const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+              const [info0, info1] = await Promise.all([
+                safeTokenInfo(token0Address, provider, knownTokenList),
+                safeTokenInfo(token1Address, provider, knownTokenList),
+              ]);
 
-              if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
-                const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
+              let amount0 = 0n;
+              let amount1 = 0n;
+              let unclaimedFees0 = tokensOwed0;
+              let unclaimedFees1 = tokensOwed1;
+              let currentTick: number | undefined = undefined;
 
-                // All 5 pool reads in parallel — batch provider packs them together
-                const [
-                  slot0,
-                  feeGrowthGlobal0X128,
-                  feeGrowthGlobal1X128,
-                  tickLowerData,
-                  tickUpperData,
-                ] = await Promise.all([
-                  pool.slot0(),
-                  pool.feeGrowthGlobal0X128(),
-                  pool.feeGrowthGlobal1X128(),
-                  pool.ticks(tickLower),
-                  pool.ticks(tickUpper),
-                ]);
+              try {
+                const [tokenA, tokenB] =
+                  token0Address.toLowerCase() < token1Address.toLowerCase()
+                    ? [token0Address, token1Address]
+                    : [token1Address, token0Address];
 
-                let currentSqrtPriceX96: bigint = slot0[0];
-                currentTick = Number(slot0[1]);
-                if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
+                const poolAddress = await factory.getPool(tokenA, tokenB, fee);
 
-                const feeGrowthOutsideLower0: bigint = tickLowerData[2];
-                const feeGrowthOutsideLower1: bigint = tickLowerData[3];
-                const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
-                const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
+                if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
+                  const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
 
-                if (liquidity > 0n) {
-                  const feeGrowthInside0 = calculateFeeGrowthInside(
+                  const [
+                    slot0,
                     feeGrowthGlobal0X128,
-                    feeGrowthOutsideLower0,
-                    feeGrowthOutsideUpper0,
-                    currentTick,
-                    tickLower,
-                    tickUpper,
-                  );
-                  const feeGrowthInside1 = calculateFeeGrowthInside(
                     feeGrowthGlobal1X128,
-                    feeGrowthOutsideLower1,
-                    feeGrowthOutsideUpper1,
-                    currentTick,
+                    tickLowerData,
+                    tickUpperData,
+                  ] = await Promise.all([
+                    pool.slot0(),
+                    pool.feeGrowthGlobal0X128(),
+                    pool.feeGrowthGlobal1X128(),
+                    pool.ticks(tickLower),
+                    pool.ticks(tickUpper),
+                  ]);
+
+                  let currentSqrtPriceX96: bigint = slot0[0];
+                  currentTick = Number(slot0[1]);
+                  if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
+
+                  const feeGrowthOutsideLower0: bigint = tickLowerData[2];
+                  const feeGrowthOutsideLower1: bigint = tickLowerData[3];
+                  const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
+                  const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
+
+                  if (liquidity > 0n) {
+                    const feeGrowthInside0 = calculateFeeGrowthInside(
+                      feeGrowthGlobal0X128,
+                      feeGrowthOutsideLower0,
+                      feeGrowthOutsideUpper0,
+                      currentTick,
+                      tickLower,
+                      tickUpper,
+                    );
+                    const feeGrowthInside1 = calculateFeeGrowthInside(
+                      feeGrowthGlobal1X128,
+                      feeGrowthOutsideLower1,
+                      feeGrowthOutsideUpper1,
+                      currentTick,
+                      tickLower,
+                      tickUpper,
+                    );
+                    unclaimedFees0 = calculateUnclaimedFees(
+                      liquidity,
+                      feeGrowthInside0,
+                      feeGrowthInside0LastX128,
+                      tokensOwed0,
+                    );
+                    unclaimedFees1 = calculateUnclaimedFees(
+                      liquidity,
+                      feeGrowthInside1,
+                      feeGrowthInside1LastX128,
+                      tokensOwed1,
+                    );
+                  }
+
+                  const tokenAmounts = getTokensFromLiquidity(
+                    liquidity,
+                    currentSqrtPriceX96,
                     tickLower,
                     tickUpper,
                   );
-                  unclaimedFees0 = calculateUnclaimedFees(
-                    liquidity,
-                    feeGrowthInside0,
-                    feeGrowthInside0LastX128,
-                    tokensOwed0,
-                  );
-                  unclaimedFees1 = calculateUnclaimedFees(
-                    liquidity,
-                    feeGrowthInside1,
-                    feeGrowthInside1LastX128,
-                    tokensOwed1,
-                  );
-                }
 
-                const tokenAmounts = getTokensFromLiquidity(
-                  liquidity,
-                  currentSqrtPriceX96,
-                  tickLower,
-                  tickUpper,
-                );
-
-                if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
-                  amount0 = tokenAmounts.amount1;
-                  amount1 = tokenAmounts.amount0;
-                } else {
-                  amount0 = tokenAmounts.amount0;
-                  amount1 = tokenAmounts.amount1;
+                  if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
+                    amount0 = tokenAmounts.amount1;
+                    amount1 = tokenAmounts.amount0;
+                  } else {
+                    amount0 = tokenAmounts.amount0;
+                    amount1 = tokenAmounts.amount1;
+                  }
                 }
+              } catch (poolError) {
+                console.error("Error fetching pool data:", poolError);
               }
-            } catch (poolError) {
-              console.error("Error fetching pool data:", poolError);
-            }
 
-            return {
-              tokenId,
-              token0Address,
-              token0Symbol: info0.symbol,
-              token0Decimals: info0.decimals,
-              token1Address,
-              token1Symbol: info1.symbol,
-              token1Decimals: info1.decimals,
-              fee,
-              liquidity,
-              tickLower,
-              tickUpper,
-              tokensOwed0,
-              tokensOwed1,
-              unclaimedFees0,
-              unclaimedFees1,
-              amount0,
-              amount1,
-              currentTick,
-            };
-          } catch (error) {
-            console.error(`Error loading position ${idx}:`, error);
-            return null;
-          }
-        }),
-      );
+              return {
+                tokenId,
+                token0Address,
+                token0Symbol: info0.symbol,
+                token0Decimals: info0.decimals,
+                token1Address,
+                token1Symbol: info1.symbol,
+                token1Decimals: info1.decimals,
+                fee,
+                liquidity,
+                tickLower,
+                tickUpper,
+                tokensOwed0,
+                tokensOwed1,
+                unclaimedFees0,
+                unclaimedFees1,
+                amount0,
+                amount1,
+                currentTick,
+              };
+            } catch (error) {
+              console.error(`Error loading position ${absoluteIdx}:`, error);
+              return null;
+            }
+          })
+        );
+        userPositions.push(...chunkResults);
+      }
 
       const validPositions = userPositions.filter((p): p is V3Position => p !== null);
       setPositions(validPositions);
