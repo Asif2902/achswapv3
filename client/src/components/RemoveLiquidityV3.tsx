@@ -19,6 +19,12 @@ import { ExternalLink, Trash2, Coins, RefreshCw, DollarSign, Wallet, ChevronRigh
 const MAX_UINT128 = 2n ** 128n - 1n;
 const Q128 = 2n ** 128n;
 const MASK256 = (1n << 256n) - 1n;
+const SLIPPAGE_BPS = 100n; // 1%
+
+function applySlippageMin(amount: bigint, bps: bigint = SLIPPAGE_BPS): bigint {
+  if (amount <= 0n) return 0n;
+  return (amount * (10_000n - bps)) / 10_000n;
+}
 
 // ─── Position cache ──────────────────────────────────────────────────────────
 // Cache V3 positions in localStorage so the page shows data instantly on mount
@@ -660,6 +666,10 @@ export function RemoveLiquidityV3() {
 
       const liquidityToRemove = selectedPosition.liquidity * BigInt(percentage[0]) / 100n;
       const isFullRemove = percentage[0] === 100;
+      const expectedAmount0Out = (selectedPosition.amount0 * BigInt(percentage[0])) / 100n;
+      const expectedAmount1Out = (selectedPosition.amount1 * BigInt(percentage[0])) / 100n;
+      const amount0Min = applySlippageMin(expectedAmount0Out);
+      const amount1Min = applySlippageMin(expectedAmount1Out);
 
       toast({
         title: isFullRemove ? "Removing liquidity…" : `Removing ${percentage[0]}% of liquidity…`,
@@ -672,8 +682,8 @@ export function RemoveLiquidityV3() {
         {
           tokenId: selectedPosition.tokenId,
           liquidity: liquidityToRemove,
-          amount0Min: 0n,
-          amount1Min: 0n,
+          amount0Min,
+          amount1Min,
           deadline: Math.floor(Date.now() / 1000) + 1200,
         },
       ]);
