@@ -180,24 +180,53 @@ export function RemoveLiquidityV2() {
       console.log("Total V2 pairs:", pairsLength.toString());
 
       const pairsToFetch = Number(pairsLength);
+      const batchSize = 50;
 
-      // Get pair addresses first (capped)
-      const pairAddresses: string[] = await Promise.all(
-        Array.from({ length: pairsToFetch }, (_, i) => factory.allPairs(i))
-      );
+      // Get pair addresses in chunks (avoid one giant Promise.all)
+      const pairAddresses: string[] = [];
+      for (let start = 0; start < pairsToFetch; start += batchSize) {
+        const end = Math.min(start + batchSize, pairsToFetch);
+        const indices = Array.from({ length: end - start }, (_, i) => start + i);
+        try {
+          const chunkAddresses = await Promise.all(indices.map((i) => factory.allPairs(i)));
+          pairAddresses.push(...chunkAddresses);
+        } catch (batchErr) {
+          console.warn("Failed to fetch pair-address batch, retrying individually", batchErr);
+          for (const i of indices) {
+            try {
+              pairAddresses.push(await factory.allPairs(i));
+            } catch {
+              continue;
+            }
+          }
+        }
+      }
 
       console.log("Got all pair addresses:", pairAddresses.length);
 
-      // Check balances for all pairs in parallel
-      const pairContracts = pairAddresses.map(
-        (addr) => new Contract(addr, PAIR_ABI, provider)
-      );
-      const balances = await Promise.all(
-        pairContracts.map((pair) => pair.balanceOf(address))
-      );
+      // Check balances in chunks and continue on transient failures
+      const positionsWithBalance: string[] = [];
+      for (let start = 0; start < pairAddresses.length; start += batchSize) {
+        const chunk = pairAddresses.slice(start, start + batchSize);
+        const pairContracts = chunk.map((addr) => new Contract(addr, PAIR_ABI, provider));
+        try {
+          const balances = await Promise.all(pairContracts.map((pair) => pair.balanceOf(address)));
+          for (let i = 0; i < chunk.length; i++) {
+            if (balances[i] > 0n) positionsWithBalance.push(chunk[i]);
+          }
+        } catch (batchErr) {
+          console.warn("Failed to fetch balance batch, retrying individually", batchErr);
+          for (let i = 0; i < chunk.length; i++) {
+            try {
+              const bal = await pairContracts[i].balanceOf(address);
+              if (bal > 0n) positionsWithBalance.push(chunk[i]);
+            } catch {
+              continue;
+            }
+          }
+        }
+      }
 
-      // Filter pairs with balance
-      const positionsWithBalance = pairAddresses.filter((_, i) => balances[i] > 0n);
       console.log("Pairs with balance:", positionsWithBalance.length);
 
       // For batching to work perfectly on Alchemy, we should use a single `Promise.all`
