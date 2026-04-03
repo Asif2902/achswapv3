@@ -179,26 +179,82 @@ export function MigrateV2ToV3() {
       const pairsLength = await factory.allPairsLength();
       const userPositions: V2Position[] = [];
       const maxPairs = Number(pairsLength);
+      const batchSize = 25;
 
-      for (let i = 0; i < maxPairs; i++) {
+      for (let start = 0; start < maxPairs; start += batchSize) {
+        const end = Math.min(start + batchSize, maxPairs);
+        const indices = Array.from({ length: end - start }, (_, i) => start + i);
+
+        let pairAddresses: string[] = [];
         try {
-          const pairAddress = await factory.allPairs(i);
-          const pairContract = new Contract(pairAddress, V2_PAIR_ABI, provider);
-          const lpBalance = await pairContract.balanceOf(address);
-          if (lpBalance > 0n) {
-            const token0Address = await pairContract.token0();
-            const token1Address = await pairContract.token1();
-            const reserves = await pairContract.getReserves();
-            const totalSupply = await pairContract.totalSupply();
-            const t0 = new Contract(token0Address, ERC20_ABI, provider);
-            const t1 = new Contract(token1Address, ERC20_ABI, provider);
-            const [name0, symbol0, decimals0] = await Promise.all([t0.name(), t0.symbol(), t0.decimals()]);
-            const [name1, symbol1, decimals1] = await Promise.all([t1.name(), t1.symbol(), t1.decimals()]);
-            const token0: Token = { address: token0Address, name: name0, symbol: symbol0, decimals: Number(decimals0), logoURI: tokens.find(t => t.address.toLowerCase() === token0Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png", verified: false, chainId: chainId! };
-            const token1: Token = { address: token1Address, name: name1, symbol: symbol1, decimals: Number(decimals1), logoURI: tokens.find(t => t.address.toLowerCase() === token1Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png", verified: false, chainId: chainId! };
-            userPositions.push({ pairAddress, token0, token1, lpBalance, totalSupply, reserve0: reserves[0], reserve1: reserves[1], sharePercent: Number((lpBalance * 10000n) / totalSupply) / 100 });
+          pairAddresses = await Promise.all(indices.map((i) => factory.allPairs(i)));
+        } catch {
+          for (const i of indices) {
+            try {
+              pairAddresses.push(await factory.allPairs(i));
+            } catch {
+              continue;
+            }
           }
-        } catch { continue; }
+        }
+
+        const batchPositions = await Promise.all(
+          pairAddresses.map(async (pairAddress): Promise<V2Position | null> => {
+            try {
+              const pairContract = new Contract(pairAddress, V2_PAIR_ABI, provider);
+              const [lpBalance, token0Address, token1Address, reserves, totalSupply] = await Promise.all([
+                pairContract.balanceOf(address),
+                pairContract.token0(),
+                pairContract.token1(),
+                pairContract.getReserves(),
+                pairContract.totalSupply(),
+              ]);
+
+              if (lpBalance <= 0n) return null;
+
+              const t0 = new Contract(token0Address, ERC20_ABI, provider);
+              const t1 = new Contract(token1Address, ERC20_ABI, provider);
+              const [name0, symbol0, decimals0] = await Promise.all([t0.name(), t0.symbol(), t0.decimals()]);
+              const [name1, symbol1, decimals1] = await Promise.all([t1.name(), t1.symbol(), t1.decimals()]);
+
+              const token0: Token = {
+                address: token0Address,
+                name: name0,
+                symbol: symbol0,
+                decimals: Number(decimals0),
+                logoURI: tokens.find(t => t.address.toLowerCase() === token0Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
+                verified: false,
+                chainId: chainId!,
+              };
+              const token1: Token = {
+                address: token1Address,
+                name: name1,
+                symbol: symbol1,
+                decimals: Number(decimals1),
+                logoURI: tokens.find(t => t.address.toLowerCase() === token1Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
+                verified: false,
+                chainId: chainId!,
+              };
+
+              return {
+                pairAddress,
+                token0,
+                token1,
+                lpBalance,
+                totalSupply,
+                reserve0: reserves[0],
+                reserve1: reserves[1],
+                sharePercent: Number((lpBalance * 10000n) / totalSupply) / 100,
+              };
+            } catch {
+              return null;
+            }
+          })
+        );
+
+        for (const pos of batchPositions) {
+          if (pos) userPositions.push(pos);
+        }
       }
 
       setPositions(userPositions);
