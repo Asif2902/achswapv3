@@ -248,7 +248,11 @@ export function getNonRWATokens(chainId: number): Token[] {
 }
 
 export function getUSDC(chainId: number): Token | undefined {
-  return getTokensByChainId(chainId).find(t => t.symbol === "USDC");
+  return getTokensByChainId(chainId).find(t => normalize(t.address) === normalize(USDC_ADDRESS));
+}
+
+export function getWUSDC(chainId: number): Token | undefined {
+  return getTokensByChainId(chainId).find(t => normalize(t.address) === normalize(WUSDC_ADDRESS));
 }
 
 const USDC_ADDRESS = "0x0000000000000000000000000000000000000000";
