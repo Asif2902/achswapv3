@@ -10,8 +10,8 @@ import { PathVisualizer, type RouteHop } from "@/components/PathVisualizer";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
-import { Contract, BrowserProvider, JsonRpcProvider, getAddress } from "ethers";
-import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isRWASwapPair, getUSDC, isCanonicalUSDC, isCanonicalWUSDC } from "@/data/tokens";
+import { Contract, BrowserProvider, JsonRpcProvider, getAddress, formatUnits } from "ethers";
+import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isRWASwapPair, getUSDC, getWUSDC, isCanonicalUSDC, isCanonicalWUSDC } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getSmartRouteQuote, getRWAQuote, type SmartRoutingResult, type RWAQuoteResult } from "@/lib/smart-routing";
@@ -119,6 +119,8 @@ export default function Swap() {
   const isRWAPair = isRWASwapPair(fromToken, toToken);
   const isRwaBuy = isRWAPair && isRWAToken(toToken);  // USDC → RWA
   const isRwaRedeem = isRWAPair && isRWAToken(fromToken); // RWA → USDC
+  const isWrapPair = !!(fromToken && toToken && isCanonicalUSDC(fromToken) && isCanonicalWUSDC(toToken));
+  const isUnwrapPair = !!(fromToken && toToken && isCanonicalWUSDC(fromToken) && isCanonicalUSDC(toToken));
 
   useEffect(() => { const s = loadDexSettings(); setV2Enabled(s.v2Enabled); setV3Enabled(s.v3Enabled); }, []);
   useEffect(() => { saveDexSettings({ v2Enabled, v3Enabled }); }, [v2Enabled, v3Enabled]);
@@ -145,7 +147,7 @@ export default function Swap() {
     quoteRefreshNonceRef.current = next;
     setQuoteRefreshNonce(next);
     let maxWei = balance.value;
-    if (token.symbol === "USDC") {
+    if (isCanonicalUSDC(token)) {
       maxWei = (balance.value * 99n) / 100n;
     }
     maxAmountWeiRef.current = maxWei;
@@ -202,7 +204,7 @@ export default function Swap() {
 
   useEffect(() => {
     if (!tokens.length || !chainId) return;
-    if (!fromToken || fromToken.chainId !== chainId) { const t = tokens.find(t => t.symbol === "USDC"); if (t) setFromToken(t); }
+    if (!fromToken || fromToken.chainId !== chainId) { const t = getUSDC(chainId); if (t) setFromToken(t); }
     if (!toToken || toToken.chainId !== chainId) { const t = tokens.find(t => t.symbol === "ACHS"); if (t) setToToken(t); }
   }, [tokens, fromToken, toToken, chainId]);
 
@@ -339,12 +341,23 @@ export default function Swap() {
     setToAmountBelowThreshold(false);
   }, [fromToken?.address, toToken?.address]);
 
+  useEffect(() => {
+    if (!quoteRefreshInterval || quoteRefreshInterval < 5) return;
+    const id = setInterval(() => {
+      if (!fromAmount || parseFloat(fromAmount) <= 0) return;
+      const next = quoteRefreshNonceRef.current + 1;
+      quoteRefreshNonceRef.current = next;
+      setQuoteRefreshNonce(next);
+    }, quoteRefreshInterval * 1000);
+    return () => clearInterval(id);
+  }, [quoteRefreshInterval, fromAmount]);
+
   const fetchQuote = async (signal: AbortSignal) => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) {
       setToAmount(""); setPriceImpact(null); setToAmountBelowThreshold(false); setRwaQuoteResult(null); return;
     }
-    const isWrap = fromToken.symbol === "USDC" && toToken.symbol === "wUSDC";
-    const isUnwrap = fromToken.symbol === "wUSDC" && toToken.symbol === "USDC";
+    const isWrap = isCanonicalUSDC(fromToken) && isCanonicalWUSDC(toToken);
+    const isUnwrap = isCanonicalWUSDC(fromToken) && isCanonicalUSDC(toToken);
     if (isWrap || isUnwrap) {
       setToAmount(fromAmount); setPriceImpact(0);
       setRouteHops([{ tokenIn: fromToken, tokenOut: toToken, protocol: "V2" }]); setRwaQuoteResult(null); return;
@@ -383,7 +396,7 @@ export default function Swap() {
         setRwaQuoteResult(rwaResult);
         setSmartRoutingResult(null);
         const formatted = formatAmount(rwaResult.outputAmount, toToken.decimals);
-        const rawOutput = Number(rwaResult.outputAmount) / 10 ** toToken.decimals;
+        const rawOutput = parseFloat(formatUnits(rwaResult.outputAmount, toToken.decimals));
         const displayDecimals = Math.min(4, toToken.decimals);
         const threshold = 10 ** -displayDecimals;
         setToAmountBelowThreshold(rawOutput > 0 && rawOutput < threshold);
@@ -419,7 +432,7 @@ export default function Swap() {
       }
     }
     try {
-      const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
+      const wrappedTokenData = getWUSDC(chainId);
       if (!wrappedTokenData) throw new Error("wUSDC not found");
       // Use maxAmountWeiRef directly if set (from MAX button), otherwise parse from display
       const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
@@ -440,7 +453,7 @@ export default function Swap() {
       setSmartRoutingResult(result);
       const displayDecimals = Math.min(4, toToken.decimals);
       const threshold = 10 ** -displayDecimals;
-      const rawOutput = Number(result.bestQuote.outputAmount) / 10 ** toToken.decimals;
+      const rawOutput = parseFloat(formatUnits(result.bestQuote.outputAmount, toToken.decimals));
       const formatted = formatAmount(result.bestQuote.outputAmount, toToken.decimals);
       setToAmountBelowThreshold(rawOutput > 0 && rawOutput < threshold);
       setToAmount(formatted);
@@ -462,7 +475,7 @@ export default function Swap() {
       // Selecting RWA as "from" → force "to" to USDC
       const usdc = getUSDC(chainId);
       if (usdc && toToken?.address !== usdc.address) setToToken(usdc);
-    } else if (isRWAToken(toToken) && t.symbol !== "USDC") {
+    } else if (isRWAToken(toToken) && !isCanonicalUSDC(t)) {
       // "to" is RWA, selecting non-USDC as "from" → force "to" to null
       setToToken(null);
     }
@@ -475,7 +488,7 @@ export default function Swap() {
       // Selecting RWA as "to" → force "from" to USDC
       const usdc = getUSDC(chainId);
       if (usdc && fromToken?.address !== usdc.address) setFromToken(usdc);
-    } else if (isRWAToken(fromToken) && t.symbol !== "USDC") {
+    } else if (isRWAToken(fromToken) && !isCanonicalUSDC(t)) {
       // "from" is RWA, selecting non-USDC as "to" → force "from" to null
       setFromToken(null);
     }
@@ -484,8 +497,8 @@ export default function Swap() {
   };
 
   // ── Wrap / Unwrap ──────────────────────────────────────────────────────────
-  const nativeToken = tokens.find(t => t.symbol === "USDC");
-  const wrappedToken = tokens.find(t => t.symbol === "wUSDC");
+  const nativeToken = getUSDC(chainId);
+  const wrappedToken = getWUSDC(chainId);
 
   const handleWrap = async (amount: string) => {
     if (!address || !window.ethereum || !wrappedToken || !nativeToken) return;
@@ -540,8 +553,16 @@ export default function Swap() {
   // ── Main swap ──────────────────────────────────────────────────────────────
   const executeSwapCore = async () => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) return;
-    if (fromToken.symbol === "USDC" && toToken.symbol === "wUSDC") { await handleWrap(fromAmount); return; }
-    if (fromToken.symbol === "wUSDC" && toToken.symbol === "USDC") { await handleUnwrap(fromAmount); return; }
+    if (isWrapPair) {
+      const amountArg = maxAmountWeiRef.current !== null ? formatUnits(maxAmountWeiRef.current, fromToken.decimals) : fromAmount;
+      await handleWrap(amountArg);
+      return;
+    }
+    if (isUnwrapPair) {
+      const amountArg = maxAmountWeiRef.current !== null ? formatUnits(maxAmountWeiRef.current, fromToken.decimals) : fromAmount;
+      await handleUnwrap(amountArg);
+      return;
+    }
 
     // ── RWA SWAP PATH ─────────────────────────────────────────────────────
     if (isRWAPair && rwaQuoteResult && contracts?.rwa) {
@@ -693,12 +714,12 @@ export default function Swap() {
             saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
             await Promise.all([refetchFromBalance(), refetchToBalance()]);
             setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
-            const toSymbol = toToken.symbol === "wUSDC" ? "USDC" : toToken.symbol;
+            const toSymbol = isCanonicalWUSDC(toToken) ? "USDC" : toToken.symbol;
             toast({
               title: "Gasless swap successful!",
               description: (
                 <div className="flex items-center gap-2">
-                    <span>Swapped {fromAmount} {fromToken.symbol} → {toAmountDisplay} {toSymbol}{toToken.symbol === "wUSDC" && " (auto-converted)"}</span>
+                    <span>Swapped {fromAmount} {fromToken.symbol} → {toAmountDisplay} {toSymbol}{isCanonicalWUSDC(toToken) && " (auto-converted)"}</span>
                   <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
                 </div>
               ),
@@ -900,6 +921,7 @@ export default function Swap() {
   };
 
   const handleSwap = async () => {
+    if (!canSwap) return;
     if (priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged) {
       setHighImpactConfirm(true);
       return;
@@ -940,7 +962,9 @@ export default function Swap() {
   const impactColor = priceImpact === null ? "" : priceImpact >= HIGH_IMPACT_THRESHOLD ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
   const toAmountNum = parseFloat(toAmount);
   const toAmountDisplay = toAmountBelowThreshold && toAmount ? `<${toAmount}` : toAmount;
-  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping);
+  const hasValidRwaQuote = !isRWAPair || (!!rwaQuoteResult && !rwaQuoteResult.isStale && (rwaQuoteResult.isBuy || rwaQuoteResult.reserveOk));
+  const hasSmartQuote = isRWAPair || isWrapPair || isUnwrapPair || !!smartRoutingResult?.bestQuote;
+  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping && hasValidRwaQuote && hasSmartQuote);
   const protocolLabel = isRWAPair ? "RWA" : smartRoutingResult?.bestQuote?.protocol;
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1310,8 +1334,8 @@ export default function Swap() {
         </div>
       </div>
 
-      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
-      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 
