@@ -229,67 +229,57 @@ export function RemoveLiquidityV2() {
 
       console.log("Pairs with balance:", positionsWithBalance.length);
 
-      // For batching to work perfectly on Alchemy, we should use a single `Promise.all`
-      // array that holds all the individual contract calls directly.
-      const positionCalls = positionsWithBalance.map((pairAddress) => {
-        const pair = new Contract(pairAddress, PAIR_ABI, provider);
-        return Promise.all([
-          pairAddress,
-          pair.token0(),
-          pair.token1(),
-          pair.getReserves(),
-          pair.totalSupply(),
-          pair.balanceOf(address),
-        ]);
-      });
-
-      const rawPairsData = await Promise.all(positionCalls);
-
-      // Now fetch token details in a second batched wave
-      const tokenCalls: Promise<any>[] = [];
-      for (const raw of rawPairsData) {
-        const [, token0Address, token1Address] = raw;
-        const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
-        const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
-        
-        tokenCalls.push(
-          Promise.all([
-            token0Contract.symbol(),
-            token0Contract.decimals(),
-            token1Contract.symbol(),
-            token1Contract.decimals(),
-          ])
-        );
-      }
-
-      const rawTokensData = await Promise.all(tokenCalls);
-
-      // Construct final array
       const onChainPositions: V2Position[] = [];
-      for (let i = 0; i < rawPairsData.length; i++) {
-        try {
-          const [pairAddress, token0Address, token1Address, reserves, totalSupply, liquidity] = rawPairsData[i] as [string, string, string, any, bigint, bigint];
-          const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = rawTokensData[i] as [string, bigint, string, bigint];
+      const detailBatchSize = 15;
+      for (let start = 0; start < positionsWithBalance.length; start += detailBatchSize) {
+        const chunk = positionsWithBalance.slice(start, start + detailBatchSize);
+        const chunkResults = await Promise.all(
+          chunk.map(async (pairAddress): Promise<V2Position | null> => {
+            try {
+              const pair = new Contract(pairAddress, PAIR_ABI, provider);
+              const [token0Address, token1Address, reserves, totalSupply, liquidity] = await Promise.all([
+                pair.token0(),
+                pair.token1(),
+                pair.getReserves(),
+                pair.totalSupply(),
+                pair.balanceOf(address),
+              ]);
 
-          const r0 = BigInt(reserves.reserve0);
-          const r1 = BigInt(reserves.reserve1);
-          const amount0 = (liquidity * r0) / totalSupply;
-          const amount1 = (liquidity * r1) / totalSupply;
+              const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
+              const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
+              const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = await Promise.all([
+                token0Contract.symbol(),
+                token0Contract.decimals(),
+                token1Contract.symbol(),
+                token1Contract.decimals(),
+              ]);
 
-          onChainPositions.push({
-            pairAddress,
-            token0Address,
-            token0Symbol,
-            token0Decimals: Number(token0Decimals),
-            token1Address,
-            token1Symbol,
-            token1Decimals: Number(token1Decimals),
-            liquidity,
-            amount0,
-            amount1,
-          });
-        } catch (e) {
-             console.warn(`Failed to process V2 pair`, e);
+              const r0 = BigInt(reserves.reserve0);
+              const r1 = BigInt(reserves.reserve1);
+              const amount0 = (liquidity * r0) / totalSupply;
+              const amount1 = (liquidity * r1) / totalSupply;
+
+              return {
+                pairAddress,
+                token0Address,
+                token0Symbol,
+                token0Decimals: Number(token0Decimals),
+                token1Address,
+                token1Symbol,
+                token1Decimals: Number(token1Decimals),
+                liquidity,
+                amount0,
+                amount1,
+              };
+            } catch (e) {
+              console.warn(`Failed to process V2 pair ${pairAddress}`, e);
+              return null;
+            }
+          })
+        );
+
+        for (const pos of chunkResults) {
+          if (pos) onChainPositions.push(pos);
         }
       }
 
