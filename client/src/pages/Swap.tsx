@@ -475,7 +475,7 @@ export default function Swap() {
       // Selecting RWA as "from" → force "to" to USDC
       const usdc = getUSDC(chainId);
       if (usdc && toToken?.address !== usdc.address) setToToken(usdc);
-    } else if (isRWAToken(toToken) && !isCanonicalUSDC(t)) {
+    } else if (isRWAToken(toToken) && !(isCanonicalUSDC(t) || isCanonicalWUSDC(t))) {
       // "to" is RWA, selecting non-USDC as "from" → force "to" to null
       setToToken(null);
     }
@@ -488,7 +488,7 @@ export default function Swap() {
       // Selecting RWA as "to" → force "from" to USDC
       const usdc = getUSDC(chainId);
       if (usdc && fromToken?.address !== usdc.address) setFromToken(usdc);
-    } else if (isRWAToken(fromToken) && !isCanonicalUSDC(t)) {
+    } else if (isRWAToken(fromToken) && !(isCanonicalUSDC(t) || isCanonicalWUSDC(t))) {
       // "from" is RWA, selecting non-USDC as "to" → force "from" to null
       setFromToken(null);
     }
@@ -575,6 +575,22 @@ export default function Swap() {
         const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
         maxAmountWeiRef.current = null;
         const slippageBps = BigInt(Math.floor(slippage * 100));
+
+        if (recipientAddress) {
+          let normalizedRecipient: string;
+          try {
+            normalizedRecipient = getAddress(recipientAddress);
+          } catch {
+            toast({ title: "Invalid recipient", description: "Recipient address format is invalid", variant: "destructive" });
+            setIsSwapping(false);
+            return;
+          }
+          if (normalizedRecipient.toLowerCase() !== address.toLowerCase()) {
+            toast({ title: "Custom recipient not supported", description: "RWA swaps only send to connected wallet", variant: "destructive" });
+            setIsSwapping(false);
+            return;
+          }
+        }
 
         if (rwaQuoteResult.isBuy) {
           // USDC → RWA: vault.buy(pairId, minSynth) with msg.value
@@ -687,7 +703,7 @@ export default function Swap() {
             toast({ title: "V3 multi-hop not supported in gasless", description: "Using regular swap instead" });
             setGaslessMode(false);
           }
-          
+
           // Execute gasless swap if enabled and available
           if (gaslessMode && !isV3MultiHop) {
             const deadlineTimestamp = Math.floor(Date.now() / 1000) + deadline * 60;
@@ -1334,8 +1350,8 @@ export default function Swap() {
         </div>
       </div>
 
-      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
-      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 
