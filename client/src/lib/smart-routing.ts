@@ -1,9 +1,9 @@
 import { Contract, type Provider } from "ethers";
 import { Token } from "@shared/schema";
-import { parseAmount } from "./decimal-utils";
 import { QUOTER_V2_ABI, V3_FEE_TIERS } from "./abis/v3";
 import { RWA_VAULT_ABI } from "./abis/rwa";
 import type { RouteHop } from "@/components/PathVisualizer";
+import { encodePath } from "./v3-utils";
 
 // V2 Router ABI
 const V2_ROUTER_ABI = [
@@ -12,6 +12,25 @@ const V2_ROUTER_ABI = [
 
 // Native token address (zero address)
 const NATIVE_TOKEN_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+async function quoteWithRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = 2,
+  baseDelayMs = 80,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries - 1) {
+        await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (attempt + 1)));
+      }
+    }
+  }
+  throw lastError;
+}
 
 /**
  * Check if token is native (zero address)
@@ -79,48 +98,39 @@ export async function getV2Quote(
     };
 
     const [directResult, hopResult] = await Promise.allSettled([
-      (async () => {
-        const amounts = await router.getAmountsOut(amountIn, directPath);
-        const outputAmount = amounts[amounts.length - 1];
-        if (outputAmount === 0n) throw new Error("zero output");
-        let priceImpact: number | undefined;
-        try {
-          const spotAmounts = await router.getAmountsOut(testIn, directPath);
-          priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
-        } catch { /* probe failed — impact unavailable */ }
-        return { outputAmount, path: directPath, priceImpact };
-      })(),
+      quoteWithRetry(() => router.getAmountsOut(amountIn, directPath)),
       hopPath.length !== directPath.length
-        ? (async () => {
-            const amounts = await router.getAmountsOut(amountIn, hopPath);
-            const outputAmount = amounts[amounts.length - 1];
-            if (outputAmount === 0n) throw new Error("zero output");
-            let priceImpact: number | undefined;
-            try {
-              const spotAmounts = await router.getAmountsOut(testIn, hopPath);
-              priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
-            } catch { /* probe failed — impact unavailable */ }
-            return { outputAmount, path: hopPath, priceImpact };
-          })()
+        ? quoteWithRetry(() => router.getAmountsOut(amountIn, hopPath))
         : Promise.resolve(null),
     ]);
 
-    const direct = directResult.status === "fulfilled" ? directResult.value : null;
-    const hop = hopResult.status === "fulfilled" ? hopResult.value : null;
-
     let bestOutputAmount: bigint | null = null;
     let bestPath: string[] = [];
-    let bestPriceImpact: number | undefined;
 
-    if (direct && (!bestOutputAmount || direct.outputAmount > bestOutputAmount)) {
-      bestOutputAmount = direct.outputAmount;
-      bestPath = direct.path;
-      bestPriceImpact = direct.priceImpact;
+    if (directResult.status === "fulfilled" && directResult.value) {
+      const outputAmount = directResult.value[directResult.value.length - 1];
+      if (outputAmount > 0n) {
+        bestOutputAmount = outputAmount;
+        bestPath = directPath;
+      }
     }
-    if (hop && (!bestOutputAmount || hop.outputAmount > bestOutputAmount)) {
-      bestOutputAmount = hop.outputAmount;
-      bestPath = hop.path;
-      bestPriceImpact = hop.priceImpact;
+
+    if (hopResult.status === "fulfilled" && hopResult.value) {
+      const outputAmount = hopResult.value[hopResult.value.length - 1];
+      if (outputAmount > 0n && (!bestOutputAmount || outputAmount > bestOutputAmount)) {
+        bestOutputAmount = outputAmount;
+        bestPath = hopPath;
+      }
+    }
+
+    let bestPriceImpact: number | undefined;
+    if (bestOutputAmount && bestPath.length > 0) {
+      try {
+        const spotAmounts = await quoteWithRetry(() => router.getAmountsOut(testIn, bestPath));
+        bestPriceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], bestOutputAmount);
+      } catch {
+        // probe failed — impact unavailable
+      }
     }
 
     if (!bestOutputAmount || bestPath.length === 0) return null;
@@ -170,7 +180,6 @@ export async function getV3Quote(
     }
 
     const quoter = new Contract(quoterAddress, QUOTER_V2_ABI, provider);
-    const { encodePath } = await import("./v3-utils");
 
     const feeTiers = [
       V3_FEE_TIERS.LOWEST,
@@ -188,7 +197,8 @@ export async function getV3Quote(
     const testIn = amountIn > 0n
       ? (() => {
           const probeCandidate = amountIn / 1000n;
-          return probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
+          const bounded = probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
+          return bounded > amountIn ? amountIn : bounded;
         })()
       : MIN;
 
@@ -202,55 +212,54 @@ export async function getV3Quote(
     // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────
     const singleHopPromises = feeTiers.map(async (fee) => {
       try {
-        const actualResult = await quoter.quoteExactInputSingle.staticCall({
-          tokenIn: fromERC20,
-          tokenOut: toERC20,
-          amountIn,
-          fee,
-          sqrtPriceLimitX96: 0n,
-        });
-        const outputAmount = actualResult[0];
-        const gasEstimate = actualResult[3];
-
-        let priceImpact: number | undefined;
-        try {
-          const spotResult = await quoter.quoteExactInputSingle.staticCall({
+        const actualResult = await quoteWithRetry(() =>
+          quoter.quoteExactInputSingle.staticCall({
             tokenIn: fromERC20,
             tokenOut: toERC20,
-            amountIn: testIn,
+            amountIn,
             fee,
             sqrtPriceLimitX96: 0n,
-          });
-          priceImpact = calcV3Impact(spotResult[0], outputAmount);
-        } catch { /* probe failed — impact unavailable */ }
-
-        return { fee, outputAmount, gasEstimate, priceImpact, isMultiHop: false };
+          })
+        );
+        return {
+          fee,
+          outputAmount: actualResult[0] as bigint,
+          gasEstimate: actualResult[3] as bigint,
+        };
       } catch {
         return null;
       }
     });
 
+    const canUseMultiHop =
+      fromERC20.toLowerCase() !== wrappedTokenAddress.toLowerCase() &&
+      toERC20.toLowerCase() !== wrappedTokenAddress.toLowerCase();
+
     // ── Multi-hop: all 25 (fee1 × fee2) combos in parallel ────────────────────
-    const multiHopPromises = feeTiers.flatMap((fee1) =>
-      feeTiers.map(async (fee2) => {
-        try {
-          const path = encodePath([fromERC20, wrappedTokenAddress, toERC20], [fee1, fee2]);
-          const actualResult = await quoter.quoteExactInput.staticCall(path, amountIn);
-          const outputAmount = actualResult[0];
-          const gasEstimate = actualResult[3];
+    const multiHopCandidates = canUseMultiHop
+      ? feeTiers.flatMap((fee1) =>
+          feeTiers.map((fee2) => ({
+            fee1,
+            fee2,
+            path: encodePath([fromERC20, wrappedTokenAddress, toERC20], [fee1, fee2]),
+          }))
+        )
+      : [];
 
-          let priceImpact: number | undefined;
-          try {
-            const spotResult = await quoter.quoteExactInput.staticCall(path, testIn);
-            priceImpact = calcV3Impact(spotResult[0], outputAmount);
-          } catch { /* probe failed — impact unavailable */ }
-
-          return { fee1, fee2, path, outputAmount, gasEstimate, priceImpact };
-        } catch {
-          return null;
-        }
-      })
-    );
+    const multiHopPromises = multiHopCandidates.map(async ({ fee1, fee2, path }) => {
+      try {
+        const actualResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(path, amountIn));
+        return {
+          fee1,
+          fee2,
+          path,
+          outputAmount: actualResult[0] as bigint,
+          gasEstimate: actualResult[3] as bigint,
+        };
+      } catch {
+        return null;
+      }
+    });
 
     // Run both in parallel
     const [singleHopResults, multiHopResults] = await Promise.all([
@@ -259,17 +268,15 @@ export async function getV3Quote(
     ]);
 
     // Find best single-hop
-    let best: {
+    let bestSingle: {
       outputAmount: bigint;
       gasEstimate: bigint;
-      priceImpact: number | undefined;
       fee: number;
-      isMultiHop: false;
     } | null = null;
 
     for (const r of singleHopResults) {
-      if (r && (!best || r.outputAmount > best.outputAmount)) {
-        best = { ...r, isMultiHop: false };
+      if (r && r.outputAmount > 0n && (!bestSingle || r.outputAmount > bestSingle.outputAmount)) {
+        bestSingle = r;
       }
     }
 
@@ -277,26 +284,53 @@ export async function getV3Quote(
     let bestMultiHop: {
       outputAmount: bigint;
       gasEstimate: bigint;
-      priceImpact: number | undefined;
       fee1: number;
       fee2: number;
       path: string;
     } | null = null;
 
     for (const r of multiHopResults) {
-      if (r && (!bestMultiHop || r.outputAmount > bestMultiHop.outputAmount)) {
+      if (r && r.outputAmount > 0n && (!bestMultiHop || r.outputAmount > bestMultiHop.outputAmount)) {
         bestMultiHop = r;
       }
     }
 
-    // Choose overall best (single-hop vs multi-hop)
-    if (best && bestMultiHop && bestMultiHop.outputAmount > best.outputAmount) {
+    if (!bestSingle && !bestMultiHop) {
+      return null;
+    }
+
+    const useMultiHop = !!(
+      bestMultiHop && (!bestSingle || bestMultiHop.outputAmount > bestSingle.outputAmount)
+    );
+
+    let priceImpact: number | undefined;
+    try {
+      if (useMultiHop && bestMultiHop) {
+        const spotResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(bestMultiHop.path, testIn));
+        priceImpact = calcV3Impact(spotResult[0], bestMultiHop.outputAmount);
+      } else if (bestSingle) {
+        const spotResult = await quoteWithRetry(() =>
+          quoter.quoteExactInputSingle.staticCall({
+            tokenIn: fromERC20,
+            tokenOut: toERC20,
+            amountIn: testIn,
+            fee: bestSingle.fee,
+            sqrtPriceLimitX96: 0n,
+          })
+        );
+        priceImpact = calcV3Impact(spotResult[0], bestSingle.outputAmount);
+      }
+    } catch {
+      // probe failed — impact unavailable
+    }
+
+    if (useMultiHop && bestMultiHop) {
       const wrappedToken = getTokenForAddress(wrappedTokenAddress, fromToken, toToken, wrappedTokenAddress);
       return {
         protocol: "V3",
         outputAmount: bestMultiHop.outputAmount,
         gasEstimate: bestMultiHop.gasEstimate,
-        priceImpact: bestMultiHop.priceImpact,
+        priceImpact,
         route: [
           {
             tokenIn: fromToken,
@@ -314,17 +348,17 @@ export async function getV3Quote(
       };
     }
 
-    if (best) {
+    if (bestSingle) {
       return {
         protocol: "V3",
-        outputAmount: best.outputAmount,
-        gasEstimate: best.gasEstimate,
-        priceImpact: best.priceImpact,
+        outputAmount: bestSingle.outputAmount,
+        gasEstimate: bestSingle.gasEstimate,
+        priceImpact,
         route: [{
           tokenIn: fromToken,
           tokenOut: toToken,
           protocol: "V3",
-          fee: best.fee,
+          fee: bestSingle.fee,
         }],
       };
     }

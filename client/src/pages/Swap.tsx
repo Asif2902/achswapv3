@@ -10,7 +10,7 @@ import { PathVisualizer, type RouteHop } from "@/components/PathVisualizer";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
-import { Contract, BrowserProvider, JsonRpcProvider, getAddress, formatUnits } from "ethers";
+import { Contract, BrowserProvider, getAddress, formatUnits } from "ethers";
 import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isRWASwapPair, getUSDC, getWUSDC, isCanonicalUSDC, isCanonicalWUSDC } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
@@ -19,7 +19,7 @@ import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
 import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
 import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
 import { RWA_VAULT_ABI } from "@/lib/abis/rwa";
-import { createAlchemyProvider, FALLBACK_RPC } from "@/lib/config";
+import { createAlchemyProvider } from "@/lib/config";
 import { getErrorForToast } from "@/lib/error-utils";
 import {
   checkPermit2Approval,
@@ -56,6 +56,7 @@ function fmtBal(raw: string): string {
 
 export default function Swap() {
   const HIGH_IMPACT_THRESHOLD = 15;
+  const QUOTE_DEBOUNCE_MS = 120;
   const [fromToken, setFromToken] = useState<Token | null>(null);
   const [toToken, setToToken] = useState<Token | null>(null);
   const [fromAmount, setFromAmount] = useState("");
@@ -379,7 +380,7 @@ export default function Swap() {
       const controller = new AbortController();
       abortControllerRef.current = controller;
       fetchQuote(controller.signal);
-    }, 300);
+    }, QUOTE_DEBOUNCE_MS);
     return () => {
       if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
       if (abortControllerRef.current) abortControllerRef.current.abort();
@@ -419,20 +420,7 @@ export default function Swap() {
     if (isRwa && contracts?.rwa) {
       setIsLoadingQuote(true);
       try {
-        let provider;
-        try {
-          provider = createAlchemyProvider(chainId);
-          await Promise.race([
-            provider.getBlockNumber(),
-            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Alchemy timeout")), 3000))
-          ]);
-        } catch {
-          if (window.ethereum) {
-            provider = new BrowserProvider(window.ethereum);
-          } else {
-            provider = new JsonRpcProvider(FALLBACK_RPC);
-          }
-        }
+        const provider = createAlchemyProvider(chainId);
         if (signal.aborted) return;
         const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
         const rwaResult = await getRWAQuote(provider, contracts.rwa.vault, fromToken, toToken, amountIn);
@@ -465,23 +453,7 @@ export default function Swap() {
 
     if (!contracts) return;
     setIsLoadingQuote(true);
-    let provider;
-    try {
-      // Always use alchemy provider first
-      provider = createAlchemyProvider(chainId);
-      // Guard with timeout to avoid hanging
-      await Promise.race([
-        provider.getBlockNumber(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Alchemy timeout")), 3000))
-      ]);
-    } catch {
-      // Fallback to wallet RPC if alchemy fails or times out
-      if (window.ethereum) {
-        provider = new BrowserProvider(window.ethereum);
-      } else {
-        provider = new JsonRpcProvider(FALLBACK_RPC);
-      }
-    }
+    const provider = createAlchemyProvider(chainId);
     try {
       const wrappedTokenData = getWUSDC(chainId);
       if (!wrappedTokenData) throw new Error("wUSDC not found");
