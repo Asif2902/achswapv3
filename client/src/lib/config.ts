@@ -18,14 +18,11 @@ export const getRpcUrl = (chainId: number): string => {
 
 export const FALLBACK_RPC = 'https://rpc.testnet.arc.network';
 
-// ─── JSON-RPC provider with primary/fallback (NO batching) ────────────────────
+// ─── JSON-RPC provider with primary/fallback (batched) ────────────────────────
 //
-// Alchemy explicitly states: "batch requests can be less reliable compared to
-// individual API calls" (docs.alchemy.com/docs/reference/batch-requests).
-//
-// batchMaxCount: 1 disables ethers' auto-batching entirely. Each RPC call
-// becomes its own HTTP request, which Alchemy handles reliably.
-// batchStallTime: 0 means no delay — flush immediately.
+// batchMaxCount: 20 — parallel Promise.all calls get packed into batches of 20.
+// V3 quotes fire ~60 calls → 3 HTTP requests instead of 60.
+// batchStallTime: 10ms — collects calls in the same event-loop tick.
 // staticNetwork: skips the automatic eth_chainId probe on every provider creation
 //
 // Fallback: if the primary (Alchemy) call fails, we retry against the public
@@ -37,8 +34,8 @@ class ReliableRpcProvider extends JsonRpcProvider {
 
   constructor(primaryUrl: string, fallbackUrl: string, network: Network) {
     super(primaryUrl, network, {
-      batchMaxCount: 1,
-      batchStallTime: 0,
+      batchMaxCount: 20,
+      batchStallTime: 10,
       staticNetwork: network,
     });
     this._primaryUrl = primaryUrl;
@@ -80,9 +77,13 @@ function getNetwork(chainId: number): Network {
 }
 
 /**
- * Create a read-only JSON-RPC provider with individual (non-batched) requests.
+ * Create a read-only JSON-RPC provider with automatic request batching.
  *
- * Each RPC call is its own HTTP request — Alchemy handles this reliably.
+ * When multiple eth_call / eth_getBalance / etc. are awaited together
+ * (e.g. via Promise.all), they are packed into a single HTTP request.
+ * This dramatically reduces latency for pages that load many pools or
+ * positions in parallel.
+ *
  * Retains primary → fallback RPC behaviour.
  */
 export function createAlchemyProvider(chainId: number): JsonRpcProvider {
@@ -109,4 +110,21 @@ export async function fetchWithRetry(
   }
   
   throw lastError || new Error('Fetch failed');
+}
+
+// Retry helper for flaky RPC calls — use for any contract method that may fail
+export async function rpcWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs = 300): Promise<T> {
+  let lastError: Error | unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries - 1) {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastError;
 }
