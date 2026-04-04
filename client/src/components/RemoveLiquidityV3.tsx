@@ -127,6 +127,25 @@ async function rpcWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs
   throw lastError;
 }
 
+// Concurrency limiter to prevent overwhelming Alchemy RPC
+function createLimiter(maxConcurrent: number) {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  return async function run<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= maxConcurrent) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    }
+  };
+}
+
 function calculateFeeGrowthInside(
   feeGrowthGlobal: bigint,
   feeGrowthOutsideLower: bigint,
@@ -362,7 +381,10 @@ export function RemoveLiquidityV3() {
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const knownTokenList = await fetchTokensWithCommunity(chainId);
 
-      const balance = await rpcWithRetry(() => positionManager.balanceOf(address));
+      // Concurrency limiter: max 6 simultaneous RPC calls (Alchemy free tier handles ~10/sec)
+      const run = createLimiter(6);
+
+      const balance = await run(() => rpcWithRetry(() => positionManager.balanceOf(address)));
       const count = Number(balance);
 
       if (count === 0) {
@@ -375,18 +397,18 @@ export function RemoveLiquidityV3() {
         return;
       }
 
-      // Phase 1: Fetch ALL tokenIds in parallel
+      // Phase 1: Fetch ALL tokenIds with concurrency limit
       const indices = Array.from({ length: count }, (_, i) => i);
       const tokenIds = await Promise.all(
-        indices.map((i) => rpcWithRetry(() => positionManager.tokenOfOwnerByIndex(address, i)))
+        indices.map((i) => run(() => rpcWithRetry(() => positionManager.tokenOfOwnerByIndex(address, i))))
       );
 
-      // Phase 2: Fetch ALL raw position structs in parallel
+      // Phase 2: Fetch ALL raw position structs with concurrency limit
       const rawPositions = await Promise.all(
-        tokenIds.map((id) => rpcWithRetry(() => positionManager.positions(id)))
+        tokenIds.map((id) => run(() => rpcWithRetry(() => positionManager.positions(id))))
       );
 
-      // Phase 3: Fetch ALL position details (token info + pool state) in parallel
+      // Phase 3: Fetch ALL position details with concurrency limit
       const fetchPosition = async (absoluteIdx: number): Promise<V3Position | null> => {
         const position = rawPositions[absoluteIdx];
         const tokenId = tokenIds[absoluteIdx];
@@ -402,8 +424,8 @@ export function RemoveLiquidityV3() {
         const tokensOwed1: bigint = position[11];
 
         const [info0, info1] = await Promise.all([
-          safeTokenInfo(token0Address, provider, knownTokenList),
-          safeTokenInfo(token1Address, provider, knownTokenList),
+          run(() => safeTokenInfo(token0Address, provider, knownTokenList)),
+          run(() => safeTokenInfo(token1Address, provider, knownTokenList)),
         ]);
 
         let amount0 = 0n;
@@ -418,7 +440,7 @@ export function RemoveLiquidityV3() {
               ? [token0Address, token1Address]
               : [token1Address, token0Address];
 
-          const poolAddress = await rpcWithRetry(() => factory.getPool(tokenA, tokenB, fee));
+          const poolAddress = await run(() => rpcWithRetry(() => factory.getPool(tokenA, tokenB, fee)));
 
           if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
             const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
@@ -430,11 +452,11 @@ export function RemoveLiquidityV3() {
               tickLowerData,
               tickUpperData,
             ] = await Promise.all([
-              rpcWithRetry(() => pool.slot0()),
-              rpcWithRetry(() => pool.feeGrowthGlobal0X128()),
-              rpcWithRetry(() => pool.feeGrowthGlobal1X128()),
-              rpcWithRetry(() => pool.ticks(tickLower)),
-              rpcWithRetry(() => pool.ticks(tickUpper)),
+              run(() => rpcWithRetry(() => pool.slot0())),
+              run(() => rpcWithRetry(() => pool.feeGrowthGlobal0X128())),
+              run(() => rpcWithRetry(() => pool.feeGrowthGlobal1X128())),
+              run(() => rpcWithRetry(() => pool.ticks(tickLower))),
+              run(() => rpcWithRetry(() => pool.ticks(tickUpper))),
             ]);
 
             let currentSqrtPriceX96: bigint = slot0[0];
@@ -518,12 +540,11 @@ export function RemoveLiquidityV3() {
         };
       };
 
-      // Fetch all positions in parallel
       const userPositions = await Promise.all(
-        Array.from({ length: rawPositions.length }, (_, i) => i).map(fetchPosition)
+        Array.from({ length: rawPositions.length }, (_, i) => i).map((idx) => run(() => fetchPosition(idx)))
       );
 
-      // Retry positions that have incomplete data (currentTick undefined + liquidity > 0)
+      // Auto-retry incomplete positions (currentTick undefined + liquidity > 0)
       const incompleteIndices = userPositions
         .map((p, i) => (p && p.currentTick === undefined && p.liquidity > 0n ? i : -1))
         .filter((i) => i !== -1);
@@ -532,7 +553,7 @@ export function RemoveLiquidityV3() {
       if (incompleteIndices.length > 0) {
         console.log(`Retrying ${incompleteIndices.length} incomplete positions...`);
         const retryResults = await Promise.all(
-          incompleteIndices.map((idx) => fetchPosition(idx))
+          incompleteIndices.map((idx) => run(() => fetchPosition(idx)))
         );
         for (let i = 0; i < incompleteIndices.length; i++) {
           finalPositions[incompleteIndices[i]] = retryResults[i];
