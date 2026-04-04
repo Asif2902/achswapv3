@@ -96,6 +96,23 @@ export default function Swap() {
   const [isCheckingPermit2, setIsCheckingPermit2] = useState(false);
   const [isApprovingPermit2, setIsApprovingPermit2] = useState(false);
 
+  const [smartRoutingResult, setSmartRoutingResult] = useState<SmartRoutingResult | null>(null);
+  const [rwaQuoteResult, setRwaQuoteResult] = useState<RWAQuoteResult | null>(null);
+  const [routeHops, setRouteHops] = useState<RouteHop[]>([]);
+  const [v2Enabled, setV2Enabled] = useState(true);
+  const [v3Enabled, setV3Enabled] = useState(true);
+
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const maxAmountWeiRef = useRef<bigint | null>(null);
+  const maxJustClickedRef = useRef<boolean>(false);
+  const quoteRefreshNonceRef = useRef<number>(0);
+  const [quoteRefreshNonce, setQuoteRefreshNonce] = useState(0);
+
+  const { address, isConnected } = useAccount();
+  const chainId = useChainId();
+  const { toast } = useToast();
+
   // Recent tokens: last 5 selected tokens (per chain), stored in localStorage
   const [recentTokens, setRecentTokens] = useState<Token[]>([]);
 
@@ -146,23 +163,6 @@ export default function Swap() {
       return updated;
     });
   };
-
-  const [smartRoutingResult, setSmartRoutingResult] = useState<SmartRoutingResult | null>(null);
-  const [rwaQuoteResult, setRwaQuoteResult] = useState<RWAQuoteResult | null>(null);
-  const [routeHops, setRouteHops] = useState<RouteHop[]>([]);
-  const [v2Enabled, setV2Enabled] = useState(true);
-  const [v3Enabled, setV3Enabled] = useState(true);
-
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const maxAmountWeiRef = useRef<bigint | null>(null);
-  const maxJustClickedRef = useRef<boolean>(false);
-  const quoteRefreshNonceRef = useRef<number>(0);
-  const [quoteRefreshNonce, setQuoteRefreshNonce] = useState(0);
-
-  const { address, isConnected } = useAccount();
-  const chainId = useChainId();
-  const { toast } = useToast();
 
   let contracts: ReturnType<typeof getContractsForChain> | null = null;
   try { contracts = chainId ? getContractsForChain(chainId) : null; } catch { /* wrong chain */ }
