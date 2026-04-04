@@ -110,6 +110,23 @@ function subU256(a: bigint, b: bigint): bigint {
   return (a - b) & MASK256;
 }
 
+// Retry helper for flaky RPC calls
+async function rpcWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs = 500): Promise<T> {
+  let lastError: Error | unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries - 1) {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
 function calculateFeeGrowthInside(
   feeGrowthGlobal: bigint,
   feeGrowthOutsideLower: bigint,
@@ -243,18 +260,18 @@ export function RemoveLiquidityV3() {
             ? [token0Address, token1Address]
             : [token1Address, token0Address];
 
-        const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+        const poolAddress = await rpcWithRetry(() => factory.getPool(tokenA, tokenB, fee));
 
         if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
           const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
 
           const [slot0, feeGrowthGlobal0X128, feeGrowthGlobal1X128, tickLowerData, tickUpperData] =
             await Promise.all([
-              pool.slot0(),
-              pool.feeGrowthGlobal0X128(),
-              pool.feeGrowthGlobal1X128(),
-              pool.ticks(tickLower),
-              pool.ticks(tickUpper),
+              rpcWithRetry(() => pool.slot0()),
+              rpcWithRetry(() => pool.feeGrowthGlobal0X128()),
+              rpcWithRetry(() => pool.feeGrowthGlobal1X128()),
+              rpcWithRetry(() => pool.ticks(tickLower)),
+              rpcWithRetry(() => pool.ticks(tickUpper)),
             ]);
 
           let currentSqrtPriceX96: bigint = slot0[0];
@@ -417,7 +434,7 @@ export function RemoveLiquidityV3() {
                     ? [token0Address, token1Address]
                     : [token1Address, token0Address];
 
-                const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+                const poolAddress = await rpcWithRetry(() => factory.getPool(tokenA, tokenB, fee));
 
                 if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
                   const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
@@ -429,11 +446,11 @@ export function RemoveLiquidityV3() {
                     tickLowerData,
                     tickUpperData,
                   ] = await Promise.all([
-                    pool.slot0(),
-                    pool.feeGrowthGlobal0X128(),
-                    pool.feeGrowthGlobal1X128(),
-                    pool.ticks(tickLower),
-                    pool.ticks(tickUpper),
+                    rpcWithRetry(() => pool.slot0()),
+                    rpcWithRetry(() => pool.feeGrowthGlobal0X128()),
+                    rpcWithRetry(() => pool.feeGrowthGlobal1X128()),
+                    rpcWithRetry(() => pool.ticks(tickLower)),
+                    rpcWithRetry(() => pool.ticks(tickUpper)),
                   ]);
 
                   let currentSqrtPriceX96: bigint = slot0[0];
