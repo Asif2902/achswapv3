@@ -18,27 +18,27 @@ export const getRpcUrl = (chainId: number): string => {
 
 export const FALLBACK_RPC = 'https://rpc.testnet.arc.network';
 
-// ─── Batch JSON-RPC provider with primary/fallback ────────────────────────────
+// ─── JSON-RPC provider with primary/fallback (NO batching) ────────────────────
 //
-// ethers v6's JsonRpcProvider auto-batches RPC calls made in the same event-loop
-// tick.  Instead of sending N individual HTTP requests for Promise.all([...]),
-// it packs them into a single JSON-RPC batch request `[{...}, {...}, ...]`.
+// Alchemy explicitly states: "batch requests can be less reliable compared to
+// individual API calls" (docs.alchemy.com/docs/reference/batch-requests).
 //
-// batchMaxCount: max calls per batch (20 keeps payloads small, avoids 413 errors)
-// batchStallTime: ms to wait collecting calls before flushing (10ms is plenty)
+// batchMaxCount: 1 disables ethers' auto-batching entirely. Each RPC call
+// becomes its own HTTP request, which Alchemy handles reliably.
+// batchStallTime: 0 means no delay — flush immediately.
 // staticNetwork: skips the automatic eth_chainId probe on every provider creation
 //
-// Fallback: if the primary (Alchemy) batch fails, we retry the entire batch
-// against the public ARC RPC.
+// Fallback: if the primary (Alchemy) call fails, we retry against the public
+// ARC RPC.
 
-class BatchRpcProvider extends JsonRpcProvider {
+class ReliableRpcProvider extends JsonRpcProvider {
   private _fallbackUrl: string;
   private _primaryUrl: string;
 
   constructor(primaryUrl: string, fallbackUrl: string, network: Network) {
     super(primaryUrl, network, {
-      batchMaxCount: 20,
-      batchStallTime: 10,
+      batchMaxCount: 1,
+      batchStallTime: 0,
       staticNetwork: network,
     });
     this._primaryUrl = primaryUrl;
@@ -51,7 +51,7 @@ class BatchRpcProvider extends JsonRpcProvider {
     } catch (err) {
       if (this._fallbackUrl && this._fallbackUrl !== this._primaryUrl) {
         console.warn(
-          `Primary RPC batch failed (${payload.length} calls), trying fallback: ${this._fallbackUrl}`,
+          `Primary RPC failed, trying fallback: ${this._fallbackUrl}`,
         );
         const body = JSON.stringify(payload.length === 1 ? payload[0] : payload);
         const res = await fetch(this._fallbackUrl, {
@@ -80,19 +80,15 @@ function getNetwork(chainId: number): Network {
 }
 
 /**
- * Create a read-only JSON-RPC provider with automatic request batching.
+ * Create a read-only JSON-RPC provider with individual (non-batched) requests.
  *
- * When multiple eth_call / eth_getBalance / etc. are awaited together
- * (e.g. via Promise.all), they are packed into a single HTTP request.
- * This dramatically reduces latency for pages that load many pools or
- * positions in parallel.
- *
+ * Each RPC call is its own HTTP request — Alchemy handles this reliably.
  * Retains primary → fallback RPC behaviour.
  */
 export function createAlchemyProvider(chainId: number): JsonRpcProvider {
   const primaryUrl = getRpcUrl(chainId);
   const network = getNetwork(chainId);
-  return new BatchRpcProvider(primaryUrl, FALLBACK_RPC, network);
+  return new ReliableRpcProvider(primaryUrl, FALLBACK_RPC, network);
 }
 
 export async function fetchWithRetry(
