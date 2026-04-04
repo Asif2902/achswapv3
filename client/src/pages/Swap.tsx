@@ -96,6 +96,57 @@ export default function Swap() {
   const [isCheckingPermit2, setIsCheckingPermit2] = useState(false);
   const [isApprovingPermit2, setIsApprovingPermit2] = useState(false);
 
+  // Recent tokens: last 5 selected tokens (per chain), stored in localStorage
+  const [recentTokens, setRecentTokens] = useState<Token[]>([]);
+
+  useEffect(() => {
+    if (!chainId) return;
+    try {
+      const key = `recentTokens:${chainId}`;
+      const stored = localStorage.getItem(key);
+      if (stored) setRecentTokens(JSON.parse(stored));
+    } catch { /* ignore */ }
+  }, [chainId]);
+
+  const addRecentToken = (token: Token) => {
+    if (!chainId) return;
+    setRecentTokens(prev => {
+      const filtered = prev.filter(t => t.address.toLowerCase() !== token.address.toLowerCase());
+      const updated = [token, ...filtered].slice(0, 5);
+      const key = `recentTokens:${chainId}`;
+      localStorage.setItem(key, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  // Favorite tokens: user-starred tokens (per chain), stored in localStorage
+  const [favoriteTokens, setFavoriteTokens] = useState<Token[]>([]);
+
+  useEffect(() => {
+    if (!chainId) return;
+    try {
+      const key = `favoriteTokens:${chainId}`;
+      const stored = localStorage.getItem(key);
+      if (stored) setFavoriteTokens(JSON.parse(stored));
+    } catch { /* ignore */ }
+  }, [chainId]);
+
+  const toggleFavoriteToken = (token: Token) => {
+    if (!chainId) return;
+    setFavoriteTokens(prev => {
+      const exists = prev.find(t => t.address.toLowerCase() === token.address.toLowerCase());
+      let updated: Token[];
+      if (exists) {
+        updated = prev.filter(t => t.address.toLowerCase() !== token.address.toLowerCase());
+      } else {
+        updated = [...prev, token];
+      }
+      const key = `favoriteTokens:${chainId}`;
+      localStorage.setItem(key, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
   const [smartRoutingResult, setSmartRoutingResult] = useState<SmartRoutingResult | null>(null);
   const [rwaQuoteResult, setRwaQuoteResult] = useState<RWAQuoteResult | null>(null);
   const [routeHops, setRouteHops] = useState<RouteHop[]>([]);
@@ -472,28 +523,26 @@ export default function Swap() {
   // When one side is RWA, the other must be USDC
   const handleFromSelect = (t: Token) => {
     if (isRWAToken(t)) {
-      // Selecting RWA as "from" → force "to" to USDC
       const usdc = getUSDC(chainId);
       if (usdc && toToken?.address !== usdc.address) setToToken(usdc);
     } else if (isRWAToken(toToken) && !(isCanonicalUSDC(t) || isCanonicalWUSDC(t))) {
-      // "to" is RWA, selecting non-USDC as "from" → force "to" to null
       setToToken(null);
     }
     setFromToken(t); setShowFromSelector(false);
     setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRwaQuoteResult(null);
+    addRecentToken(t);
   };
 
   const handleToSelect = (t: Token) => {
     if (isRWAToken(t)) {
-      // Selecting RWA as "to" → force "from" to USDC
       const usdc = getUSDC(chainId);
       if (usdc && fromToken?.address !== usdc.address) setFromToken(usdc);
     } else if (isRWAToken(fromToken) && !(isCanonicalUSDC(t) || isCanonicalWUSDC(t))) {
-      // "from" is RWA, selecting non-USDC as "to" → force "from" to null
       setFromToken(null);
     }
     setToToken(t); setShowToSelector(false);
     setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRwaQuoteResult(null);
+    addRecentToken(t);
   };
 
   // ── Wrap / Unwrap ──────────────────────────────────────────────────────────
@@ -1350,8 +1399,8 @@ export default function Swap() {
         </div>
       </div>
 
-      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
-      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={recentTokens} favoriteTokens={favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={recentTokens} favoriteTokens={favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 

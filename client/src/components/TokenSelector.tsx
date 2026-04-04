@@ -1,5 +1,5 @@
 import { useState, useMemo, useEffect, useRef, useCallback } from "react";
-import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2, BarChart3 } from "lucide-react";
+import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2, BarChart3, Star, Clock } from "lucide-react";
 import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import type { Token } from "@shared/schema";
@@ -13,11 +13,14 @@ interface TokenSelectorProps {
   tokens: Token[];
   onImport?: (address: string) => Promise<Token | null>;
   onDelete?: (address: string) => void;
-  rwaOnly?: boolean; // When true, only show RWA tokens
+  rwaOnly?: boolean;
+  recentTokens?: Token[];
+  favoriteTokens?: Token[];
+  onToggleFavorite?: (token: Token) => void;
 }
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete, rwaOnly }: TokenSelectorProps) {
+export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete, rwaOnly, recentTokens = [], favoriteTokens = [], onToggleFavorite }: TokenSelectorProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState("");
@@ -323,6 +326,50 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             className="flex-1 overflow-y-auto overscroll-contain px-3 py-2"
             style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
           >
+            {/* ── Favorites section ── */}
+            {favoriteTokens.length > 0 && !searchQuery && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px 4px", marginBottom: 2 }}>
+                  <Star style={{ width: 11, height: 11, color: "#facc15", fill: "#facc15" }} />
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Favorites
+                  </span>
+                </div>
+                {favoriteTokens.map((token, i) => (
+                  <TokenRow
+                    key={token.address}
+                    token={token}
+                    userAddress={userAddress}
+                    index={i}
+                    onClick={() => handleSelect(token)}
+                    isFavorite
+                    onToggleFavorite={() => onToggleFavorite?.(token)}
+                  />
+                ))}
+              </>
+            )}
+
+            {/* ── Recent tokens section ── */}
+            {recentTokens.length > 0 && !searchQuery && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 4px", marginBottom: 2 }}>
+                  <Clock style={{ width: 11, height: 11, color: "#818cf8" }} />
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Recent
+                  </span>
+                </div>
+                {recentTokens.map((token, i) => (
+                  <TokenRow
+                    key={token.address}
+                    token={token}
+                    userAddress={userAddress}
+                    index={i}
+                    onClick={() => handleSelect(token)}
+                  />
+                ))}
+              </>
+            )}
+
             {/* ── Verified tokens ── */}
             {filteredVerified.length > 0 && (
               <>
@@ -339,6 +386,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                    onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
               </>
@@ -361,6 +410,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     index={i}
                     onClick={() => handleSelect(token)}
                     showRwaBadge
+                    isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                    onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
               </>
@@ -384,6 +435,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     onClick={() => handleSelect(token)}
                     onDelete={onDelete}
                     resetHolding={resetHoldingKey}
+                    isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                    onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
               </>
@@ -596,6 +649,8 @@ function TokenRow({
   onDelete,
   resetHolding,
   showRwaBadge,
+  isFavorite,
+  onToggleFavorite,
 }: {
   token: Token;
   userAddress?: string;
@@ -604,6 +659,8 @@ function TokenRow({
   onDelete?: (address: string) => void;
   resetHolding?: number;
   showRwaBadge?: boolean;
+  isFavorite?: boolean;
+  onToggleFavorite?: () => void;
 }) {
   const isNativeToken = token.address === "0x0000000000000000000000000000000000000000";
   const { data: balance } = useBalance({
@@ -718,6 +775,21 @@ function TokenRow({
               {displayBalance}
             </p>
           </div>
+        )}
+        {onToggleFavorite && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+            className="flex-shrink-0 ml-1 p-1 rounded-full hover:bg-white/10 transition-colors"
+          >
+            <Star
+              className="w-4 h-4"
+              style={{
+                color: isFavorite ? "#facc15" : "rgba(255,255,255,0.25)",
+                fill: isFavorite ? "#facc15" : "none",
+              }}
+            />
+          </button>
         )}
       </button>
     </HoldToRevealRow>
