@@ -467,6 +467,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                       onClick={() => handleSelect(token)}
                       onDelete={handleDeleteCommunity}
                       resetHolding={resetHoldingKey}
+                      isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                      onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token as any) : undefined}
                     />
                   ))
                 )}
@@ -718,7 +720,7 @@ function TokenRow({
             transition: "opacity 0.12s, transform 0.12s",
           }}
         />
-        <div className="flex items-center gap-3 min-w-0 pl-1.5">
+        <div className="flex items-center gap-3 min-w-0 flex-1 pl-1.5">
           <div className="relative flex-shrink-0">
             <div className="w-9 h-9 rounded-full overflow-hidden" style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.08)" }}>
               <img
@@ -769,28 +771,28 @@ function TokenRow({
             </p>
           </div>
         </div>
-        {userAddress && displayBalance && (
-          <div className="flex-shrink-0 ml-2 text-right">
-            <p className="text-xs font-mono font-medium tabular-nums" data-testid={`text-balance-${token.symbol}`} style={{ color: "rgba(255,255,255,0.7)" }}>
+        <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+          {userAddress && displayBalance && (
+            <p className="text-xs font-mono font-medium tabular-nums text-right" data-testid={`text-balance-${token.symbol}`} style={{ color: "rgba(255,255,255,0.7)" }}>
               {displayBalance}
             </p>
-          </div>
-        )}
-        {onToggleFavorite && (
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
-            className="flex-shrink-0 ml-1 p-1 rounded-full hover:bg-white/10 transition-colors"
-          >
-            <Star
-              className="w-4 h-4"
-              style={{
-                color: isFavorite ? "#facc15" : "rgba(255,255,255,0.25)",
-                fill: isFavorite ? "#facc15" : "none",
-              }}
-            />
-          </button>
-        )}
+          )}
+          {onToggleFavorite && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+              className="flex-shrink-0 p-1 rounded-full hover:bg-white/10 transition-colors"
+            >
+              <Star
+                className="w-4 h-4"
+                style={{
+                  color: isFavorite ? "#facc15" : "rgba(255,255,255,0.25)",
+                  fill: isFavorite ? "#facc15" : "none",
+                }}
+              />
+            </button>
+          )}
+        </div>
       </button>
     </HoldToRevealRow>
   );
@@ -805,6 +807,8 @@ function CommunityTokenRow({
   onClick,
   onDelete,
   resetHolding,
+  isFavorite,
+  onToggleFavorite,
 }: {
   token: CommunityToken;
   userAddress?: string;
@@ -812,6 +816,8 @@ function CommunityTokenRow({
   onClick: () => void;
   onDelete?: (address: string) => void;
   resetHolding?: number;
+  isFavorite?: boolean;
+  onToggleFavorite?: () => void;
 }) {
   const { data: balance } = useBalance({
     address: userAddress as `0x${string}` | undefined,
@@ -862,7 +868,7 @@ function CommunityTokenRow({
             transition: "opacity 0.12s, transform 0.12s",
           }}
         />
-        <div className="flex items-center gap-3 min-w-0 pl-1.5">
+        <div className="flex items-center gap-3 min-w-0 flex-1 pl-1.5">
           <div className="relative flex-shrink-0">
             <div className="w-9 h-9 rounded-full overflow-hidden" style={{ boxShadow: "0 0 0 1.5px rgba(139,92,246,0.3)" }}>
               <img
@@ -899,13 +905,28 @@ function CommunityTokenRow({
             <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>{token.name}</p>
           </div>
         </div>
-        {userAddress && displayBalance && (
-          <div className="flex-shrink-0 ml-2 text-right">
-            <p className="text-xs font-mono font-medium tabular-nums" style={{ color: "rgba(255,255,255,0.7)" }}>
+        <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+          {userAddress && displayBalance && (
+            <p className="text-xs font-mono font-medium tabular-nums text-right" style={{ color: "rgba(255,255,255,0.7)" }}>
               {displayBalance}
             </p>
-          </div>
-        )}
+          )}
+          {onToggleFavorite && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+              className="flex-shrink-0 p-1 rounded-full hover:bg-white/10 transition-colors"
+            >
+              <Star
+                className="w-4 h-4"
+                style={{
+                  color: isFavorite ? "#facc15" : "rgba(255,255,255,0.25)",
+                  fill: isFavorite ? "#facc15" : "none",
+                }}
+              />
+            </button>
+          )}
+        </div>
       </button>
     </HoldToRevealRow>
   );
