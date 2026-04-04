@@ -10,7 +10,7 @@ import { getTokensByChainId, fetchTokensWithCommunity, getWrappedAddress } from 
 import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
-import { createAlchemyProvider, rpcWithRetry } from "@/lib/config";
+import { createAlchemyProvider } from "@/lib/config";
 import {
   ExternalLink,
   Trash2,
@@ -176,28 +176,55 @@ export function RemoveLiquidityV2() {
       const provider = createAlchemyProvider(chainId);
       const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
 
-      const pairsLength = await rpcWithRetry(() => factory.allPairsLength());
+      const pairsLength = await factory.allPairsLength();
       console.log("Total V2 pairs:", pairsLength.toString());
 
       const pairsToFetch = Number(pairsLength);
       const batchSize = 50;
 
-      // Get pair addresses in parallel
-      const pairIndices = Array.from({ length: pairsToFetch }, (_, i) => i);
-      const pairAddresses: string[] = await Promise.all(
-        pairIndices.map((i) => rpcWithRetry(() => factory.allPairs(i)))
-      );
+      // Get pair addresses in chunks (avoid one giant Promise.all)
+      const pairAddresses: string[] = [];
+      for (let start = 0; start < pairsToFetch; start += batchSize) {
+        const end = Math.min(start + batchSize, pairsToFetch);
+        const indices = Array.from({ length: end - start }, (_, i) => start + i);
+        try {
+          const chunkAddresses = await Promise.all(indices.map((i) => factory.allPairs(i)));
+          pairAddresses.push(...chunkAddresses);
+        } catch (batchErr) {
+          console.warn("Failed to fetch pair-address batch, retrying individually", batchErr);
+          for (const i of indices) {
+            try {
+              pairAddresses.push(await factory.allPairs(i));
+            } catch {
+              continue;
+            }
+          }
+        }
+      }
 
       console.log("Got all pair addresses:", pairAddresses.length);
 
-      // Check balances in parallel
-      const pairContracts = pairAddresses.map((addr) => new Contract(addr, PAIR_ABI, provider));
-      const balances = await Promise.all(
-        pairContracts.map((pair) => rpcWithRetry(() => pair.balanceOf(address)))
-      );
+      // Check balances in chunks and continue on transient failures
       const positionsWithBalance: string[] = [];
-      for (let i = 0; i < pairAddresses.length; i++) {
-        if (balances[i] > 0n) positionsWithBalance.push(pairAddresses[i]);
+      for (let start = 0; start < pairAddresses.length; start += batchSize) {
+        const chunk = pairAddresses.slice(start, start + batchSize);
+        const pairContracts = chunk.map((addr) => new Contract(addr, PAIR_ABI, provider));
+        try {
+          const balances = await Promise.all(pairContracts.map((pair) => pair.balanceOf(address)));
+          for (let i = 0; i < chunk.length; i++) {
+            if (balances[i] > 0n) positionsWithBalance.push(chunk[i]);
+          }
+        } catch (batchErr) {
+          console.warn("Failed to fetch balance batch, retrying individually", batchErr);
+          for (let i = 0; i < chunk.length; i++) {
+            try {
+              const bal = await pairContracts[i].balanceOf(address);
+              if (bal > 0n) positionsWithBalance.push(chunk[i]);
+            } catch {
+              continue;
+            }
+          }
+        }
       }
 
       console.log("Pairs with balance:", positionsWithBalance.length);
@@ -211,20 +238,20 @@ export function RemoveLiquidityV2() {
             try {
               const pair = new Contract(pairAddress, PAIR_ABI, provider);
               const [token0Address, token1Address, reserves, totalSupply, liquidity] = await Promise.all([
-                rpcWithRetry(() => pair.token0()),
-                rpcWithRetry(() => pair.token1()),
-                rpcWithRetry(() => pair.getReserves()),
-                rpcWithRetry(() => pair.totalSupply()),
-                rpcWithRetry(() => pair.balanceOf(address)),
+                pair.token0(),
+                pair.token1(),
+                pair.getReserves(),
+                pair.totalSupply(),
+                pair.balanceOf(address),
               ]);
 
               const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
               const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
               const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = await Promise.all([
-                rpcWithRetry(() => token0Contract.symbol()),
-                rpcWithRetry(() => token0Contract.decimals()),
-                rpcWithRetry(() => token1Contract.symbol()),
-                rpcWithRetry(() => token1Contract.decimals()),
+                token0Contract.symbol(),
+                token0Contract.decimals(),
+                token1Contract.symbol(),
+                token1Contract.decimals(),
               ]);
 
               const r0 = BigInt(reserves.reserve0);

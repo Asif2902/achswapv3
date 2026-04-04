@@ -18,12 +18,14 @@ export const getRpcUrl = (chainId: number): string => {
 
 export const FALLBACK_RPC = 'https://rpc.testnet.arc.network';
 
-// ─── JSON-RPC provider with primary/fallback (moderate batching) ──────────────
+// ─── JSON-RPC provider with primary/fallback (NO batching) ────────────────────
 //
-// batchMaxCount: 10 — groups parallel Promise.all calls into small batches.
-// Fast enough for V3 quotes (60 calls → ~6 HTTP requests), small enough
-// to not overwhelm Alchemy. Combined with rpcWithRetry for reliability.
-// batchStallTime: 5ms — minimal delay to collect calls in the same tick.
+// Alchemy explicitly states: "batch requests can be less reliable compared to
+// individual API calls" (docs.alchemy.com/docs/reference/batch-requests).
+//
+// batchMaxCount: 1 disables ethers' auto-batching entirely. Each RPC call
+// becomes its own HTTP request, which Alchemy handles reliably.
+// batchStallTime: 0 means no delay — flush immediately.
 // staticNetwork: skips the automatic eth_chainId probe on every provider creation
 //
 // Fallback: if the primary (Alchemy) call fails, we retry against the public
@@ -35,8 +37,8 @@ class ReliableRpcProvider extends JsonRpcProvider {
 
   constructor(primaryUrl: string, fallbackUrl: string, network: Network) {
     super(primaryUrl, network, {
-      batchMaxCount: 10,
-      batchStallTime: 5,
+      batchMaxCount: 1,
+      batchStallTime: 0,
       staticNetwork: network,
     });
     this._primaryUrl = primaryUrl;
@@ -107,21 +109,4 @@ export async function fetchWithRetry(
   }
   
   throw lastError || new Error('Fetch failed');
-}
-
-// Retry helper for flaky RPC calls — use for any contract method that may fail
-export async function rpcWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs = 300): Promise<T> {
-  let lastError: Error | unknown;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastError = err;
-      if (attempt < maxRetries - 1) {
-        const delay = baseDelayMs * Math.pow(2, attempt);
-        await new Promise((r) => setTimeout(r, delay));
-      }
-    }
-  }
-  throw lastError;
 }
