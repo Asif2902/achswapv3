@@ -18,17 +18,20 @@ export const getRpcUrl = (chainId: number): string => {
 
 export const FALLBACK_RPC = 'https://rpc.testnet.arc.network';
 
-// ─── JSON-RPC provider with primary/fallback (batched) ────────────────────────
+// ─── Batch JSON-RPC provider with primary/fallback ────────────────────────────
 //
-// batchMaxCount: 20 — parallel Promise.all calls get packed into batches of 20.
-// V3 quotes fire ~60 calls → 3 HTTP requests instead of 60.
-// batchStallTime: 10ms — collects calls in the same event-loop tick.
+// ethers v6's JsonRpcProvider auto-batches RPC calls made in the same event-loop
+// tick.  Instead of sending N individual HTTP requests for Promise.all([...]),
+// it packs them into a single JSON-RPC batch request `[{...}, {...}, ...]`.
+//
+// batchMaxCount: max calls per batch (20 keeps payloads small, avoids 413 errors)
+// batchStallTime: ms to wait collecting calls before flushing (10ms is plenty)
 // staticNetwork: skips the automatic eth_chainId probe on every provider creation
 //
-// Fallback: if the primary (Alchemy) call fails, we retry against the public
-// ARC RPC.
+// Fallback: if the primary (Alchemy) batch fails, we retry the entire batch
+// against the public ARC RPC.
 
-class ReliableRpcProvider extends JsonRpcProvider {
+class BatchRpcProvider extends JsonRpcProvider {
   private _fallbackUrl: string;
   private _primaryUrl: string;
 
@@ -48,7 +51,7 @@ class ReliableRpcProvider extends JsonRpcProvider {
     } catch (err) {
       if (this._fallbackUrl && this._fallbackUrl !== this._primaryUrl) {
         console.warn(
-          `Primary RPC failed, trying fallback: ${this._fallbackUrl}`,
+          `Primary RPC batch failed (${payload.length} calls), trying fallback: ${this._fallbackUrl}`,
         );
         const body = JSON.stringify(payload.length === 1 ? payload[0] : payload);
         const res = await fetch(this._fallbackUrl, {
@@ -89,7 +92,7 @@ function getNetwork(chainId: number): Network {
 export function createAlchemyProvider(chainId: number): JsonRpcProvider {
   const primaryUrl = getRpcUrl(chainId);
   const network = getNetwork(chainId);
-  return new ReliableRpcProvider(primaryUrl, FALLBACK_RPC, network);
+  return new BatchRpcProvider(primaryUrl, FALLBACK_RPC, network);
 }
 
 export async function fetchWithRetry(
@@ -110,21 +113,4 @@ export async function fetchWithRetry(
   }
   
   throw lastError || new Error('Fetch failed');
-}
-
-// Retry helper for flaky RPC calls — use for any contract method that may fail
-export async function rpcWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs = 300): Promise<T> {
-  let lastError: Error | unknown;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastError = err;
-      if (attempt < maxRetries - 1) {
-        const delay = baseDelayMs * Math.pow(2, attempt);
-        await new Promise((r) => setTimeout(r, delay));
-      }
-    }
-  }
-  throw lastError;
 }

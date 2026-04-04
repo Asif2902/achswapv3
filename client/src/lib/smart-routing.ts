@@ -4,7 +4,6 @@ import { parseAmount } from "./decimal-utils";
 import { QUOTER_V2_ABI, V3_FEE_TIERS } from "./abis/v3";
 import { RWA_VAULT_ABI } from "./abis/rwa";
 import type { RouteHop } from "@/components/PathVisualizer";
-import { rpcWithRetry } from "./config";
 
 // V2 Router ABI
 const V2_ROUTER_ABI = [
@@ -81,24 +80,24 @@ export async function getV2Quote(
 
     const [directResult, hopResult] = await Promise.allSettled([
       (async () => {
-        const amounts = await rpcWithRetry(() => router.getAmountsOut(amountIn, directPath));
+        const amounts = await router.getAmountsOut(amountIn, directPath);
         const outputAmount = amounts[amounts.length - 1];
         if (outputAmount === 0n) throw new Error("zero output");
         let priceImpact: number | undefined;
         try {
-          const spotAmounts = await rpcWithRetry(() => router.getAmountsOut(testIn, directPath));
+          const spotAmounts = await router.getAmountsOut(testIn, directPath);
           priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
         } catch { /* probe failed — impact unavailable */ }
         return { outputAmount, path: directPath, priceImpact };
       })(),
       hopPath.length !== directPath.length
         ? (async () => {
-            const amounts = await rpcWithRetry(() => router.getAmountsOut(amountIn, hopPath));
+            const amounts = await router.getAmountsOut(amountIn, hopPath);
             const outputAmount = amounts[amounts.length - 1];
             if (outputAmount === 0n) throw new Error("zero output");
             let priceImpact: number | undefined;
             try {
-              const spotAmounts = await rpcWithRetry(() => router.getAmountsOut(testIn, hopPath));
+              const spotAmounts = await router.getAmountsOut(testIn, hopPath);
               priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
             } catch { /* probe failed — impact unavailable */ }
             return { outputAmount, path: hopPath, priceImpact };
@@ -203,25 +202,25 @@ export async function getV3Quote(
     // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────
     const singleHopPromises = feeTiers.map(async (fee) => {
       try {
-        const actualResult = await rpcWithRetry(() => quoter.quoteExactInputSingle.staticCall({
+        const actualResult = await quoter.quoteExactInputSingle.staticCall({
           tokenIn: fromERC20,
           tokenOut: toERC20,
           amountIn,
           fee,
           sqrtPriceLimitX96: 0n,
-        }));
+        });
         const outputAmount = actualResult[0];
         const gasEstimate = actualResult[3];
 
         let priceImpact: number | undefined;
         try {
-          const spotResult = await rpcWithRetry(() => quoter.quoteExactInputSingle.staticCall({
+          const spotResult = await quoter.quoteExactInputSingle.staticCall({
             tokenIn: fromERC20,
             tokenOut: toERC20,
             amountIn: testIn,
             fee,
             sqrtPriceLimitX96: 0n,
-          }));
+          });
           priceImpact = calcV3Impact(spotResult[0], outputAmount);
         } catch { /* probe failed — impact unavailable */ }
 
@@ -236,13 +235,13 @@ export async function getV3Quote(
       feeTiers.map(async (fee2) => {
         try {
           const path = encodePath([fromERC20, wrappedTokenAddress, toERC20], [fee1, fee2]);
-          const actualResult = await rpcWithRetry(() => quoter.quoteExactInput.staticCall(path, amountIn));
+          const actualResult = await quoter.quoteExactInput.staticCall(path, amountIn);
           const outputAmount = actualResult[0];
           const gasEstimate = actualResult[3];
 
           let priceImpact: number | undefined;
           try {
-            const spotResult = await rpcWithRetry(() => quoter.quoteExactInput.staticCall(path, testIn));
+            const spotResult = await quoter.quoteExactInput.staticCall(path, testIn);
             priceImpact = calcV3Impact(spotResult[0], outputAmount);
           } catch { /* probe failed — impact unavailable */ }
 
