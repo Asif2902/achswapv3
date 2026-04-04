@@ -9,6 +9,7 @@ import { getTokensByChainId } from "@/data/tokens";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
+import { rpcWithRetry } from "@/lib/config";
 import { V3_MIGRATOR_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { priceToSqrtPriceX96, sqrtPriceX96ToPrice, getPriceFromAmounts, getFullRangeTicks } from "@/lib/v3-utils";
 import {
@@ -176,85 +177,89 @@ export function MigrateV2ToV3() {
     try {
       const provider = new BrowserProvider(window.ethereum);
       const factory = new Contract(contracts.v2.factory, V2_FACTORY_ABI, provider);
-      const pairsLength = await factory.allPairsLength();
+      const pairsLength = await rpcWithRetry(() => factory.allPairsLength());
       const userPositions: V2Position[] = [];
       const maxPairs = Number(pairsLength);
-      const batchSize = 25;
 
-      for (let start = 0; start < maxPairs; start += batchSize) {
-        const end = Math.min(start + batchSize, maxPairs);
-        const indices = Array.from({ length: end - start }, (_, i) => start + i);
+      // Fetch all pair addresses in parallel
+      const pairIndices = Array.from({ length: maxPairs }, (_, i) => i);
+      const pairAddresses = await Promise.all(
+        pairIndices.map((i) => rpcWithRetry(() => factory.allPairs(i)))
+      );
 
-        let pairAddresses: string[] = [];
-        try {
-          pairAddresses = await Promise.all(indices.map((i) => factory.allPairs(i)));
-        } catch {
-          for (const i of indices) {
-            try {
-              pairAddresses.push(await factory.allPairs(i));
-            } catch {
-              continue;
-            }
+      // Check all balances in parallel
+      const pairContracts = pairAddresses.map((addr) => new Contract(addr, V2_PAIR_ABI, provider));
+      const balances = await Promise.all(
+        pairContracts.map((pair) => rpcWithRetry(() => pair.balanceOf(address)))
+      );
+
+      // Filter to pairs with balance
+      const pairsWithBalance = pairAddresses.filter((_, i) => balances[i] > 0n);
+
+      // Fetch details for all pairs with balance in parallel
+      const detailResults = await Promise.all(
+        pairsWithBalance.map(async (pairAddress): Promise<V2Position | null> => {
+          try {
+            const pairContract = new Contract(pairAddress, V2_PAIR_ABI, provider);
+            const [token0Address, token1Address, reserves, totalSupply] = await Promise.all([
+              rpcWithRetry(() => pairContract.token0()),
+              rpcWithRetry(() => pairContract.token1()),
+              rpcWithRetry(() => pairContract.getReserves()),
+              rpcWithRetry(() => pairContract.totalSupply()),
+            ]);
+
+            const lpBalance = balances[pairAddresses.indexOf(pairAddress)];
+
+            const t0 = new Contract(token0Address, ERC20_ABI, provider);
+            const t1 = new Contract(token1Address, ERC20_ABI, provider);
+            const [name0, symbol0, decimals0] = await Promise.all([
+              rpcWithRetry(() => t0.name()),
+              rpcWithRetry(() => t0.symbol()),
+              rpcWithRetry(() => t0.decimals()),
+            ]);
+            const [name1, symbol1, decimals1] = await Promise.all([
+              rpcWithRetry(() => t1.name()),
+              rpcWithRetry(() => t1.symbol()),
+              rpcWithRetry(() => t1.decimals()),
+            ]);
+
+            const token0: Token = {
+              address: token0Address,
+              name: name0,
+              symbol: symbol0,
+              decimals: Number(decimals0),
+              logoURI: tokens.find(t => t.address.toLowerCase() === token0Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
+              verified: false,
+              chainId: chainId!,
+            };
+            const token1: Token = {
+              address: token1Address,
+              name: name1,
+              symbol: symbol1,
+              decimals: Number(decimals1),
+              logoURI: tokens.find(t => t.address.toLowerCase() === token1Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
+              verified: false,
+              chainId: chainId!,
+            };
+
+            return {
+              pairAddress,
+              token0,
+              token1,
+              lpBalance,
+              totalSupply,
+              reserve0: reserves[0],
+              reserve1: reserves[1],
+              sharePercent: Number((lpBalance * 10000n) / totalSupply) / 100,
+            };
+          } catch {
+            return null;
           }
-        }
+        })
+      );
 
-        const batchPositions = await Promise.all(
-          pairAddresses.map(async (pairAddress): Promise<V2Position | null> => {
-            try {
-              const pairContract = new Contract(pairAddress, V2_PAIR_ABI, provider);
-              const [lpBalance, token0Address, token1Address, reserves, totalSupply] = await Promise.all([
-                pairContract.balanceOf(address),
-                pairContract.token0(),
-                pairContract.token1(),
-                pairContract.getReserves(),
-                pairContract.totalSupply(),
-              ]);
-
-              if (lpBalance <= 0n) return null;
-
-              const t0 = new Contract(token0Address, ERC20_ABI, provider);
-              const t1 = new Contract(token1Address, ERC20_ABI, provider);
-              const [name0, symbol0, decimals0] = await Promise.all([t0.name(), t0.symbol(), t0.decimals()]);
-              const [name1, symbol1, decimals1] = await Promise.all([t1.name(), t1.symbol(), t1.decimals()]);
-
-              const token0: Token = {
-                address: token0Address,
-                name: name0,
-                symbol: symbol0,
-                decimals: Number(decimals0),
-                logoURI: tokens.find(t => t.address.toLowerCase() === token0Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
-                verified: false,
-                chainId: chainId!,
-              };
-              const token1: Token = {
-                address: token1Address,
-                name: name1,
-                symbol: symbol1,
-                decimals: Number(decimals1),
-                logoURI: tokens.find(t => t.address.toLowerCase() === token1Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
-                verified: false,
-                chainId: chainId!,
-              };
-
-              return {
-                pairAddress,
-                token0,
-                token1,
-                lpBalance,
-                totalSupply,
-                reserve0: reserves[0],
-                reserve1: reserves[1],
-                sharePercent: Number((lpBalance * 10000n) / totalSupply) / 100,
-              };
-            } catch {
-              return null;
-            }
-          })
-        );
-
-        for (const pos of batchPositions) {
-          if (pos) userPositions.push(pos);
-        }
+      for (const pos of detailResults) {
+        if (pos) userPositions.push(pos);
       }
 
       setPositions(userPositions);
