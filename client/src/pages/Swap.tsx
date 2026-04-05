@@ -165,8 +165,15 @@ export default function Swap() {
     try {
       const key = `favoriteTokens:${chainId}`;
       const stored = localStorage.getItem(key);
-      if (stored) setFavoriteTokens(JSON.parse(stored));
-    } catch { /* ignore */ }
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        setFavoriteTokens(Array.isArray(parsed) ? parsed : []);
+      } else {
+        setFavoriteTokens([]);
+      }
+    } catch {
+      setFavoriteTokens([]);
+    }
   }, [chainId]);
 
   const toggleFavoriteToken = (token: Token) => {
@@ -426,11 +433,13 @@ export default function Swap() {
 
   const fetchQuote = async (signal: AbortSignal) => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) {
+      setIsLoadingQuote(false);
       setToAmount(""); setPriceImpact(null); setToAmountBelowThreshold(false); setRwaQuoteResult(null); return;
     }
     const isWrap = isCanonicalUSDC(fromToken) && isCanonicalWUSDC(toToken);
     const isUnwrap = isCanonicalWUSDC(fromToken) && isCanonicalUSDC(toToken);
     if (isWrap || isUnwrap) {
+      setIsLoadingQuote(false);
       setToAmount(fromAmount); setPriceImpact(0);
       setRouteHops([{ tokenIn: fromToken, tokenOut: toToken, protocol: "V2" }]); setRwaQuoteResult(null); return;
     }
@@ -471,7 +480,14 @@ export default function Swap() {
       return;
     }
 
-    if (!contracts) return;
+    if (!contracts) {
+      setIsLoadingQuote(false);
+      setToAmount("");
+      setPriceImpact(null);
+      setRouteHops([]);
+      setSmartRoutingResult(null);
+      return;
+    }
     setIsLoadingQuote(true);
     const provider = createAlchemyProvider(chainId);
     try {
@@ -517,7 +533,7 @@ export default function Swap() {
     if (isRWAToken(t)) {
       const usdc = getUSDC(chainId);
       if (usdc && toToken?.address !== usdc.address) setToToken(usdc);
-    } else if (isRWAToken(toToken) && !(isCanonicalUSDC(t) || isCanonicalWUSDC(t))) {
+    } else if (isRWAToken(toToken) && !isCanonicalUSDC(t)) {
       setToToken(null);
     }
     setFromToken(t); setShowFromSelector(false);
@@ -529,7 +545,7 @@ export default function Swap() {
     if (isRWAToken(t)) {
       const usdc = getUSDC(chainId);
       if (usdc && fromToken?.address !== usdc.address) setFromToken(usdc);
-    } else if (isRWAToken(fromToken) && !(isCanonicalUSDC(t) || isCanonicalWUSDC(t))) {
+    } else if (isRWAToken(fromToken) && !isCanonicalUSDC(t)) {
       setFromToken(null);
     }
     setToToken(t); setShowToSelector(false);
@@ -614,6 +630,21 @@ export default function Swap() {
         const signer = await provider.getSigner();
         const vault = new Contract(contracts.rwa.vault, RWA_VAULT_ABI, signer);
         const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
+
+        if (!isCanonicalUSDC(fromToken) && !isCanonicalUSDC(toToken)) {
+          toast({ title: "Invalid RWA pair", description: "RWA swaps require native USDC", variant: "destructive" });
+          setIsSwapping(false);
+          return;
+        }
+
+        const currentRwaInput = amountIn.toString();
+        const quotedRwaInput = (rwaQuoteResult as any).inputAmount ? String((rwaQuoteResult as any).inputAmount) : null;
+        if (!quotedRwaInput || quotedRwaInput !== currentRwaInput) {
+          toast({ title: "Quote out of date", description: "Please re-quote before swapping", variant: "destructive" });
+          setIsSwapping(false);
+          return;
+        }
+
         maxAmountWeiRef.current = null;
         const slippageBps = BigInt(Math.floor(slippage * 100));
 
@@ -1391,8 +1422,8 @@ export default function Swap() {
         </div>
       </div>
 
-      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={isRWAToken(toToken) ? recentTokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : recentTokens} favoriteTokens={isRWAToken(toToken) ? favoriteTokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
-      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={isRWAToken(fromToken) ? recentTokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : recentTokens} favoriteTokens={isRWAToken(fromToken) ? favoriteTokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={isRWAToken(toToken) ? recentTokens.filter(t => isCanonicalUSDC(t)) : recentTokens} favoriteTokens={isRWAToken(toToken) ? favoriteTokens.filter(t => isCanonicalUSDC(t)) : favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={isRWAToken(fromToken) ? recentTokens.filter(t => isCanonicalUSDC(t)) : recentTokens} favoriteTokens={isRWAToken(fromToken) ? favoriteTokens.filter(t => isCanonicalUSDC(t)) : favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 

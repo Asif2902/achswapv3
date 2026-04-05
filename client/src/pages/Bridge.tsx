@@ -526,8 +526,12 @@ export default function Bridge() {
 
         const resolvedDst =
           attestationResult.destinationDomain !== undefined
-            ? getChainByDomain(attestationResult.destinationDomain) || dstChain
-            : dstChain;
+            ? getChainByDomain(attestationResult.destinationDomain)
+            : undefined;
+
+        if (!resolvedDst) {
+          throw new Error("Could not resolve destination chain from attestation");
+        }
 
         updateTransferStatus(pendingTx.id, {
           status: "ready_to_mint",
@@ -890,8 +894,17 @@ export default function Bridge() {
 
         const resolvedDestChain =
           fetchedAttestationResult.destinationDomain !== undefined
-            ? getChainByDomain(fetchedAttestationResult.destinationDomain) || destChain
-            : destChain;
+            ? getChainByDomain(fetchedAttestationResult.destinationDomain)
+            : undefined;
+
+        if (!resolvedDestChain) {
+          toast({
+            title: "Destination unresolved",
+            description: "Attestation did not provide a valid destination chain",
+            variant: "destructive",
+          });
+          return;
+        }
         
         updateTransferStatus(txHash, {
           status: "ready_to_mint",
@@ -1080,8 +1093,12 @@ export default function Bridge() {
 
       const resolvedDestChain =
         attestationResult.destinationDomain !== undefined
-          ? getChainByDomain(attestationResult.destinationDomain) || destChain
-          : destChain;
+          ? getChainByDomain(attestationResult.destinationDomain)
+          : undefined;
+
+      if (!resolvedDestChain) {
+        throw new Error("Could not resolve destination chain from attestation");
+      }
 
       updateTransferStatus(transferId, {
         status: "ready_to_mint",

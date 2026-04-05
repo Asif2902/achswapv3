@@ -126,6 +126,23 @@ export function AddLiquidityV3Advanced() {
   const maxAmountAWeiRef = useRef<bigint | null>(null);
   const maxAmountBWeiRef = useRef<bigint | null>(null);
 
+  const getSafeMaxInput = useCallback((balanceWei: bigint, token: Token) => {
+    let safeWei = balanceWei;
+    if (isCanonicalUSDC(token) || isNativeToken(token.address)) {
+      safeWei = (balanceWei * 99n) / 100n;
+    }
+
+    const displayRaw = getMaxAmount(safeWei, token.decimals, token.symbol);
+    const displayAmount = displayRaw.toLowerCase().includes("e")
+      ? formatUnits(safeWei, token.decimals)
+      : displayRaw;
+
+    return {
+      displayAmount,
+      amountWei: parseAmount(displayAmount, token.decimals),
+    };
+  }, []);
+
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
@@ -783,13 +800,9 @@ export function AddLiquidityV3Advanced() {
             {balanceA !== null && tokenA && (
               <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: tokenACanDeposit ? "pointer" : "default" }} onClick={() => {
                 if (!tokenACanDeposit) return;
-                const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
+                const { displayAmount, amountWei } = getSafeMaxInput(balanceA, tokenA);
                 setAmountA(displayAmount);
-                let maxWei = balanceA;
-                if (isCanonicalUSDC(tokenA) || isNativeToken(tokenA.address)) {
-                  maxWei = (balanceA * 99n) / 100n;
-                }
-                maxAmountAWeiRef.current = maxWei;
+                maxAmountAWeiRef.current = amountWei;
               }}>
                 Balance: <span style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600 }}>{formatBalance(balanceA, tokenA.decimals)}</span>
               </span>
@@ -807,13 +820,9 @@ export function AddLiquidityV3Advanced() {
               </button>
               {balanceA !== null && tokenA && tokenACanDeposit && (
                 <button className="v3a-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceA, tokenA);
                   setAmountA(displayAmount);
-                  let maxWei = balanceA;
-                  if (isCanonicalUSDC(tokenA) || isNativeToken(tokenA.address)) {
-                    maxWei = (balanceA * 99n) / 100n;
-                  }
-                  maxAmountAWeiRef.current = maxWei;
+                  maxAmountAWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -842,13 +851,9 @@ export function AddLiquidityV3Advanced() {
             {balanceB !== null && tokenB && (
               <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", cursor: tokenBCanDeposit ? "pointer" : "default" }} onClick={() => {
                 if (!tokenBCanDeposit) return;
-                const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
+                const { displayAmount, amountWei } = getSafeMaxInput(balanceB, tokenB);
                 setAmountB(displayAmount);
-                let maxWei = balanceB;
-                if (isCanonicalUSDC(tokenB) || isNativeToken(tokenB.address)) {
-                  maxWei = (balanceB * 99n) / 100n;
-                }
-                maxAmountBWeiRef.current = maxWei;
+                maxAmountBWeiRef.current = amountWei;
               }}>
                 Balance: <span style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600 }}>{formatBalance(balanceB, tokenB.decimals)}</span>
               </span>
@@ -868,13 +873,9 @@ export function AddLiquidityV3Advanced() {
               </button>
               {balanceB !== null && tokenB && tokenBCanDeposit && (
                 <button className="v3a-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceB, tokenB);
                   setAmountB(displayAmount);
-                  let maxWei = balanceB;
-                  if (isCanonicalUSDC(tokenB) || isNativeToken(tokenB.address)) {
-                    maxWei = (balanceB * 99n) / 100n;
-                  }
-                  maxAmountBWeiRef.current = maxWei;
+                  maxAmountBWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>

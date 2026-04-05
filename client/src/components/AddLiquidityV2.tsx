@@ -99,16 +99,26 @@ export function AddLiquidityV2() {
       if (!tokenA || !tokenB || !window.ethereum) {
         setPairExists(false); setReserveA(0n); setReserveB(0n); return;
       }
-      if (tokenA.address.toLowerCase() === tokenB.address.toLowerCase()) {
+
+      const wrappedToken = getWUSDC(chainId);
+      const wrappedAddress = wrappedToken?.address;
+      const normalizeForPairComparison = (tokenAddress: string) => {
+        const lower = tokenAddress.toLowerCase();
+        if (lower === "0x0000000000000000000000000000000000000000" && wrappedAddress) {
+          return wrappedAddress.toLowerCase();
+        }
+        return lower;
+      };
+
+      if (normalizeForPairComparison(tokenA.address) === normalizeForPairComparison(tokenB.address)) {
         setPairExists(false); setReserveA(0n); setReserveB(0n); return;
       }
+
       setIsLoadingPair(true);
       try {
         if (!contracts) return;
         const provider = new BrowserProvider(window.ethereum);
         const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
-        const wrappedToken = getWUSDC(chainId);
-        const wrappedAddress = wrappedToken?.address;
         if (!wrappedAddress) { setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return; }
         const isTokenANative = tokenA.address === "0x0000000000000000000000000000000000000000";
         const isTokenBNative = tokenB.address === "0x0000000000000000000000000000000000000000";

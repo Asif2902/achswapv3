@@ -127,6 +127,25 @@ async function rpcWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs
   throw lastError;
 }
 
+function createLimiter(maxConcurrent: number) {
+  let active = 0;
+  const queue: (() => void)[] = [];
+
+  return async function run<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= maxConcurrent) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    }
+  };
+}
+
 function calculateFeeGrowthInside(
   feeGrowthGlobal: bigint,
   feeGrowthOutsideLower: bigint,
@@ -361,6 +380,7 @@ export function RemoveLiquidityV3() {
       );
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const knownTokenList = await fetchTokensWithCommunity(chainId);
+      const limit = createLimiter(10);
 
       const balance = await rpcWithRetry(() => positionManager.balanceOf(address));
       const count = Number(balance);
@@ -375,18 +395,18 @@ export function RemoveLiquidityV3() {
         return;
       }
 
-      // Phase 1: Fetch ALL tokenIds in parallel
+      // Phase 1: Fetch ALL tokenIds with bounded concurrency
       const indices = Array.from({ length: count }, (_, i) => i);
       const tokenIds = await Promise.all(
-        indices.map((i) => rpcWithRetry(() => positionManager.tokenOfOwnerByIndex(address, i)))
+        indices.map((i) => limit(() => rpcWithRetry(() => positionManager.tokenOfOwnerByIndex(address, i))))
       );
 
-      // Phase 2: Fetch ALL raw position structs in parallel
+      // Phase 2: Fetch ALL raw position structs with bounded concurrency
       const rawPositions = await Promise.all(
-        tokenIds.map((id: bigint) => rpcWithRetry(() => positionManager.positions(id)))
+        tokenIds.map((id: bigint) => limit(() => rpcWithRetry(() => positionManager.positions(id))))
       );
 
-      // Phase 3: Fetch ALL position details in parallel
+      // Phase 3: Fetch ALL position details with bounded concurrency
       const fetchPosition = async (absoluteIdx: number): Promise<V3Position | null> => {
         const position = rawPositions[absoluteIdx];
         const tokenId = tokenIds[absoluteIdx];
@@ -519,7 +539,7 @@ export function RemoveLiquidityV3() {
       };
 
       const userPositions = await Promise.all(
-        Array.from({ length: rawPositions.length }, (_, i) => i).map(fetchPosition)
+        Array.from({ length: rawPositions.length }, (_, i) => i).map((idx) => limit(() => fetchPosition(idx)))
       );
 
       // Auto-retry incomplete positions (currentTick undefined + liquidity > 0)
@@ -531,7 +551,7 @@ export function RemoveLiquidityV3() {
       if (incompleteIndices.length > 0) {
         console.log(`Retrying ${incompleteIndices.length} incomplete positions...`);
         const retryResults = await Promise.all(
-          incompleteIndices.map((idx: number) => fetchPosition(idx))
+          incompleteIndices.map((idx: number) => limit(() => fetchPosition(idx)))
         );
         for (let i = 0; i < incompleteIndices.length; i++) {
           finalPositions[incompleteIndices[i]] = retryResults[i];
@@ -738,6 +758,14 @@ export function RemoveLiquidityV3() {
         : tokenAmounts.amount1;
 
       const liquidityToRemove = latestLiquidity * BigInt(percentage[0]) / 100n;
+      if (liquidityToRemove === 0n) {
+        toast({
+          title: "Zero liquidity selected",
+          description: "Increase the remove percentage above 0% before confirming",
+          variant: "destructive",
+        });
+        return;
+      }
       const isFullRemove = percentage[0] === 100;
       const expectedAmount0Out = (latestAmount0 * BigInt(percentage[0])) / 100n;
       const expectedAmount1Out = (latestAmount1 * BigInt(percentage[0])) / 100n;
@@ -1256,7 +1284,7 @@ export function RemoveLiquidityV3() {
 
                     <Button
                       onClick={(e) => { e.stopPropagation(); handleRemove(); }}
-                      disabled={isRemoving || position.liquidity === 0n}
+                      disabled={isRemoving || position.liquidity === 0n || percentage[0] === 0}
                       variant="destructive"
                       className="w-full h-11 text-sm font-semibold disabled:opacity-40"
                     >

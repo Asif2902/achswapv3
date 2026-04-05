@@ -86,6 +86,7 @@ function parsePositiveBigInt(value: string | undefined): bigint | null {
 }
 
 const TOKEN_BALANCES_CACHE_TTL_MS = 15_000;
+const EXPLORER_FETCH_TIMEOUT_MS = 5_000;
 const tokenBalancesCache = new Map<string, TokenBalancesCacheEntry>();
 const tokenBalancesInFlight = new Map<string, Promise<ExplorerTokenBalanceItem[]>>();
 
@@ -102,11 +103,19 @@ async function fetchTokenBalancesFromExplorerNetwork(
 
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const response = await fetch(endpoint, {
-        headers: {
-          Accept: "application/json",
-        },
-      });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), EXPLORER_FETCH_TIMEOUT_MS);
+      let response: Response;
+      try {
+        response = await fetch(endpoint, {
+          headers: {
+            Accept: "application/json",
+          },
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeoutId);
+      }
 
       if (!response.ok) {
         throw new Error(`Explorer API ${response.status} while fetching token balances`);

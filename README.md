@@ -5,8 +5,6 @@ A modern decentralized exchange (DEX) frontend built with React, Vite, and Web3 
 ## Features
 
 - **Token Swaps**: Swap tokens with smart routing across V2 and V3 pools
-
-- **Token Swaps**: Swap tokens with smart routing across V2 and V3 pools
 - **Gasless Swaps**: Relayer-powered swaps using Permit2 - users sign once, relayer pays gas
 - **V2 Liquidity**: Add/remove liquidity from V2 style AMM pools
 - **V3 Liquidity**: Concentrated liquidity with price range selection (Basic & Advanced modes)

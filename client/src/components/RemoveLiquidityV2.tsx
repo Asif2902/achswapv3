@@ -82,6 +82,11 @@ export function RemoveLiquidityV2() {
 
   // FIX 5: Track whether we've done the initial auto-select, avoids stale-closure bug
   const hasAutoSelected = useRef(false);
+  const selectedPairAddressRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    selectedPairAddressRef.current = selectedPosition?.pairAddress.toLowerCase() ?? null;
+  }, [selectedPosition]);
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
   const getTokenLogo = (symbol: string): string => {
@@ -219,6 +224,11 @@ export function RemoveLiquidityV2() {
 
       if (merged.length === 0) {
         setSelectedPosition(null);
+      } else if (selectedPairAddressRef.current) {
+        const refreshedSelected = merged.find(
+          (p) => p.pairAddress.toLowerCase() === selectedPairAddressRef.current,
+        );
+        setSelectedPosition(refreshedSelected ?? null);
       }
 
       // FIX 5: Use ref to guard auto-select, no stale closure
@@ -236,7 +246,7 @@ export function RemoveLiquidityV2() {
     } finally {
       setIsLoading(false);
     }
-  }, [address, contracts, chainId, tokens, toast]); // selectedPosition intentionally NOT here — use ref instead
+  }, [address, contracts, chainId, tokens, toast]);
 
   // FIX 6: loadPositions added to dep array
   useEffect(() => {

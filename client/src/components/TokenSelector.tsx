@@ -102,7 +102,14 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     });
   };
 
-  const { filteredVerified, filteredImported, filteredRWA } = useMemo(() => {
+  const {
+    filteredFavorites,
+    filteredRecent,
+    filteredCommunity,
+    filteredVerified,
+    filteredImported,
+    filteredRWA,
+  } = useMemo(() => {
     const q = searchQuery.toLowerCase().trim();
     const matches = (t: Token) =>
       !q ||
@@ -110,12 +117,37 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       t.name.toLowerCase().includes(q) ||
       t.address.toLowerCase().includes(q);
 
+    const rwaPredicate = (t: Token) => (rwaOnly ? !!t.rwa : true);
+
+    const favorites = favoriteTokens
+      .filter((t) => matches(t) && rwaPredicate(t))
+      .sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+    const recents = recentTokens
+      .filter((t) => matches(t) && rwaPredicate(t))
+      .sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+    const community = filteredCommunityTokens
+      .filter((t) => matches(t) && rwaPredicate(t));
+
     // When rwaOnly mode, only show RWA tokens
     if (rwaOnly) {
+      const rwa = tokens
+        .filter((t) => t.verified && t.rwa && matches(t))
+        .sort((a, b) => {
+          const catA = a.rwaCategory || "";
+          const catB = b.rwaCategory || "";
+          if (catA !== catB) return catA.localeCompare(catB);
+          return a.symbol.localeCompare(b.symbol);
+        });
+
       return {
-        filteredVerified: tokens.filter((t) => t.verified && t.rwa && matches(t)),
+        filteredFavorites: favorites,
+        filteredRecent: recents,
+        filteredCommunity: community,
+        filteredVerified: [] as Token[],
         filteredImported: [] as Token[],
-        filteredRWA: [] as Token[],
+        filteredRWA: rwa,
       };
     }
 
@@ -130,8 +162,15 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         if (catA !== catB) return catA.localeCompare(catB);
         return a.symbol.localeCompare(b.symbol);
       });
-    return { filteredVerified: verified, filteredImported: imported, filteredRWA: rwa };
-  }, [tokens, searchQuery, rwaOnly]);
+    return {
+      filteredFavorites: favorites,
+      filteredRecent: recents,
+      filteredCommunity: community,
+      filteredVerified: verified,
+      filteredImported: imported,
+      filteredRWA: rwa,
+    };
+  }, [tokens, searchQuery, rwaOnly, favoriteTokens, recentTokens, filteredCommunityTokens]);
 
   const isValidAddress = Boolean(searchQuery.trim() && isAddress(searchQuery.trim()));
   const tokenExists =
@@ -327,7 +366,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
           >
             {/* ── Favorites section ── */}
-            {favoriteTokens.length > 0 && !searchQuery && (
+            {filteredFavorites.length > 0 && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px 4px", marginBottom: 2 }}>
                   <Star style={{ width: 11, height: 11, color: "#facc15", fill: "#facc15" }} />
@@ -335,7 +374,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     Favorites
                   </span>
                 </div>
-                {favoriteTokens.map((token, i) => (
+                {filteredFavorites.map((token, i) => (
                   <TokenRow
                     key={token.address}
                     token={token}
@@ -350,7 +389,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             )}
 
             {/* ── Recent tokens section ── */}
-            {recentTokens.length > 0 && !searchQuery && (
+            {filteredRecent.length > 0 && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 4px", marginBottom: 2 }}>
                   <Clock style={{ width: 11, height: 11, color: "#818cf8" }} />
@@ -358,7 +397,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     Recent
                   </span>
                 </div>
-                {recentTokens.map((token, i) => (
+                {filteredRecent.map((token, i) => (
                   <TokenRow
                     key={token.address}
                     token={token}
@@ -445,7 +484,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             )}
 
             {/* ── Community Made section ── */}
-            {(filteredCommunityTokens.length > 0 || loadingCommunity) && (
+            {(filteredCommunity.length > 0 || loadingCommunity) && (
               <>
                 <div style={{ padding: "10px 12px 4px", display: "flex", alignItems: "center", gap: 8 }}>
                   <Users style={{ width: 11, height: 11, color: "#a78bfa" }} />
@@ -454,13 +493,13 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                   </span>
                 </div>
 
-                {loadingCommunity && filteredCommunityTokens.length === 0 ? (
+                {loadingCommunity && filteredCommunity.length === 0 ? (
                   <div style={{ padding: "16px 12px", display: "flex", alignItems: "center", gap: 8 }}>
                     <div style={{ width: 14, height: 14, border: "2px solid rgba(139,92,246,0.2)", borderTopColor: "#a78bfa", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
                     <span style={{ fontSize: 12, color: "rgba(255,255,255,0.2)" }}>Loading community tokens…</span>
                   </div>
                 ) : (
-                  filteredCommunityTokens.map((token, i) => (
+                  filteredCommunity.map((token, i) => (
                     <CommunityTokenRow
                       key={token.address}
                       token={token}
@@ -478,7 +517,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             )}
 
             {/* Empty state */}
-            {filteredVerified.length === 0 && filteredImported.length === 0 && filteredRWA.length === 0 && filteredCommunityTokens.length === 0 && !showImportButton && !loadingCommunity && (
+            {filteredFavorites.length === 0 && filteredRecent.length === 0 && filteredVerified.length === 0 && filteredImported.length === 0 && filteredRWA.length === 0 && filteredCommunity.length === 0 && !showImportButton && !loadingCommunity && (
               <div className="flex flex-col items-center justify-center py-16 gap-3">
                 <div className="w-12 h-12 rounded-2xl flex items-center justify-center" style={{ background: "rgba(255,255,255,0.04)" }}>
                   <Search className="w-5 h-5 text-white/20" />
@@ -694,13 +733,20 @@ function TokenRow({
       isUnverified={!!(onDelete && !token.verified)} 
       onDelete={() => onDelete?.(token.address)}
     >
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         data-testid={`button-select-token-${token.symbol}`}
         onClick={onClick}
         onPointerDown={() => setPressed(true)}
         onPointerUp={() => setPressed(false)}
         onPointerLeave={() => setPressed(false)}
         onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onClick();
+            return;
+          }
           if ((e.key === "Delete" || e.key === "Backspace") && onDelete && !token.verified) {
             e.preventDefault();
             onDelete(token.address);
@@ -795,7 +841,7 @@ function TokenRow({
             </button>
           )}
         </div>
-      </button>
+      </div>
     </HoldToRevealRow>
   );
 }

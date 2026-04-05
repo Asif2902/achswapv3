@@ -390,8 +390,31 @@ export function MigrateV2ToV3() {
       }
 
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
-      const expectedAmount0 = (selectedPosition.reserve0 * liquidityToMigrate) / selectedPosition.totalSupply;
-      const expectedAmount1 = (selectedPosition.reserve1 * liquidityToMigrate) / selectedPosition.totalSupply;
+
+      const readProvider = createAlchemyProvider(chainId);
+      const latestPair = new Contract(selectedPosition.pairAddress, V2_PAIR_ABI, readProvider);
+      const latestFactory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, readProvider);
+
+      const [latestReserves, latestTotalSupply, latestPoolAddress] = await Promise.all([
+        latestPair.getReserves(),
+        latestPair.totalSupply(),
+        latestFactory.getPool(selectedPosition.token0.address, selectedPosition.token1.address, selectedFee),
+      ]);
+
+      const reserve0Raw = latestReserves.reserve0 ?? latestReserves[0] ?? 0n;
+      const reserve1Raw = latestReserves.reserve1 ?? latestReserves[1] ?? 0n;
+      const latestReserve0 = typeof reserve0Raw === "bigint" ? reserve0Raw : BigInt(reserve0Raw.toString());
+      const latestReserve1 = typeof reserve1Raw === "bigint" ? reserve1Raw : BigInt(reserve1Raw.toString());
+      const latestSupply = typeof latestTotalSupply === "bigint" ? latestTotalSupply : BigInt(latestTotalSupply.toString());
+
+      if (latestSupply <= 0n) {
+        throw new Error("Latest V2 pool supply is zero");
+      }
+
+      const expectedAmount0 = (latestReserve0 * liquidityToMigrate) / latestSupply;
+      const expectedAmount1 = (latestReserve1 * liquidityToMigrate) / latestSupply;
+      const freshPoolExists = !!latestPoolAddress && latestPoolAddress !== "0x0000000000000000000000000000000000000000";
+
       const baseMigrateParams = {
         pair: selectedPosition.pairAddress,
         liquidityToMigrate,
@@ -425,14 +448,14 @@ export function MigrateV2ToV3() {
       };
 
       const executeMigration = async (params: typeof strictParams) => {
-        if (v3PoolInfo?.exists) {
+        if (freshPoolExists) {
           toast({ title: "Migrating…", description: "Removing V2 liquidity and adding to V3" });
           const gasEstimate = await migrator.migrate.estimateGas(params);
           const tx = await migrator.migrate(params, { gasLimit: (gasEstimate * 150n) / 100n });
           return tx.wait();
         }
 
-        const sqrtPriceX96 = sqrtPriceX96FromV2Reserves(selectedPosition.reserve0, selectedPosition.reserve1);
+        const sqrtPriceX96 = sqrtPriceX96FromV2Reserves(latestReserve0, latestReserve1);
         toast({ title: "Creating pool & migrating…", description: "Initializing V3 pool and migrating in one transaction" });
         const createData = migrator.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [selectedPosition.token0.address, selectedPosition.token1.address, selectedFee, sqrtPriceX96]);
         const migrateData = migrator.interface.encodeFunctionData("migrate", [params]);
@@ -441,7 +464,7 @@ export function MigrateV2ToV3() {
         return tx.wait();
       };
 
-      const useFlexibleFromStart = Boolean(priceWarningConfirmed || !v3PoolInfo?.exists);
+      const useFlexibleFromStart = Boolean(priceWarningConfirmed || !freshPoolExists);
       let receipt;
       try {
         receipt = await executeMigration(useFlexibleFromStart ? relaxedParams : strictParams);

@@ -498,6 +498,7 @@ function getTokenForAddress(
 
 export interface RWAQuoteResult {
   protocol: "RWA";
+  inputAmount: bigint;
   outputAmount: bigint;
   route: RouteHop[];
   priceImpact: number;
@@ -550,6 +551,7 @@ export async function getRWAQuote(
 
       return {
         protocol: "RWA",
+        inputAmount: amountIn,
         outputAmount: synthOut,
         route: [{
           tokenIn: fromToken,
@@ -577,6 +579,7 @@ export async function getRWAQuote(
 
       return {
         protocol: "RWA",
+        inputAmount: amountIn,
         outputAmount: usdcOut,
         route: [{
           tokenIn: fromToken,
