@@ -663,7 +663,8 @@ export default function Bridge() {
 
   // ── Manual claim: fetch attestation and mint from burn tx hash ──────────────────
   const handleManualClaim = async () => {
-    if (!manualClaimTxHash || !window.ethereum || !address) {
+    const txHash = manualClaimTxHash.trim();
+    if (!txHash || !window.ethereum || !address) {
       toast({ title: "Missing required fields", variant: "destructive" });
       return;
     }
@@ -675,22 +676,22 @@ export default function Bridge() {
       }
 
       // Validate and fetch tx info BEFORE closing modal
-      const provider = new JsonRpcProvider(manualClaimSourceChain.rpcUrls[0]);
+      const provider = await getWorkingProvider(manualClaimSourceChain);
       
       // Get transaction to verify sender
-      const tx = await provider.getTransaction(manualClaimTxHash);
+      const tx = await provider.getTransaction(txHash);
       if (!tx) {
         throw new Error("Transaction not found on the selected chain. Make sure you selected the correct source chain.");
       }
       
       // Check if the transaction was made by the connected wallet
-      const txSender = tx.from.toLowerCase();
+      const txSender = (tx.from || "").toLowerCase();
       if (txSender !== address.toLowerCase()) {
         throw new Error(`Transaction was not made by your connected wallet. Please use the wallet that made the burn transaction.`);
       }
 
       // Get receipt for amount
-      const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
+      const receipt = await provider.getTransactionReceipt(txHash);
       let amount = "0";
       
       // Try to get amount from transaction input data first (depositForBurn function)
@@ -751,7 +752,7 @@ export default function Bridge() {
 
       try {
         // Fetch attestation
-        const url = `${CCTP_ATTESTATION_API}/v2/messages/${manualClaimSourceChain.domain}?transactionHash=${manualClaimTxHash}`;
+        const url = `${CCTP_ATTESTATION_API}/v2/messages/${manualClaimSourceChain.domain}?transactionHash=${txHash}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 10000);
         
@@ -799,22 +800,22 @@ export default function Bridge() {
       setSourceChain(manualClaimSourceChain);
       setDestChain(destChain);
       setAmount(amount);
-      currentTransferIdRef.current = manualClaimTxHash;
+      currentTransferIdRef.current = txHash;
       abortRef.current = false;
 
       if (attestation) {
         // Has attestation - go to minting
         setTransfer({
           step: "minting",
-          burnTxHash: manualClaimTxHash,
+          burnTxHash: txHash,
           mintTxHash: null,
           attestation: attestation,
           error: null,
         });
 
         savePendingTransfer({
-          id: manualClaimTxHash,
-          burnTxHash: manualClaimTxHash,
+          id: txHash,
+          burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
           sourceChainId: manualClaimSourceChain.chainId,
           destDomain: destChain.domain,
@@ -826,20 +827,20 @@ export default function Bridge() {
           attestation,
         });
 
-        await executeMint(destChain, attestation, manualClaimTxHash, amount);
+        await executeMint(destChain, attestation, txHash, amount);
       } else {
         // No attestation yet - go to attesting and poll
         setTransfer({
           step: "attesting",
-          burnTxHash: manualClaimTxHash,
+          burnTxHash: txHash,
           mintTxHash: null,
           attestation: null,
           error: null,
         });
 
         savePendingTransfer({
-          id: manualClaimTxHash,
-          burnTxHash: manualClaimTxHash,
+          id: txHash,
+          burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
           sourceChainId: manualClaimSourceChain.chainId,
           destDomain: destChain.domain,
@@ -852,18 +853,18 @@ export default function Bridge() {
 
         toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
         
-        const fetchedAttestation = await pollForAttestation(manualClaimSourceChain.domain, manualClaimTxHash);
+        const fetchedAttestation = await pollForAttestation(manualClaimSourceChain.domain, txHash);
         
         if (abortRef.current) return;
         
-        updateTransferStatus(manualClaimTxHash, { status: "ready_to_mint", attestation: fetchedAttestation });
+        updateTransferStatus(txHash, { status: "ready_to_mint", attestation: fetchedAttestation });
         
         // Use the destination chain we already determined
         setDestChain(destChain);
         
         setTransfer(prev => ({ ...prev, step: "minting", attestation: fetchedAttestation }));
         
-        await executeMint(destChain, fetchedAttestation, manualClaimTxHash, "0");
+        await executeMint(destChain, fetchedAttestation, txHash, "0");
       }
 
     } catch (err: any) {
@@ -1094,8 +1095,7 @@ export default function Bridge() {
       // Invalid input (e.g. trailing dot) — don't flag as insufficient
     }
   }
-  const isArcSource = sourceChain.name.includes("Arc");
-  const canBridge = isConnected && amount && parsedAmount > 0 && !isTransferring && !insufficientBalance && !isArcSource;
+  const canBridge = isConnected && amount && parsedAmount > 0 && !isTransferring && !insufficientBalance;
   const estimatedTime = (useFastTransfer && sourceChain.supportsFastTransfer) ? "~8-20 seconds" : "~15-19 minutes";
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1418,8 +1418,6 @@ export default function Bridge() {
                     <><span className="br-spin" />Bridging...</>
                   ) : insufficientBalance ? (
                     <><AlertTriangle style={{ width: 18, height: 18 }} />Insufficient USDC Balance</>
-                  ) : isArcSource ? (
-                    <><AlertTriangle style={{ width: 18, height: 18 }} />Arc CCTP is down, can't transfer</>
                   ) : transfer.step === "complete" ? (
                     <><Check style={{ width: 18, height: 18 }} />Bridge Again</>
                   ) : (
@@ -1428,19 +1426,6 @@ export default function Bridge() {
                 </button>
               ) : (
                 <button disabled className="br-submit off">Connect Wallet to Bridge</button>
-              )}
-
-              {isArcSource && (
-                <div style={{
-                  marginTop: 10, padding: "10px 14px", borderRadius: 12,
-                  background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)",
-                  display: "flex", alignItems: "flex-start", gap: 8,
-                }}>
-                  <AlertTriangle style={{ width: 14, height: 14, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
-                  <span style={{ fontSize: 11, color: "#fbbf24", lineHeight: 1.5 }}>
-                    Arc Testnet CCTP is currently down. You can bridge from other chains to Arc, but not from Arc to other chains. Circle team is working to restore it.
-                  </span>
-                </div>
               )}
 
               {/* Error message */}
