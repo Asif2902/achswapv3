@@ -68,7 +68,27 @@ export function AddLiquidityV2() {
     setPairExists(false);
     setReserveA(0n);
     setReserveB(0n);
+    maxAmountAWeiRef.current = null;
+    maxAmountBWeiRef.current = null;
   }, [chainId]);
+
+  const getSafeMaxInput = (balanceWei: bigint, token: Token, isNative: boolean) => {
+    let safeWei = balanceWei;
+    if (isCanonicalUSDC(token) || isNative) {
+      safeWei = (balanceWei * 99n) / 100n;
+    }
+
+    const displayAmountRaw = getMaxAmount(safeWei, token.decimals, token.symbol);
+    const displayAmount = displayAmountRaw.toLowerCase().includes("e")
+      ? formatUnits(safeWei, token.decimals)
+      : displayAmountRaw;
+
+    const parsedDisplayWei = parseAmount(displayAmount, token.decimals);
+    return {
+      displayAmount,
+      amountWei: parsedDisplayWei,
+    };
+  };
 
   const openExplorer = (txHash: string) => {
     if (contracts) window.open(`${contracts.explorer}${txHash}`, "_blank");
@@ -526,7 +546,11 @@ export function AddLiquidityV2() {
               type="number"
               placeholder="0.00"
               value={amountA}
-              onChange={e => setAmountA(e.target.value)}
+              onChange={e => {
+                setAmountA(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               className="alv2-input"
               style={{ flex: 1, minWidth: 0 }}
             />
@@ -547,13 +571,9 @@ export function AddLiquidityV2() {
               </button>
               {isConnected && tokenA && balanceA && (
                 <button className="alv2-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceA.value, balanceA.decimals, tokenA.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceA.value, tokenA, isTokenANative);
                   setAmountA(displayAmount);
-                  let maxWei = balanceA.value;
-                  if (isCanonicalUSDC(tokenA)) {
-                    maxWei = (balanceA.value * 99n) / 100n;
-                  }
-                  maxAmountAWeiRef.current = maxWei;
+                  maxAmountAWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -584,7 +604,11 @@ export function AddLiquidityV2() {
               type="number"
               placeholder={poolHasLiquidity ? "Auto-calculated" : "0.00"}
               value={amountB}
-              onChange={e => poolHasLiquidity ? null : setAmountB(e.target.value)}
+              onChange={e => {
+                if (poolHasLiquidity) return;
+                setAmountB(e.target.value);
+                maxAmountBWeiRef.current = null;
+              }}
               disabled={poolHasLiquidity}
               className="alv2-input"
               style={{ flex: 1, minWidth: 0, opacity: poolHasLiquidity ? 0.7 : 1 }}
@@ -606,13 +630,9 @@ export function AddLiquidityV2() {
               </button>
               {isConnected && tokenB && balanceB && !poolHasLiquidity && (
                 <button className="alv2-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceB.value, balanceB.decimals, tokenB.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceB.value, tokenB, isTokenBNative);
                   setAmountB(displayAmount);
-                  let maxWei = balanceB.value;
-                  if (isCanonicalUSDC(tokenB)) {
-                    maxWei = (balanceB.value * 99n) / 100n;
-                  }
-                  maxAmountBWeiRef.current = maxWei;
+                  maxAmountBWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -794,14 +814,24 @@ export function AddLiquidityV2() {
       <TokenSelector
         open={showTokenASelector}
         onClose={() => setShowTokenASelector(false)}
-        onSelect={token => { setTokenA(token); setShowTokenASelector(false); }}
+        onSelect={token => {
+          maxAmountAWeiRef.current = null;
+          maxAmountBWeiRef.current = null;
+          setTokenA(token);
+          setShowTokenASelector(false);
+        }}
         tokens={tokens.filter(t => !isRWAToken(t))}
         onImport={handleImportToken}
       />
       <TokenSelector
         open={showTokenBSelector}
         onClose={() => setShowTokenBSelector(false)}
-        onSelect={token => { setTokenB(token); setShowTokenBSelector(false); }}
+        onSelect={token => {
+          maxAmountAWeiRef.current = null;
+          maxAmountBWeiRef.current = null;
+          setTokenB(token);
+          setShowTokenBSelector(false);
+        }}
         tokens={tokens.filter(t => !isRWAToken(t))}
         onImport={handleImportToken}
       />

@@ -235,6 +235,8 @@ export function AddLiquidityV3Advanced() {
     setPoolToken1Reserve(null);
     setPoolAddress(null);
     setAutoCalcAmounts(null);
+    maxAmountAWeiRef.current = null;
+    maxAmountBWeiRef.current = null;
   }, [chainId]);
 
   useEffect(() => {
@@ -794,7 +796,11 @@ export function AddLiquidityV3Advanced() {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <input type="number" placeholder="0.00" value={amountA} onChange={e => setAmountA(e.target.value)} disabled={!tokenACanDeposit} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
+            <input type="number" placeholder="0.00" value={amountA} onChange={e => {
+              setAmountA(e.target.value);
+              maxAmountAWeiRef.current = null;
+              maxAmountBWeiRef.current = null;
+            }} disabled={!tokenACanDeposit} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
               <button onClick={() => setShowTokenASelector(true)} className={`v3a-token-btn ${!tokenA ? "empty" : ""}`}>
                 {tokenA ? (<><img src={tokenA.logoURI} alt={tokenA.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenA.symbol}</span></>) : <span>Select token</span>}
@@ -849,7 +855,13 @@ export function AddLiquidityV3Advanced() {
             )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <input type="number" placeholder="0.00" value={amountB} onChange={e => { setAmountB(e.target.value); setAmountBIsAuto(false); setAutoCalcAmounts(null); }} disabled={!tokenBCanDeposit} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
+            <input type="number" placeholder="0.00" value={amountB} onChange={e => {
+              setAmountB(e.target.value);
+              setAmountBIsAuto(false);
+              setAutoCalcAmounts(null);
+              maxAmountAWeiRef.current = null;
+              maxAmountBWeiRef.current = null;
+            }} disabled={!tokenBCanDeposit} className="v3a-input" style={{ flex: 1, minWidth: 0 }} />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
               <button onClick={() => setShowTokenBSelector(true)} className={`v3a-token-btn ${!tokenB ? "empty" : ""}`}>
                 {tokenB ? (<><img src={tokenB.logoURI} alt={tokenB.symbol} style={{ width: 22, height: 22, borderRadius: "50%", border: "1px solid rgba(255,255,255,0.15)" }} /><span>{tokenB.symbol}</span></>) : <span>Select token</span>}
@@ -1156,8 +1168,18 @@ export function AddLiquidityV3Advanced() {
         )}
       </div>
 
-      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
-      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
+      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => {
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+        setTokenA(t);
+        setShowTokenASelector(false);
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
+      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => {
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+        setTokenB(t);
+        setShowTokenBSelector(false);
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
     </>
   );
 }

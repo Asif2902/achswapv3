@@ -528,7 +528,11 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder="0.00" value={amountA}
-              onChange={e => { setAmountA(e.target.value); maxAmountAWeiRef.current = null; }}
+              onChange={e => {
+                setAmountA(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               className="v3b-input" style={{ flex: 1, minWidth: 0 }}
             />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
@@ -584,7 +588,11 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder={poolExists && currentPrice ? "Auto-calculated" : "0.00"} value={amountB}
-              onChange={e => { setAmountB(e.target.value); maxAmountBWeiRef.current = null; }}
+              onChange={e => {
+                setAmountB(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               disabled={poolExists && !!currentPrice}
               className="v3b-input" style={{ flex: 1, minWidth: 0, opacity: poolExists && currentPrice ? 0.7 : 1 }}
             />
@@ -823,8 +831,18 @@ export function AddLiquidityV3Basic() {
         )}
       </div>
 
-      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
-      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
+      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => {
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+        setTokenA(t);
+        setShowTokenASelector(false);
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
+      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => {
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+        setTokenB(t);
+        setShowTokenBSelector(false);
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
     </>
   );
 }

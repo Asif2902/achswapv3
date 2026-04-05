@@ -9,6 +9,7 @@ import { getTokensByChainId } from "@/data/tokens";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
+import { createAlchemyProvider } from "@/lib/config";
 import { V3_MIGRATOR_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { priceToSqrtPriceX96, sqrtPriceX96ToPrice, getPriceFromAmounts, getFullRangeTicks } from "@/lib/v3-utils";
 import {
@@ -126,23 +127,23 @@ export function MigrateV2ToV3() {
   // ── Check migrator ──────────────────────────────────────────────────────────
   useEffect(() => {
     const checkMigrator = async () => {
-      if (!contracts || !window.ethereum) return;
+      if (!contracts || !chainId) return;
       try {
-        const provider = new BrowserProvider(window.ethereum);
+        const provider = createAlchemyProvider(chainId);
         const code = await provider.getCode(contracts.v3.migrator);
         setMigratorExists(code !== "0x" && code !== "0x0");
       } catch { setMigratorExists(false); }
     };
     checkMigrator();
-  }, [contracts]);
+  }, [contracts, chainId]);
 
   // ── Check V3 pool ───────────────────────────────────────────────────────────
   useEffect(() => {
     const checkV3Pool = async () => {
-      if (!selectedPosition || !contracts || !window.ethereum) { setV3PoolInfo(null); return; }
+      if (!selectedPosition || !contracts || !chainId) { setV3PoolInfo(null); return; }
       setIsCheckingPool(true);
       try {
-        const provider = new BrowserProvider(window.ethereum);
+        const provider = createAlchemyProvider(chainId);
         const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
         const poolAddress = await factory.getPool(
           selectedPosition.token0.address,
@@ -170,7 +171,7 @@ export function MigrateV2ToV3() {
     };
     checkV3Pool();
     setPriceWarningConfirmed(false);
-  }, [selectedPosition, selectedFee, contracts]);
+  }, [selectedPosition, selectedFee, contracts, chainId]);
 
   const getV2Price = (): number | null => {
     if (!selectedPosition) return null;
@@ -189,10 +190,10 @@ export function MigrateV2ToV3() {
 
   // ── Load V2 positions ───────────────────────────────────────────────────────
   const loadPositions = useCallback(async () => {
-    if (!address || !contracts || !window.ethereum) return;
+    if (!address || !contracts || !chainId) return;
     setIsLoading(true);
     try {
-      const provider = new BrowserProvider(window.ethereum);
+      const provider = createAlchemyProvider(chainId);
       const factory = new Contract(contracts.v2.factory, V2_FACTORY_ABI, provider);
       const pairsLength = await factory.allPairsLength();
       const userPositions: V2Position[] = [];
