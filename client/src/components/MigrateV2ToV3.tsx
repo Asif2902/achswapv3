@@ -88,6 +88,20 @@ function applySlippageMin(amount: bigint, bps: bigint = MIGRATION_SLIPPAGE_BPS):
   return (amount * (10_000n - bps)) / 10_000n;
 }
 
+function isPriceSlippageCheckError(error: unknown): boolean {
+  if (!error) return false;
+
+  const message = typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? "")
+    : String(error);
+
+  const reason = typeof error === "object" && error !== null && "reason" in error
+    ? String((error as { reason?: unknown }).reason ?? "")
+    : "";
+
+  return message.includes("Price slippage check") || reason.includes("Price slippage check");
+}
+
 interface V2Position {
   pairAddress: string;
   token0: Token;
@@ -377,7 +391,7 @@ export function MigrateV2ToV3() {
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
       const expectedAmount0 = (selectedPosition.reserve0 * liquidityToMigrate) / selectedPosition.totalSupply;
       const expectedAmount1 = (selectedPosition.reserve1 * liquidityToMigrate) / selectedPosition.totalSupply;
-      const migrateParams = {
+      const baseMigrateParams = {
         pair: selectedPosition.pairAddress,
         liquidityToMigrate,
         percentageToMigrate: percentToMigrate,
@@ -386,27 +400,55 @@ export function MigrateV2ToV3() {
         fee: selectedFee,
         tickLower,
         tickUpper,
-        amount0Min: applySlippageMin(expectedAmount0),
-        amount1Min: applySlippageMin(expectedAmount1),
         recipient: address,
         deadline: Math.floor(Date.now() / 1000) + 1200,
         refundAsETH: false,
       };
 
-      let receipt;
-      if (v3PoolInfo?.exists) {
-        toast({ title: "Migrating…", description: "Removing V2 liquidity and adding to V3" });
-        const gasEstimate = await migrator.migrate.estimateGas(migrateParams);
-        const tx = await migrator.migrate(migrateParams, { gasLimit: (gasEstimate * 150n) / 100n });
-        receipt = await tx.wait();
-      } else {
+      const strictParams = {
+        ...baseMigrateParams,
+        amount0Min: applySlippageMin(expectedAmount0),
+        amount1Min: applySlippageMin(expectedAmount1),
+      };
+
+      const relaxedParams = {
+        ...baseMigrateParams,
+        amount0Min: 0n,
+        amount1Min: 0n,
+      };
+
+      const executeMigration = async (params: typeof strictParams) => {
+        if (v3PoolInfo?.exists) {
+          toast({ title: "Migrating…", description: "Removing V2 liquidity and adding to V3" });
+          const gasEstimate = await migrator.migrate.estimateGas(params);
+          const tx = await migrator.migrate(params, { gasLimit: (gasEstimate * 150n) / 100n });
+          return tx.wait();
+        }
+
         const sqrtPriceX96 = sqrtPriceX96FromV2Reserves(selectedPosition.reserve0, selectedPosition.reserve1);
         toast({ title: "Creating pool & migrating…", description: "Initializing V3 pool and migrating in one transaction" });
         const createData = migrator.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [selectedPosition.token0.address, selectedPosition.token1.address, selectedFee, sqrtPriceX96]);
-        const migrateData = migrator.interface.encodeFunctionData("migrate", [migrateParams]);
+        const migrateData = migrator.interface.encodeFunctionData("migrate", [params]);
         const gasEstimate = await migrator.multicall.estimateGas([createData, migrateData]);
         const tx = await migrator.multicall([createData, migrateData], { gasLimit: (gasEstimate * 150n) / 100n });
-        receipt = await tx.wait();
+        return tx.wait();
+      };
+
+      let receipt;
+      try {
+        receipt = await executeMigration(strictParams);
+      } catch (error) {
+        const canRelaxMins = Boolean(priceWarningConfirmed || !v3PoolInfo?.exists);
+        if (!canRelaxMins || !isPriceSlippageCheckError(error)) {
+          throw error;
+        }
+
+        toast({
+          title: "Retrying migration",
+          description: "Price moved; retrying with flexible min amounts",
+        });
+
+        receipt = await executeMigration(relaxedParams);
       }
 
       setSelectedPosition(null);
