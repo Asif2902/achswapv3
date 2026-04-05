@@ -365,6 +365,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                    onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
               </>
@@ -931,4 +933,3 @@ function CommunityTokenRow({
     </HoldToRevealRow>
   );
 }
-

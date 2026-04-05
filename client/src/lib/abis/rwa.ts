@@ -29,13 +29,13 @@ export const RWA_ORACLE_ABI = [
 ];
 
 export const RWASynth_ABI = [
-  "function name() view returns (string)",
-  "function symbol() view returns (string)",
-  "function decimals() view returns (uint8)",
-  "function balanceOf(address) view returns (uint256)",
-  "function approve(address spender, uint256 amount) returns (bool)",
-  "function allowance(address owner, address spender) view returns (uint256)",
-  "function totalSupply() view returns (uint256)",
+  "function name() external view returns (string)",
+  "function symbol() external view returns (string)",
+  "function decimals() external view returns (uint8)",
+  "function balanceOf(address) external view returns (uint256)",
+  "function approve(address spender, uint256 amount) external returns (bool)",
+  "function allowance(address owner, address spender) external view returns (uint256)",
+  "function totalSupply() external view returns (uint256)",
 ];
 
 // Keep old name as alias for backwards compat

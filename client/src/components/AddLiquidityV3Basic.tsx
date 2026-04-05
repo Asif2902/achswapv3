@@ -165,7 +165,7 @@ export function AddLiquidityV3Basic() {
     if (tokens.length === 0) return;
     if (!tokenA) { const u = getUSDC(chainId); if (u) setTokenA(u); }
     if (!tokenB) { const a = tokens.find(t => t.symbol === "ACHS"); if (a) setTokenB(a); }
-  }, [tokens, tokenA, tokenB]);
+  }, [tokens, tokenA, tokenB, chainId]);
 
   // ── Import token ───────────────────────────────────────────────────────────
   const handleImportToken = async (addr: string): Promise<Token | null> => {

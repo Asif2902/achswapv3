@@ -61,6 +61,24 @@ interface V2Position {
   amount1: bigint;
 }
 
+function createLimiter(maxConcurrent: number) {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  return async function run<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= maxConcurrent) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    }
+  };
+}
+
 export function RemoveLiquidityV2() {
   const [positions, setPositions] = useState<V2Position[]>([]);
   const [selectedPosition, setSelectedPosition] = useState<V2Position | null>(null);
@@ -181,6 +199,7 @@ export function RemoveLiquidityV2() {
 
       const pairsToFetch = Number(pairsLength);
       const batchSize = 50;
+      const limit = createLimiter(8);
 
       // Get pair addresses in chunks (avoid one giant Promise.all)
       const pairAddresses: string[] = [];
@@ -188,13 +207,15 @@ export function RemoveLiquidityV2() {
         const end = Math.min(start + batchSize, pairsToFetch);
         const indices = Array.from({ length: end - start }, (_, i) => start + i);
         try {
-          const chunkAddresses = await Promise.all(indices.map((i) => factory.allPairs(i)));
+          const chunkAddresses = await Promise.all(
+            indices.map((i) => limit(() => factory.allPairs(i)))
+          );
           pairAddresses.push(...chunkAddresses);
         } catch (batchErr) {
           console.warn("Failed to fetch pair-address batch, retrying individually", batchErr);
           for (const i of indices) {
             try {
-              pairAddresses.push(await factory.allPairs(i));
+              pairAddresses.push(await limit(() => factory.allPairs(i)));
             } catch {
               continue;
             }

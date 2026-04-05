@@ -241,7 +241,7 @@ export function AddLiquidityV3Advanced() {
     if (tokens.length === 0) return;
     if (!tokenA) { const t = getUSDC(chainId); if (t) setTokenA(t); }
     if (!tokenB) { const t = tokens.find(t => t.symbol === "ACHS"); if (t) setTokenB(t); }
-  }, [tokens, tokenA, tokenB]);
+  }, [tokens, tokenA, tokenB, chainId]);
 
   const handleImportToken = async (addr: string): Promise<Token | null> => {
     try {

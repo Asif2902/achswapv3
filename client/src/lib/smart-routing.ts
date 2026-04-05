@@ -544,7 +544,6 @@ export async function getRWAQuote(
       const price = result[3];
       const isStale = result[4];
 
-      const netUsdc = amountIn - fee;
       // Price impact is 0 for vault swaps (no slippage from pool depth, only fee)
       // But we show fee impact for transparency
       const priceImpact = amountIn > 0n ? Number((fee * 10000n) / amountIn) / 100 : 0;

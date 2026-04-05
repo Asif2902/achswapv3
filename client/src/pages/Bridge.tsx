@@ -38,6 +38,12 @@ interface TransferState {
   error: string | null;
 }
 
+interface AttestationPollResult {
+  message: string;
+  attestation: string;
+  destinationDomain?: number;
+}
+
 const INITIAL_STATE: TransferState = {
   step: "idle",
   burnTxHash: null,
@@ -514,14 +520,35 @@ export default function Bridge() {
         });
 
         toast({ title: "Resuming transfer...", description: "Polling for attestation" });
-        const attestation = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
+        const attestationResult = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
 
         if (abortRef.current) return;
-        updateTransferStatus(pendingTx.id, { status: "ready_to_mint", attestation });
-        setTransfer(prev => ({ ...prev, step: "minting", attestation }));
+
+        const resolvedDst =
+          attestationResult.destinationDomain !== undefined
+            ? getChainByDomain(attestationResult.destinationDomain) || dstChain
+            : dstChain;
+
+        updateTransferStatus(pendingTx.id, {
+          status: "ready_to_mint",
+          attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
+          destDomain: resolvedDst.domain,
+          destChainId: resolvedDst.chainId,
+        });
+        setDestChain(resolvedDst);
+        setTransfer(prev => ({
+          ...prev,
+          step: "minting",
+          attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
+        }));
 
         // Proceed to mint
-        await executeMint(dstChain, attestation, pendingTx.id, pendingTx.amount);
+        await executeMint(
+          resolvedDst,
+          { message: attestationResult.message, attestation: attestationResult.attestation },
+          pendingTx.id,
+          pendingTx.amount,
+        );
 
       } else if (pendingTx.status === "ready_to_mint" && pendingTx.attestation) {
         // Resume from minting step
@@ -663,9 +690,13 @@ export default function Bridge() {
 
   // ── Manual claim: fetch attestation and mint from burn tx hash ──────────────────
   const handleManualClaim = async () => {
-    const txHash = manualClaimTxHash.trim();
+    const txHash = manualClaimTxHash.trim().toLowerCase();
     if (!txHash || !window.ethereum || !address) {
       toast({ title: "Missing required fields", variant: "destructive" });
+      return;
+    }
+    if (!/^0x[a-f0-9]{64}$/.test(txHash)) {
+      toast({ title: "Invalid transaction hash format", variant: "destructive" });
       return;
     }
 
@@ -853,18 +884,46 @@ export default function Bridge() {
 
         toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
         
-        const fetchedAttestation = await pollForAttestation(manualClaimSourceChain.domain, txHash);
+        const fetchedAttestationResult = await pollForAttestation(manualClaimSourceChain.domain, txHash);
         
         if (abortRef.current) return;
+
+        const resolvedDestChain =
+          fetchedAttestationResult.destinationDomain !== undefined
+            ? getChainByDomain(fetchedAttestationResult.destinationDomain) || destChain
+            : destChain;
         
-        updateTransferStatus(txHash, { status: "ready_to_mint", attestation: fetchedAttestation });
+        updateTransferStatus(txHash, {
+          status: "ready_to_mint",
+          attestation: {
+            message: fetchedAttestationResult.message,
+            attestation: fetchedAttestationResult.attestation,
+          },
+          destDomain: resolvedDestChain.domain,
+          destChainId: resolvedDestChain.chainId,
+        });
         
-        // Use the destination chain we already determined
-        setDestChain(destChain);
+        // Use destination resolved from attestation when available
+        setDestChain(resolvedDestChain);
         
-        setTransfer(prev => ({ ...prev, step: "minting", attestation: fetchedAttestation }));
+        setTransfer(prev => ({
+          ...prev,
+          step: "minting",
+          attestation: {
+            message: fetchedAttestationResult.message,
+            attestation: fetchedAttestationResult.attestation,
+          },
+        }));
         
-        await executeMint(destChain, fetchedAttestation, txHash, amount);
+        await executeMint(
+          resolvedDestChain,
+          {
+            message: fetchedAttestationResult.message,
+            attestation: fetchedAttestationResult.attestation,
+          },
+          txHash,
+          amount,
+        );
       }
 
     } catch (err: any) {
@@ -1015,14 +1074,35 @@ export default function Bridge() {
 
       // ── Step 3: Poll for attestation ────────────────────────────────────
       toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
-      const attestation = await pollForAttestation(sourceChain.domain, burnTxHash);
+      const attestationResult = await pollForAttestation(sourceChain.domain, burnTxHash);
 
       if (abortRef.current) return;
-      updateTransferStatus(transferId, { status: "ready_to_mint", attestation });
-      setTransfer(prev => ({ ...prev, step: "minting", attestation }));
+
+      const resolvedDestChain =
+        attestationResult.destinationDomain !== undefined
+          ? getChainByDomain(attestationResult.destinationDomain) || destChain
+          : destChain;
+
+      updateTransferStatus(transferId, {
+        status: "ready_to_mint",
+        attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
+        destDomain: resolvedDestChain.domain,
+        destChainId: resolvedDestChain.chainId,
+      });
+      setDestChain(resolvedDestChain);
+      setTransfer(prev => ({
+        ...prev,
+        step: "minting",
+        attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
+      }));
 
       // ── Step 4: Mint USDC on destination ────────────────────────────────
-      await executeMint(destChain, attestation, transferId, amount);
+      await executeMint(
+        resolvedDestChain,
+        { message: attestationResult.message, attestation: attestationResult.attestation },
+        transferId,
+        amount,
+      );
 
     } catch (err: any) {
       console.error("Bridge error:", err);
@@ -1051,7 +1131,7 @@ export default function Bridge() {
   async function pollForAttestation(
     srcDomain: number,
     txHash: string
-  ): Promise<{ message: string; attestation: string }> {
+  ): Promise<AttestationPollResult> {
     const url = `${CCTP_ATTESTATION_API}/v2/messages/${srcDomain}?transactionHash=${txHash}`;
     const maxAttempts = 120; // ~10 minutes at 5s intervals
     const FETCH_TIMEOUT_MS = 10_000; // 10 seconds per request
@@ -1074,6 +1154,10 @@ export default function Bridge() {
             return {
               message: data.messages[0].message,
               attestation: data.messages[0].attestation,
+              destinationDomain:
+                typeof data.messages[0].destinationDomain === "number"
+                  ? data.messages[0].destinationDomain
+                  : undefined,
             };
           }
         }
@@ -1086,6 +1170,7 @@ export default function Bridge() {
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const parsedAmount = amount ? parseFloat(amount) : 0;
+  const normalizedManualClaimTxHash = manualClaimTxHash.trim().toLowerCase();
   let insufficientBalance = false;
   if (parsedAmount > 0 && sourceBalanceRaw !== null && amount) {
     try {
@@ -1832,15 +1917,16 @@ export default function Bridge() {
                     type="text"
                     value={manualClaimTxHash}
                     onChange={(e) => {
-                      setManualClaimTxHash(e.target.value);
-                      setManualClaimTxHashValid(/^0x[a-fA-F0-9]{64}$/.test(e.target.value));
+                      const normalized = e.target.value.trim().toLowerCase();
+                      setManualClaimTxHash(normalized);
+                      setManualClaimTxHashValid(/^0x[a-f0-9]{64}$/.test(normalized));
                     }}
                     placeholder="0x..."
                     className={`w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border focus:outline-none placeholder:text-white/20 ${
-                      manualClaimTxHash && !manualClaimTxHashValid ? "border-red-500 focus:border-red-500" : "border-white/10 focus:border-indigo-500/50"
+                      normalizedManualClaimTxHash && !manualClaimTxHashValid ? "border-red-500 focus:border-red-500" : "border-white/10 focus:border-indigo-500/50"
                     }`}
                   />
-                  {manualClaimTxHash && !manualClaimTxHashValid && (
+                  {normalizedManualClaimTxHash && !manualClaimTxHashValid && (
                     <p className="text-[10px] text-red-400 mt-1">Invalid transaction hash format</p>
                   )}
                 </div>
@@ -1848,14 +1934,14 @@ export default function Bridge() {
                 {/* Submit */}
                 <button
                   onClick={handleManualClaim}
-                  disabled={!manualClaimTxHash || !manualClaimTxHashValid || !manualClaimSourceChain || manualClaimLoading || !address}
+                  disabled={!normalizedManualClaimTxHash || !manualClaimTxHashValid || !manualClaimSourceChain || manualClaimLoading || !address}
                   className="w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
                   style={{
-                    background: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address
+                    background: normalizedManualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address
                       ? "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
                       : "rgba(99,102,241,0.3)",
-                    color: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
-                    cursor: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "pointer" : "not-allowed",
+                    color: normalizedManualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
+                    cursor: normalizedManualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "pointer" : "not-allowed",
                   }}
                 >
                   {manualClaimLoading ? (

@@ -127,25 +127,6 @@ async function rpcWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs
   throw lastError;
 }
 
-// Concurrency limiter to prevent overwhelming Alchemy RPC
-function createLimiter(maxConcurrent: number) {
-  let active = 0;
-  const queue: (() => void)[] = [];
-  return async function run<T>(fn: () => Promise<T>): Promise<T> {
-    if (active >= maxConcurrent) {
-      await new Promise<void>((resolve) => queue.push(resolve));
-    }
-    active++;
-    try {
-      return await fn();
-    } finally {
-      active--;
-      const next = queue.shift();
-      if (next) next();
-    }
-  };
-}
-
 function calculateFeeGrowthInside(
   feeGrowthGlobal: bigint,
   feeGrowthOutsideLower: bigint,
@@ -715,7 +696,9 @@ export function RemoveLiquidityV3() {
         readProvider,
       );
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, readProvider);
-      const latestPositionRaw = await readPositionManager.positions(selectedPosition.tokenId);
+      const latestPositionRaw = await rpcWithRetry(() =>
+        readPositionManager.positions(selectedPosition.tokenId)
+      );
       const latestToken0Address: string = latestPositionRaw[2];
       const latestToken1Address: string = latestPositionRaw[3];
       const latestFee = Number(latestPositionRaw[4]);
@@ -731,13 +714,13 @@ export function RemoveLiquidityV3() {
         latestToken0Address.toLowerCase() < latestToken1Address.toLowerCase()
           ? [latestToken0Address, latestToken1Address]
           : [latestToken1Address, latestToken0Address];
-      const poolAddress = await factory.getPool(tokenA, tokenB, latestFee);
+      const poolAddress = await rpcWithRetry(() => factory.getPool(tokenA, tokenB, latestFee));
       if (!poolAddress || poolAddress === "0x0000000000000000000000000000000000000000") {
         throw new Error("Pool not found for position");
       }
 
       const pool = new Contract(poolAddress, V3_POOL_ABI, readProvider);
-      const slot0 = await pool.slot0();
+      const slot0 = await rpcWithRetry(() => pool.slot0());
       let currentSqrtPriceX96: bigint = slot0[0];
       if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
 

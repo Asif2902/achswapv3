@@ -326,7 +326,17 @@ export function AddLiquidityV2() {
     : { label: "New Pool", color: "rgba(99,102,241,0.12)", text: "#818cf8", dot: "#6366f1" };
 
   const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
-  const sameTokenSelected = !!(tokenA && tokenB && tokenA.address.toLowerCase() === tokenB.address.toLowerCase());
+  const wrapped = getWUSDC(chainId);
+  const getERC20AddressForCompare = (token: Token) =>
+    token.address.toLowerCase() === "0x0000000000000000000000000000000000000000" && wrapped
+      ? wrapped.address
+      : token.address;
+  const sameTokenSelected = !!(
+    tokenA &&
+    tokenB &&
+    getERC20AddressForCompare(tokenA).toLowerCase() ===
+      getERC20AddressForCompare(tokenB).toLowerCase()
+  );
   const canSubmit = tokenA && tokenB && !sameTokenSelected && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !hasRwaToken;
 
   return (

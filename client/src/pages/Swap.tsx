@@ -122,8 +122,28 @@ export default function Swap() {
     try {
       const key = `recentTokens:${chainId}`;
       const stored = localStorage.getItem(key);
-      if (stored) setRecentTokens(JSON.parse(stored));
-    } catch { /* ignore */ }
+      if (!stored) {
+        setRecentTokens([]);
+        return;
+      }
+
+      const parsed: unknown = JSON.parse(stored);
+      if (!Array.isArray(parsed)) {
+        setRecentTokens([]);
+        return;
+      }
+
+      const valid = parsed.filter((item): item is Token => {
+        if (!item || typeof item !== "object") return false;
+        const v = item as Partial<Token>;
+        return typeof v.address === "string" && v.address.length > 0;
+      });
+
+      setRecentTokens(valid);
+    } catch (error) {
+      console.warn("Failed to parse recent tokens from localStorage", error);
+      setRecentTokens([]);
+    }
   }, [chainId]);
 
   const addRecentToken = (token: Token) => {
@@ -1371,8 +1391,8 @@ export default function Swap() {
         </div>
       </div>
 
-      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={recentTokens} favoriteTokens={favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
-      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={recentTokens} favoriteTokens={favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={isRWAToken(toToken) ? recentTokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : recentTokens} favoriteTokens={isRWAToken(toToken) ? favoriteTokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={isRWAToken(fromToken) ? recentTokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : recentTokens} favoriteTokens={isRWAToken(fromToken) ? favoriteTokens.filter(t => isCanonicalUSDC(t) || isCanonicalWUSDC(t)) : favoriteTokens} onToggleFavorite={toggleFavoriteToken} />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 

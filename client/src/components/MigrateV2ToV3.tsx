@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useAccount, useChainId } from "wagmi";
@@ -52,6 +52,24 @@ const ERC20_ABI = [
 ];
 
 const MIGRATION_SLIPPAGE_BPS = 100n; // 1%
+
+function createLimiter(maxConcurrent: number) {
+  let active = 0;
+  const queue: (() => void)[] = [];
+  return async function run<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= maxConcurrent) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    }
+  };
+}
 
 function applySlippageMin(amount: bigint, bps: bigint = MIGRATION_SLIPPAGE_BPS): bigint {
   if (amount <= 0n) return 0n;
@@ -170,7 +188,7 @@ export function MigrateV2ToV3() {
   const showPriceWarning = priceDiff && priceDiff.diff > 2 && !priceWarningConfirmed;
 
   // ── Load V2 positions ───────────────────────────────────────────────────────
-  const loadPositions = async () => {
+  const loadPositions = useCallback(async () => {
     if (!address || !contracts || !window.ethereum) return;
     setIsLoading(true);
     try {
@@ -180,6 +198,7 @@ export function MigrateV2ToV3() {
       const userPositions: V2Position[] = [];
       const maxPairs = Number(pairsLength);
       const batchSize = 25;
+      const limit = createLimiter(8);
 
       for (let start = 0; start < maxPairs; start += batchSize) {
         const end = Math.min(start + batchSize, maxPairs);
@@ -187,12 +206,22 @@ export function MigrateV2ToV3() {
 
         let pairAddresses: string[] = [];
         try {
-          pairAddresses = await Promise.all(indices.map((i) => factory.allPairs(i)));
+          const indexedResults = await Promise.all(
+            indices.map((i) =>
+              limit(async () => {
+                const addr = await factory.allPairs(i);
+                return { i, addr };
+              })
+            )
+          );
+          indexedResults.sort((a, b) => a.i - b.i);
+          pairAddresses = indexedResults.map((r) => r.addr);
         } catch {
           for (const i of indices) {
             try {
-              pairAddresses.push(await factory.allPairs(i));
-            } catch {
+              pairAddresses.push(await limit(() => factory.allPairs(i)));
+            } catch (err) {
+              console.warn(`Failed to fetch pair index ${i}`, err);
               continue;
             }
           }
@@ -263,11 +292,11 @@ export function MigrateV2ToV3() {
       console.error("Error loading positions:", error);
       toast({ title: "Failed to load positions", description: "Could not fetch your V2 liquidity positions", variant: "destructive" });
     } finally { setIsLoading(false); }
-  };
+  }, [address, contracts, chainId, toast, tokens]);
 
   useEffect(() => {
     if (isConnected && address) loadPositions();
-  }, [isConnected, address, chainId]);
+  }, [isConnected, address, chainId, loadPositions]);
 
   // ── Migrate ─────────────────────────────────────────────────────────────────
   const handleMigrate = async () => {
