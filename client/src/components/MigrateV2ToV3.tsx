@@ -12,7 +12,7 @@ import { getErrorForToast } from "@/lib/error-utils";
 import { createAlchemyProvider } from "@/lib/config";
 import { discoverV2PositionsFromExplorer, explorerApiBaseFromTxUrl } from "@/lib/v2-position-discovery";
 import { V3_MIGRATOR_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS, FEE_TIER_LABELS } from "@/lib/abis/v3";
-import { priceToSqrtPriceX96, sqrtPriceX96ToPrice, getPriceFromAmounts, getFullRangeTicks } from "@/lib/v3-utils";
+import { sqrtPriceX96ToPrice, getPriceFromAmounts, getFullRangeTicks } from "@/lib/v3-utils";
 import {
   ArrowDown,
   AlertCircle,
@@ -42,6 +42,46 @@ const V2_PAIR_ABI = [
 ];
 
 const MIGRATION_SLIPPAGE_BPS = 100n; // 1%
+const MIN_SQRT_RATIO = 4295128739n;
+const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
+
+function getDisplaySymbol(symbol: string): string {
+  return symbol.toLowerCase() === "wusdc" ? "USDC" : symbol;
+}
+
+function formatPrice(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  if (value === 0) return "0";
+  if (Math.abs(value) < 0.000001) return value.toExponential(4);
+  return value.toFixed(6);
+}
+
+function bigintSqrt(value: bigint): bigint {
+  if (value < 0n) throw new Error("Cannot sqrt negative bigint");
+  if (value < 2n) return value;
+
+  let x0 = value;
+  let x1 = (x0 + 1n) >> 1n;
+
+  while (x1 < x0) {
+    x0 = x1;
+    x1 = (x1 + value / x1) >> 1n;
+  }
+
+  return x0;
+}
+
+function sqrtPriceX96FromV2Reserves(reserve0: bigint, reserve1: bigint): bigint {
+  if (reserve0 <= 0n || reserve1 <= 0n) {
+    throw new Error("Invalid V2 reserves for pool initialization");
+  }
+
+  const ratioX192 = (reserve1 << 192n) / reserve0;
+  const sqrtPrice = bigintSqrt(ratioX192);
+  if (sqrtPrice < MIN_SQRT_RATIO) return MIN_SQRT_RATIO;
+  if (sqrtPrice > MAX_SQRT_RATIO) return MAX_SQRT_RATIO;
+  return sqrtPrice;
+}
 
 function applySlippageMin(amount: bigint, bps: bigint = MIGRATION_SLIPPAGE_BPS): bigint {
   if (amount <= 0n) return 0n;
@@ -110,9 +150,12 @@ export function MigrateV2ToV3() {
 
   // ── Check V3 pool ───────────────────────────────────────────────────────────
   useEffect(() => {
+    let cancelled = false;
+
     const checkV3Pool = async () => {
       if (!selectedPosition || !contracts || !chainId) { setV3PoolInfo(null); return; }
       setIsCheckingPool(true);
+      setV3PoolInfo(null);
       try {
         const provider = createAlchemyProvider(chainId);
         const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
@@ -121,9 +164,11 @@ export function MigrateV2ToV3() {
           selectedPosition.token1.address,
           selectedFee,
         );
+        if (cancelled) return;
         if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
           const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
           const slot0 = await pool.slot0();
+          if (cancelled) return;
           const sqrtPriceX96 = slot0[0];
           const tick = Number(slot0[1]);
           if (sqrtPriceX96 === 0n) {
@@ -137,11 +182,20 @@ export function MigrateV2ToV3() {
         }
       } catch (error) {
         console.error("Error checking V3 pool:", error);
+        if (cancelled) return;
         setV3PoolInfo({ exists: false, address: null, currentPrice: null, currentTick: null, sqrtPriceX96: null });
-      } finally { setIsCheckingPool(false); }
+      } finally {
+        if (!cancelled) {
+          setIsCheckingPool(false);
+        }
+      }
     };
+
     checkV3Pool();
     setPriceWarningConfirmed(false);
+    return () => {
+      cancelled = true;
+    };
   }, [selectedPosition, selectedFee, contracts, chainId]);
 
   const getV2Price = (): number | null => {
@@ -157,7 +211,7 @@ export function MigrateV2ToV3() {
   };
 
   const priceDiff = getPriceDifference();
-  const showPriceWarning = priceDiff && priceDiff.diff > 2 && !priceWarningConfirmed;
+  const showPriceWarning = Boolean(v3PoolInfo?.exists && priceDiff && priceDiff.diff > 2 && !priceWarningConfirmed);
 
   // ── Load V2 positions ───────────────────────────────────────────────────────
   const loadPositions = useCallback(async () => {
@@ -271,9 +325,7 @@ export function MigrateV2ToV3() {
         const tx = await migrator.migrate(migrateParams, { gasLimit: (gasEstimate * 150n) / 100n });
         receipt = await tx.wait();
       } else {
-        const v2Price = getV2Price();
-        if (!v2Price) throw new Error("Could not calculate V2 price");
-        const sqrtPriceX96 = priceToSqrtPriceX96(v2Price, selectedPosition.token0.decimals, selectedPosition.token1.decimals);
+        const sqrtPriceX96 = sqrtPriceX96FromV2Reserves(selectedPosition.reserve0, selectedPosition.reserve1);
         toast({ title: "Creating pool & migrating…", description: "Initializing V3 pool and migrating in one transaction" });
         const createData = migrator.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [selectedPosition.token0.address, selectedPosition.token1.address, selectedFee, sqrtPriceX96]);
         const migrateData = migrator.interface.encodeFunctionData("migrate", [migrateParams]);
@@ -395,6 +447,9 @@ export function MigrateV2ToV3() {
             const isSelected = selectedPosition?.pairAddress === position.pairAddress;
             const token0Amount = formatAmount((position.reserve0 * position.lpBalance) / position.totalSupply, position.token0.decimals);
             const token1Amount = formatAmount((position.reserve1 * position.lpBalance) / position.totalSupply, position.token1.decimals);
+            const token0DisplaySymbol = getDisplaySymbol(position.token0.symbol);
+            const token1DisplaySymbol = getDisplaySymbol(position.token1.symbol);
+            const v2Price = isSelected ? getV2Price() : null;
 
             return (
               <Card
@@ -422,9 +477,9 @@ export function MigrateV2ToV3() {
                     </div>
 
                     <div className="flex-1 min-w-0 pl-1">
-                      <p className="font-bold text-sm">{position.token0.symbol}/{position.token1.symbol}</p>
+                      <p className="font-bold text-sm">{token0DisplaySymbol}/{token1DisplaySymbol}</p>
                       <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                        {parseFloat(token0Amount).toFixed(4)} {position.token0.symbol} + {parseFloat(token1Amount).toFixed(4)} {position.token1.symbol}
+                        {parseFloat(token0Amount).toFixed(4)} {token0DisplaySymbol} + {parseFloat(token1Amount).toFixed(4)} {token1DisplaySymbol}
                       </p>
                     </div>
 
@@ -446,12 +501,12 @@ export function MigrateV2ToV3() {
                         <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                           V3 Fee Tier
                         </p>
-                        <div className="grid grid-cols-5 gap-1">
+                        <div className="grid grid-cols-3 sm:grid-cols-5 gap-1">
                           {FEE_OPTIONS.map((opt) => (
                             <button
                               key={opt.value}
                               onClick={() => setSelectedFee(opt.value)}
-                              className={`flex flex-col items-center py-2 px-1 rounded-lg text-center transition-all ${
+                              className={`flex flex-col items-center py-2 px-1 rounded-lg min-h-[44px] text-center transition-all ${
                                 selectedFee === opt.value
                                   ? "bg-indigo-500/20 border border-indigo-500/50 text-indigo-300"
                                   : "bg-muted/30 border border-transparent text-muted-foreground hover:bg-muted/50"
@@ -535,12 +590,12 @@ export function MigrateV2ToV3() {
                             >
                               <div className="flex items-center justify-between px-3 py-2">
                                 <span className="text-[11px] text-muted-foreground">V2 Price</span>
-                                <span className="text-xs font-mono font-medium">{getV2Price()?.toFixed(6)}</span>
+                                <span className="text-xs font-mono font-medium">{formatPrice(v2Price)}</span>
                               </div>
                               <div className="h-px mx-3 bg-border/30" />
                               <div className="flex items-center justify-between px-3 py-2">
                                 <span className="text-[11px] text-muted-foreground">V3 Price</span>
-                                <span className="text-xs font-mono font-medium">{v3PoolInfo.currentPrice.toFixed(6)}</span>
+                                <span className="text-xs font-mono font-medium">{formatPrice(v3PoolInfo.currentPrice)}</span>
                               </div>
                               {priceDiff && (
                                 <>
@@ -553,6 +608,27 @@ export function MigrateV2ToV3() {
                                   </div>
                                 </>
                               )}
+                            </div>
+                          )}
+
+                          {!v3PoolInfo.exists && (
+                            <div className="rounded-lg overflow-hidden"
+                              style={{ background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.24)" }}
+                            >
+                              <div className="flex items-center justify-between px-3 py-2">
+                                <span className="text-[11px] text-indigo-200/70">V2 Price</span>
+                                <span className="text-xs font-mono font-medium text-indigo-100">{formatPrice(v2Price)}</span>
+                              </div>
+                              <div className="h-px mx-3 bg-indigo-300/20" />
+                              <div className="flex items-center justify-between px-3 py-2">
+                                <span className="text-[11px] text-indigo-200/70">Initial V3 Price</span>
+                                <span className="text-xs font-mono font-medium text-indigo-100">{formatPrice(v2Price)}</span>
+                              </div>
+                              <div className="h-px mx-3 bg-indigo-300/20" />
+                              <div className="flex items-center justify-between px-3 py-2">
+                                <span className="text-[11px] text-indigo-200/70">Difference</span>
+                                <span className="text-xs font-semibold text-emerald-300">0.00%</span>
+                              </div>
                             </div>
                           )}
                         </div>
@@ -593,32 +669,32 @@ export function MigrateV2ToV3() {
                       <div className="mx-4 h-px bg-border/30" />
                       <div className="px-4 py-3 space-y-3">
                         {/* From → To summary */}
-                        <div className="flex items-center gap-2 p-3 rounded-xl"
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 rounded-xl"
                           style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
                         >
                           {/* V2 side */}
                           <div className="flex-1 min-w-0">
                             <p className="text-[10px] text-muted-foreground mb-1">From V2</p>
-                            <p className="text-xs font-semibold">{position.token0.symbol}/{position.token1.symbol}</p>
+                            <p className="text-xs font-semibold">{token0DisplaySymbol}/{token1DisplaySymbol}</p>
                             <p className="text-[10px] text-muted-foreground mt-0.5 truncate">
-                              {getTokenAmount(position.reserve0, position.token0.decimals)} {position.token0.symbol}
+                              {getTokenAmount(position.reserve0, position.token0.decimals)} {token0DisplaySymbol}
                             </p>
                             <p className="text-[10px] text-muted-foreground truncate">
-                              {getTokenAmount(position.reserve1, position.token1.decimals)} {position.token1.symbol}
+                              {getTokenAmount(position.reserve1, position.token1.decimals)} {token1DisplaySymbol}
                             </p>
                           </div>
 
                           {/* Arrow */}
-                          <div className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center"
+                          <div className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center self-center"
                             style={{ background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)" }}
                           >
-                            <ArrowDown className="w-3.5 h-3.5 text-indigo-400 -rotate-90" />
+                            <ArrowDown className="w-3.5 h-3.5 text-indigo-400 sm:-rotate-90" />
                           </div>
 
                           {/* V3 side */}
-                          <div className="flex-1 min-w-0 text-right">
+                          <div className="flex-1 min-w-0 text-left sm:text-right">
                             <p className="text-[10px] text-muted-foreground mb-1">To V3</p>
-                            <p className="text-xs font-semibold">{position.token0.symbol}/{position.token1.symbol}</p>
+                            <p className="text-xs font-semibold">{token0DisplaySymbol}/{token1DisplaySymbol}</p>
                             <p className="text-[10px] text-indigo-400 mt-0.5">
                               {FEE_TIER_LABELS[selectedFee as keyof typeof FEE_TIER_LABELS]} fee
                             </p>
