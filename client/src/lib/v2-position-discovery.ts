@@ -7,11 +7,14 @@ const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 const FACTORY_ABI = [
   "function getPair(address tokenA, address tokenB) external view returns (address pair)",
+  "function allPairsLength() external view returns (uint256)",
+  "function allPairs(uint256) external view returns (address pair)",
 ];
 
 const PAIR_ABI = [
   "function token0() external view returns (address)",
   "function token1() external view returns (address)",
+  "function balanceOf(address owner) external view returns (uint256)",
   "function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
   "function totalSupply() external view returns (uint256)",
 ];
@@ -45,6 +48,11 @@ export interface V2DiscoveredPosition {
   reserve1: bigint;
   amount0: bigint;
   amount1: bigint;
+}
+
+interface FallbackScanResult {
+  pairAddress: string;
+  liquidity: bigint;
 }
 
 function createLimiter(maxConcurrent: number) {
@@ -151,6 +159,80 @@ async function fetchTokenBalancesFromExplorer(
   return request;
 }
 
+async function collectV2CandidatesWithRpcScan(
+  ownerAddress: string,
+  factoryAddress: string,
+  provider: JsonRpcProvider,
+  maxConcurrent = 10,
+): Promise<Map<string, bigint>> {
+  const uniqueCandidates = new Map<string, bigint>();
+  const factory = new Contract(factoryAddress, FACTORY_ABI, provider);
+  const limit = createLimiter(maxConcurrent);
+
+  const pairsLength = await factory.allPairsLength();
+  const totalPairs = Number(pairsLength);
+
+  if (!Number.isFinite(totalPairs) || totalPairs <= 0) {
+    return uniqueCandidates;
+  }
+
+  const batchSize = 60;
+  const pairAddresses: string[] = [];
+
+  for (let start = 0; start < totalPairs; start += batchSize) {
+    const end = Math.min(start + batchSize, totalPairs);
+    const indices = Array.from({ length: end - start }, (_, i) => start + i);
+
+    try {
+      const chunk = await Promise.all(
+        indices.map((index) => limit(() => factory.allPairs(index))),
+      );
+      pairAddresses.push(...chunk.map((addr) => String(addr).toLowerCase()));
+    } catch {
+      for (const index of indices) {
+        try {
+          const addr = await limit(() => factory.allPairs(index));
+          pairAddresses.push(String(addr).toLowerCase());
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+
+  if (pairAddresses.length === 0) {
+    return uniqueCandidates;
+  }
+
+  for (let start = 0; start < pairAddresses.length; start += batchSize) {
+    const chunk = pairAddresses.slice(start, start + batchSize);
+    const fallbackResults = await Promise.all(
+      chunk.map((pairAddressLower) =>
+        limit(async (): Promise<FallbackScanResult | null> => {
+          try {
+            const pair = new Contract(pairAddressLower, PAIR_ABI, provider);
+            const liquidity = await pair.balanceOf(ownerAddress);
+            if (liquidity <= 0n) return null;
+            return { pairAddress: pairAddressLower, liquidity };
+          } catch {
+            return null;
+          }
+        }),
+      ),
+    );
+
+    for (const row of fallbackResults) {
+      if (!row) continue;
+      const prev = uniqueCandidates.get(row.pairAddress) ?? 0n;
+      if (row.liquidity > prev) {
+        uniqueCandidates.set(row.pairAddress, row.liquidity);
+      }
+    }
+  }
+
+  return uniqueCandidates;
+}
+
 export function explorerApiBaseFromTxUrl(explorerTxUrl: string): string | null {
   try {
     const origin = new URL(explorerTxUrl).origin;
@@ -167,6 +249,7 @@ export async function discoverV2PositionsFromExplorer(params: {
   knownTokens: Token[];
   apiBaseUrl: string;
   maxConcurrent?: number;
+  retryWithFallbackScan?: boolean;
 }): Promise<V2DiscoveredPosition[]> {
   const {
     ownerAddress,
@@ -175,25 +258,56 @@ export async function discoverV2PositionsFromExplorer(params: {
     knownTokens,
     apiBaseUrl,
     maxConcurrent = 10,
+    retryWithFallbackScan = true,
   } = params;
-
-  const balances = await fetchTokenBalancesFromExplorer(ownerAddress, apiBaseUrl);
-
   const uniqueCandidates = new Map<string, bigint>();
-  for (const row of balances) {
-    const tokenAddress = row.token?.address_hash;
-    if (!tokenAddress) continue;
 
-    const tokenType = row.token?.type;
-    if (tokenType && tokenType !== "ERC-20") continue;
+  let explorerErr: Error | null = null;
+  try {
+    const balances = await fetchTokenBalancesFromExplorer(ownerAddress, apiBaseUrl);
+    for (const row of balances) {
+      const tokenAddress = row.token?.address_hash;
+      if (!tokenAddress) continue;
 
-    const liquidity = parsePositiveBigInt(row.value);
-    if (!liquidity) continue;
+      const tokenType = row.token?.type;
+      if (tokenType && tokenType !== "ERC-20") continue;
 
-    const key = tokenAddress.toLowerCase();
-    const existing = uniqueCandidates.get(key) ?? 0n;
-    if (liquidity > existing) {
-      uniqueCandidates.set(key, liquidity);
+      const liquidity = parsePositiveBigInt(row.value);
+      if (!liquidity) continue;
+
+      const key = tokenAddress.toLowerCase();
+      const existing = uniqueCandidates.get(key) ?? 0n;
+      if (liquidity > existing) {
+        uniqueCandidates.set(key, liquidity);
+      }
+    }
+  } catch (err) {
+    explorerErr = err instanceof Error ? err : new Error(String(err));
+  }
+
+  if (uniqueCandidates.size === 0 && retryWithFallbackScan && explorerErr) {
+    console.warn("[V2 discovery] Explorer API failed, retrying with RPC fallback scan", explorerErr);
+    try {
+      const fallbackCandidates = await collectV2CandidatesWithRpcScan(
+        ownerAddress,
+        factoryAddress,
+        provider,
+        maxConcurrent,
+      );
+      for (const [addr, liq] of fallbackCandidates.entries()) {
+        const prev = uniqueCandidates.get(addr) ?? 0n;
+        if (liq > prev) {
+          uniqueCandidates.set(addr, liq);
+        }
+      }
+    } catch (fallbackErr) {
+      if (uniqueCandidates.size === 0) {
+        const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        const explorerMessage = explorerErr.message;
+        throw new Error(
+          `V2 discovery failed (token-balances + RPC fallback scan). Explorer: ${explorerMessage}; Fallback: ${fallbackMessage}`,
+        );
+      }
     }
   }
 
