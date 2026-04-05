@@ -10,6 +10,7 @@ import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import { createAlchemyProvider } from "@/lib/config";
+import { discoverV2PositionsFromExplorer, explorerApiBaseFromTxUrl } from "@/lib/v2-position-discovery";
 import { V3_MIGRATOR_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS, FEE_TIER_LABELS } from "@/lib/abis/v3";
 import { priceToSqrtPriceX96, sqrtPriceX96ToPrice, getPriceFromAmounts, getFullRangeTicks } from "@/lib/v3-utils";
 import {
@@ -40,37 +41,7 @@ const V2_PAIR_ABI = [
   "function allowance(address owner, address spender) external view returns (uint256)",
 ];
 
-const V2_FACTORY_ABI = [
-  "function getPair(address tokenA, address tokenB) external view returns (address pair)",
-  "function allPairsLength() external view returns (uint256)",
-  "function allPairs(uint256) external view returns (address pair)",
-];
-
-const ERC20_ABI = [
-  "function name() view returns (string)",
-  "function symbol() view returns (string)",
-  "function decimals() view returns (uint8)",
-];
-
 const MIGRATION_SLIPPAGE_BPS = 100n; // 1%
-
-function createLimiter(maxConcurrent: number) {
-  let active = 0;
-  const queue: (() => void)[] = [];
-  return async function run<T>(fn: () => Promise<T>): Promise<T> {
-    if (active >= maxConcurrent) {
-      await new Promise<void>((resolve) => queue.push(resolve));
-    }
-    active++;
-    try {
-      return await fn();
-    } finally {
-      active--;
-      const next = queue.shift();
-      if (next) next();
-    }
-  };
-}
 
 function applySlippageMin(amount: bigint, bps: bigint = MIGRATION_SLIPPAGE_BPS): bigint {
   if (amount <= 0n) return 0n;
@@ -194,104 +165,59 @@ export function MigrateV2ToV3() {
     setIsLoading(true);
     try {
       const provider = createAlchemyProvider(chainId);
-      const factory = new Contract(contracts.v2.factory, V2_FACTORY_ABI, provider);
-      const pairsLength = await factory.allPairsLength();
-      const userPositions: V2Position[] = [];
-      const maxPairs = Number(pairsLength);
-      const batchSize = 25;
-      const limit = createLimiter(8);
+      const explorerApiBase = explorerApiBaseFromTxUrl(contracts.explorer);
+      if (!explorerApiBase) throw new Error("Could not derive explorer API base URL");
 
-      for (let start = 0; start < maxPairs; start += batchSize) {
-        const end = Math.min(start + batchSize, maxPairs);
-        const indices = Array.from({ length: end - start }, (_, i) => start + i);
+      const discovered = await discoverV2PositionsFromExplorer({
+        ownerAddress: address,
+        factoryAddress: contracts.v2.factory,
+        provider,
+        knownTokens: tokens,
+        apiBaseUrl: explorerApiBase,
+        maxConcurrent: 10,
+      });
 
-        let pairAddresses: string[] = [];
-        try {
-          const indexedResults = await Promise.all(
-            indices.map((i) =>
-              limit(async () => {
-                const addr = await factory.allPairs(i);
-                return { i, addr };
-              })
-            )
-          );
-          indexedResults.sort((a, b) => a.i - b.i);
-          pairAddresses = indexedResults.map((r) => r.addr);
-        } catch {
-          for (const i of indices) {
-            try {
-              pairAddresses.push(await limit(() => factory.allPairs(i)));
-            } catch (err) {
-              console.warn(`Failed to fetch pair index ${i}`, err);
-              continue;
-            }
-          }
-        }
+      const userPositions: V2Position[] = discovered.map((pos) => {
+        const token0: Token = {
+          address: pos.token0Address,
+          name: pos.token0Name,
+          symbol: pos.token0Symbol,
+          decimals: pos.token0Decimals,
+          logoURI: tokens.find((t) => t.address.toLowerCase() === pos.token0Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
+          verified: false,
+          chainId,
+        };
 
-        const batchPositions = await Promise.all(
-          pairAddresses.map(async (pairAddress): Promise<V2Position | null> => {
-            try {
-              const pairContract = new Contract(pairAddress, V2_PAIR_ABI, provider);
-              const [lpBalance, token0Address, token1Address, reserves, totalSupply] = await Promise.all([
-                pairContract.balanceOf(address),
-                pairContract.token0(),
-                pairContract.token1(),
-                pairContract.getReserves(),
-                pairContract.totalSupply(),
-              ]);
+        const token1: Token = {
+          address: pos.token1Address,
+          name: pos.token1Name,
+          symbol: pos.token1Symbol,
+          decimals: pos.token1Decimals,
+          logoURI: tokens.find((t) => t.address.toLowerCase() === pos.token1Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
+          verified: false,
+          chainId,
+        };
 
-              if (lpBalance <= 0n) return null;
-
-              const t0 = new Contract(token0Address, ERC20_ABI, provider);
-              const t1 = new Contract(token1Address, ERC20_ABI, provider);
-              const [name0, symbol0, decimals0] = await Promise.all([t0.name(), t0.symbol(), t0.decimals()]);
-              const [name1, symbol1, decimals1] = await Promise.all([t1.name(), t1.symbol(), t1.decimals()]);
-
-              const token0: Token = {
-                address: token0Address,
-                name: name0,
-                symbol: symbol0,
-                decimals: Number(decimals0),
-                logoURI: tokens.find(t => t.address.toLowerCase() === token0Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
-                verified: false,
-                chainId: chainId!,
-              };
-              const token1: Token = {
-                address: token1Address,
-                name: name1,
-                symbol: symbol1,
-                decimals: Number(decimals1),
-                logoURI: tokens.find(t => t.address.toLowerCase() === token1Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
-                verified: false,
-                chainId: chainId!,
-              };
-
-              return {
-                pairAddress,
-                token0,
-                token1,
-                lpBalance,
-                totalSupply,
-                reserve0: reserves[0],
-                reserve1: reserves[1],
-                sharePercent: Number((lpBalance * 10000n) / totalSupply) / 100,
-              };
-            } catch {
-              return null;
-            }
-          })
-        );
-
-        for (const pos of batchPositions) {
-          if (pos) userPositions.push(pos);
-        }
-      }
+        return {
+          pairAddress: pos.pairAddress,
+          token0,
+          token1,
+          lpBalance: pos.liquidity,
+          totalSupply: pos.totalSupply,
+          reserve0: pos.reserve0,
+          reserve1: pos.reserve1,
+          sharePercent: Number((pos.liquidity * 10000n) / pos.totalSupply) / 100,
+        };
+      });
 
       setPositions(userPositions);
+      if (userPositions.length === 0) {
+        setSelectedPosition(null);
+      }
       if (userPositions.length === 0) toast({ title: "No V2 positions found", description: "You don't have any V2 liquidity positions to migrate" });
     } catch (error) {
       console.error("Error loading positions:", error);
-      toast({ title: "Failed to load positions", description: "Could not fetch your V2 liquidity positions", variant: "destructive" });
+      toast({ title: "Failed to load positions", description: "Could not fetch your V2 liquidity positions from explorer API", variant: "destructive" });
     } finally { setIsLoading(false); }
   }, [address, contracts, chainId, toast, tokens]);
 

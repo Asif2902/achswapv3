@@ -11,6 +11,7 @@ import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import { createAlchemyProvider } from "@/lib/config";
+import { discoverV2PositionsFromExplorer, explorerApiBaseFromTxUrl } from "@/lib/v2-position-discovery";
 import {
   ExternalLink,
   Trash2,
@@ -32,8 +33,6 @@ const ERC20_ABI = [
 ];
 
 const FACTORY_ABI = [
-  "function allPairsLength() view returns (uint256)",
-  "function allPairs(uint256) view returns (address)",
   "function getPair(address, address) view returns (address)",
 ];
 
@@ -59,24 +58,6 @@ interface V2Position {
   liquidity: bigint;
   amount0: bigint;
   amount1: bigint;
-}
-
-function createLimiter(maxConcurrent: number) {
-  let active = 0;
-  const queue: (() => void)[] = [];
-  return async function run<T>(fn: () => Promise<T>): Promise<T> {
-    if (active >= maxConcurrent) {
-      await new Promise<void>((resolve) => queue.push(resolve));
-    }
-    active++;
-    try {
-      return await fn();
-    } finally {
-      active--;
-      const next = queue.shift();
-      if (next) next();
-    }
-  };
 }
 
 export function RemoveLiquidityV2() {
@@ -190,119 +171,36 @@ export function RemoveLiquidityV2() {
     }
     setIsLoading(true);
     try {
-      console.log("Loading V2 positions for:", address);
+      console.log("Loading V2 positions from explorer API for:", address);
       const provider = createAlchemyProvider(chainId);
-      const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
-
-      const pairsLength = await factory.allPairsLength();
-      console.log("Total V2 pairs:", pairsLength.toString());
-
-      const pairsToFetch = Number(pairsLength);
-      const batchSize = 50;
-      const limit = createLimiter(8);
-
-      // Get pair addresses in chunks (avoid one giant Promise.all)
-      const pairAddresses: string[] = [];
-      for (let start = 0; start < pairsToFetch; start += batchSize) {
-        const end = Math.min(start + batchSize, pairsToFetch);
-        const indices = Array.from({ length: end - start }, (_, i) => start + i);
-        try {
-          const chunkAddresses = await Promise.all(
-            indices.map((i) => limit(() => factory.allPairs(i)))
-          );
-          pairAddresses.push(...chunkAddresses);
-        } catch (batchErr) {
-          console.warn("Failed to fetch pair-address batch, retrying individually", batchErr);
-          for (const i of indices) {
-            try {
-              pairAddresses.push(await limit(() => factory.allPairs(i)));
-            } catch {
-              continue;
-            }
-          }
-        }
+      const explorerApiBase = explorerApiBaseFromTxUrl(contracts.explorer);
+      if (!explorerApiBase) {
+        throw new Error("Could not derive explorer API base URL");
       }
 
-      console.log("Got all pair addresses:", pairAddresses.length);
+      const discovered = await discoverV2PositionsFromExplorer({
+        ownerAddress: address,
+        factoryAddress: contracts.v2.factory,
+        provider,
+        knownTokens: tokens,
+        apiBaseUrl: explorerApiBase,
+        maxConcurrent: 10,
+      });
 
-      // Check balances in chunks and continue on transient failures
-      const positionsWithBalance: string[] = [];
-      for (let start = 0; start < pairAddresses.length; start += batchSize) {
-        const chunk = pairAddresses.slice(start, start + batchSize);
-        const pairContracts = chunk.map((addr) => new Contract(addr, PAIR_ABI, provider));
-        try {
-          const balances = await Promise.all(pairContracts.map((pair) => pair.balanceOf(address)));
-          for (let i = 0; i < chunk.length; i++) {
-            if (balances[i] > 0n) positionsWithBalance.push(chunk[i]);
-          }
-        } catch (batchErr) {
-          console.warn("Failed to fetch balance batch, retrying individually", batchErr);
-          for (let i = 0; i < chunk.length; i++) {
-            try {
-              const bal = await pairContracts[i].balanceOf(address);
-              if (bal > 0n) positionsWithBalance.push(chunk[i]);
-            } catch {
-              continue;
-            }
-          }
-        }
-      }
+      console.log("Explorer-discovered V2 positions:", discovered.length);
 
-      console.log("Pairs with balance:", positionsWithBalance.length);
-
-      const onChainPositions: V2Position[] = [];
-      const detailBatchSize = 15;
-      for (let start = 0; start < positionsWithBalance.length; start += detailBatchSize) {
-        const chunk = positionsWithBalance.slice(start, start + detailBatchSize);
-        const chunkResults = await Promise.all(
-          chunk.map(async (pairAddress): Promise<V2Position | null> => {
-            try {
-              const pair = new Contract(pairAddress, PAIR_ABI, provider);
-              const [token0Address, token1Address, reserves, totalSupply, liquidity] = await Promise.all([
-                pair.token0(),
-                pair.token1(),
-                pair.getReserves(),
-                pair.totalSupply(),
-                pair.balanceOf(address),
-              ]);
-
-              const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
-              const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
-              const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = await Promise.all([
-                token0Contract.symbol(),
-                token0Contract.decimals(),
-                token1Contract.symbol(),
-                token1Contract.decimals(),
-              ]);
-
-              const r0 = BigInt(reserves.reserve0);
-              const r1 = BigInt(reserves.reserve1);
-              const amount0 = (liquidity * r0) / totalSupply;
-              const amount1 = (liquidity * r1) / totalSupply;
-
-              return {
-                pairAddress,
-                token0Address,
-                token0Symbol,
-                token0Decimals: Number(token0Decimals),
-                token1Address,
-                token1Symbol,
-                token1Decimals: Number(token1Decimals),
-                liquidity,
-                amount0,
-                amount1,
-              };
-            } catch (e) {
-              console.warn(`Failed to process V2 pair ${pairAddress}`, e);
-              return null;
-            }
-          })
-        );
-
-        for (const pos of chunkResults) {
-          if (pos) onChainPositions.push(pos);
-        }
-      }
+      const onChainPositions: V2Position[] = discovered.map((pos) => ({
+        pairAddress: pos.pairAddress,
+        token0Address: pos.token0Address,
+        token0Symbol: pos.token0Symbol,
+        token0Decimals: pos.token0Decimals,
+        token1Address: pos.token1Address,
+        token1Symbol: pos.token1Symbol,
+        token1Decimals: pos.token1Decimals,
+        liquidity: pos.liquidity,
+        amount0: pos.amount0,
+        amount1: pos.amount1,
+      }));
 
       // FIX 1: Merge on-chain positions with imported ones (deduplicated)
       const merged = [
@@ -319,6 +217,10 @@ export function RemoveLiquidityV2() {
       setPositions(merged);
       console.log("Found V2 positions:", merged.length);
 
+      if (merged.length === 0) {
+        setSelectedPosition(null);
+      }
+
       // FIX 5: Use ref to guard auto-select, no stale closure
       if (merged.length > 0 && !hasAutoSelected.current) {
         setSelectedPosition(merged[0]);
@@ -326,10 +228,15 @@ export function RemoveLiquidityV2() {
       }
     } catch (error) {
       console.error("Failed to load V2 positions:", error);
+      toast({
+        title: "Failed to load positions",
+        description: "Could not fetch V2 positions from explorer API",
+        variant: "destructive",
+      });
     } finally {
       setIsLoading(false);
     }
-  }, [address, contracts, chainId]); // selectedPosition intentionally NOT here — use ref instead
+  }, [address, contracts, chainId, tokens, toast]); // selectedPosition intentionally NOT here — use ref instead
 
   // FIX 6: loadPositions added to dep array
   useEffect(() => {
