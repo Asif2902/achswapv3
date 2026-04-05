@@ -864,7 +864,7 @@ export default function Bridge() {
         
         setTransfer(prev => ({ ...prev, step: "minting", attestation: fetchedAttestation }));
         
-        await executeMint(destChain, fetchedAttestation, txHash, "0");
+        await executeMint(destChain, fetchedAttestation, txHash, amount);
       }
 
     } catch (err: any) {
