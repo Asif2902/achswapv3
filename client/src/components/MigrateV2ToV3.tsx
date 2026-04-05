@@ -42,6 +42,7 @@ const V2_PAIR_ABI = [
 ];
 
 const MIGRATION_SLIPPAGE_BPS = 100n; // 1%
+const MIGRATION_SLIPPAGE_BPS_RETRY = 300n; // 3% fallback for volatile pools
 const MIN_SQRT_RATIO = 4295128739n;
 const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
 
@@ -411,6 +412,12 @@ export function MigrateV2ToV3() {
         amount1Min: applySlippageMin(expectedAmount1),
       };
 
+      const mediumParams = {
+        ...baseMigrateParams,
+        amount0Min: applySlippageMin(expectedAmount0, MIGRATION_SLIPPAGE_BPS_RETRY),
+        amount1Min: applySlippageMin(expectedAmount1, MIGRATION_SLIPPAGE_BPS_RETRY),
+      };
+
       const relaxedParams = {
         ...baseMigrateParams,
         amount0Min: 0n,
@@ -434,21 +441,34 @@ export function MigrateV2ToV3() {
         return tx.wait();
       };
 
+      const useFlexibleFromStart = Boolean(priceWarningConfirmed || !v3PoolInfo?.exists);
       let receipt;
       try {
-        receipt = await executeMigration(strictParams);
+        receipt = await executeMigration(useFlexibleFromStart ? relaxedParams : strictParams);
       } catch (error) {
-        const canRelaxMins = Boolean(priceWarningConfirmed || !v3PoolInfo?.exists);
-        if (!canRelaxMins || !isPriceSlippageCheckError(error)) {
+        if (!isPriceSlippageCheckError(error) || useFlexibleFromStart) {
           throw error;
         }
 
         toast({
           title: "Retrying migration",
-          description: "Price moved; retrying with flexible min amounts",
+          description: "Price moved; retrying with wider slippage window",
         });
 
-        receipt = await executeMigration(relaxedParams);
+        try {
+          receipt = await executeMigration(mediumParams);
+        } catch (mediumError) {
+          if (!isPriceSlippageCheckError(mediumError) || !priceWarningConfirmed) {
+            throw mediumError;
+          }
+
+          toast({
+            title: "Retrying migration",
+            description: "Final retry with flexible min amounts",
+          });
+
+          receipt = await executeMigration(relaxedParams);
+        }
       }
 
       setSelectedPosition(null);
