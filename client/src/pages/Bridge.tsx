@@ -1094,7 +1094,8 @@ export default function Bridge() {
       // Invalid input (e.g. trailing dot) — don't flag as insufficient
     }
   }
-  const canBridge = isConnected && amount && parsedAmount > 0 && !isTransferring && !insufficientBalance;
+  const isArcSource = sourceChain.name.includes("Arc");
+  const canBridge = isConnected && amount && parsedAmount > 0 && !isTransferring && !insufficientBalance && !isArcSource;
   const estimatedTime = (useFastTransfer && sourceChain.supportsFastTransfer) ? "~8-20 seconds" : "~15-19 minutes";
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1417,6 +1418,8 @@ export default function Bridge() {
                     <><span className="br-spin" />Bridging...</>
                   ) : insufficientBalance ? (
                     <><AlertTriangle style={{ width: 18, height: 18 }} />Insufficient USDC Balance</>
+                  ) : isArcSource ? (
+                    <><AlertTriangle style={{ width: 18, height: 18 }} />Arc CCTP is down, can't transfer</>
                   ) : transfer.step === "complete" ? (
                     <><Check style={{ width: 18, height: 18 }} />Bridge Again</>
                   ) : (
@@ -1425,6 +1428,19 @@ export default function Bridge() {
                 </button>
               ) : (
                 <button disabled className="br-submit off">Connect Wallet to Bridge</button>
+              )}
+
+              {isArcSource && (
+                <div style={{
+                  marginTop: 10, padding: "10px 14px", borderRadius: 12,
+                  background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)",
+                  display: "flex", alignItems: "flex-start", gap: 8,
+                }}>
+                  <AlertTriangle style={{ width: 14, height: 14, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
+                  <span style={{ fontSize: 11, color: "#fbbf24", lineHeight: 1.5 }}>
+                    Arc Testnet CCTP is currently down. You can bridge from other chains to Arc, but not from Arc to other chains. Circle team is working to restore it.
+                  </span>
+                </div>
               )}
 
               {/* Error message */}

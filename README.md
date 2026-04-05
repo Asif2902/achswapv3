@@ -1,4 +1,4 @@
-# Achswap DEX+RWA
+# Achswap Dex+RWA
 
 A modern decentralized exchange (DEX) frontend built with React, Vite, and Web3 technologies. Achswap supports both Uniswap V2 and V3 style liquidity pools on ARC Testnet.
 
@@ -13,7 +13,6 @@ A modern decentralized exchange (DEX) frontend built with React, Vite, and Web3 
 - **Wrap/Unwrap**: Convert between native USDC and wrapped wUSDC
 - **Transaction History**: Track your recent transactions
 - **Smart Routing**: Automatic best path selection across V2/V3 pools
-
 ## Quick Start
 
 ```bash
@@ -34,7 +33,7 @@ npm run dev
 
 ---
 
-## Environment Setup
+## Environment Setups
 
 Create a `.env` file in the root directory:
 
@@ -190,6 +189,7 @@ The swap interface automatically finds the best route across V2 and V3 pools:
 - View all V2 LP positions
 - One-click migration to V3
 - Automatic approval and liquidity management
+- Fixed Max buttons
 
 ### Gasless Swaps
 - Users can enable "Zap" mode for gasless swaps
