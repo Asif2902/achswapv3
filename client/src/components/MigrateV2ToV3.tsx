@@ -5,7 +5,7 @@ import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider } from "ethers";
-import { getTokensByChainId } from "@/data/tokens";
+import { fetchTokensWithCommunity, getTokensByChainId, getUnwrappedAddress } from "@/data/tokens";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -127,13 +127,85 @@ export function MigrateV2ToV3() {
   const [v3PoolInfo, setV3PoolInfo] = useState<V3PoolInfo | null>(null);
   const [isCheckingPool, setIsCheckingPool] = useState(false);
   const [priceWarningConfirmed, setPriceWarningConfirmed] = useState(false);
+  const [tokens, setTokens] = useState<Token[]>([]);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
-  const tokens = chainId ? getTokensByChainId(chainId) : [];
+
+  useEffect(() => {
+    if (!chainId) {
+      setTokens([]);
+      return;
+    }
+
+    let cancelled = false;
+    const loadTokens = async () => {
+      try {
+        const chainTokens = await fetchTokensWithCommunity(chainId);
+
+        const importedKey = `importedTokens:${chainId}`;
+        let importedTokens: Token[] = [];
+        try {
+          const raw = localStorage.getItem(importedKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            importedTokens = Array.isArray(parsed) ? parsed : [];
+          }
+        } catch {
+          importedTokens = [];
+        }
+
+        const deduped = new Map<string, Token>();
+        for (const token of [...chainTokens, ...importedTokens]) {
+          deduped.set(token.address.toLowerCase(), token);
+        }
+
+        if (!cancelled) {
+          setTokens(Array.from(deduped.values()));
+        }
+      } catch {
+        if (!cancelled) {
+          setTokens(getTokensByChainId(chainId));
+        }
+      }
+    };
+
+    loadTokens();
+    return () => {
+      cancelled = true;
+    };
+  }, [chainId]);
+
+  const getDisplayTokenMeta = useCallback((token: Token) => {
+    const fallbackLogo = token.logoURI || "/img/logos/unknown-token.png";
+    if (!chainId) {
+      return {
+        symbol: getDisplaySymbol(token.symbol),
+        logoURI: fallbackLogo,
+      };
+    }
+
+    const unwrappedAddress = getUnwrappedAddress(chainId, token.address);
+    if (unwrappedAddress) {
+      const unwrappedToken = tokens.find(
+        (t) => t.address.toLowerCase() === unwrappedAddress.toLowerCase(),
+      );
+      if (unwrappedToken) {
+        return {
+          symbol: getDisplaySymbol(unwrappedToken.symbol),
+          logoURI: unwrappedToken.logoURI || fallbackLogo,
+        };
+      }
+    }
+
+    return {
+      symbol: getDisplaySymbol(token.symbol),
+      logoURI: fallbackLogo,
+    };
+  }, [chainId, tokens]);
 
   // ── Check migrator ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -232,22 +304,25 @@ export function MigrateV2ToV3() {
       });
 
       const userPositions: V2Position[] = discovered.map((pos) => {
+        const token0Known = tokens.find((t) => t.address.toLowerCase() === pos.token0Address.toLowerCase());
+        const token1Known = tokens.find((t) => t.address.toLowerCase() === pos.token1Address.toLowerCase());
+
         const token0: Token = {
           address: pos.token0Address,
-          name: pos.token0Name,
-          symbol: pos.token0Symbol,
+          name: token0Known?.name || pos.token0Name,
+          symbol: token0Known?.symbol || pos.token0Symbol,
           decimals: pos.token0Decimals,
-          logoURI: tokens.find((t) => t.address.toLowerCase() === pos.token0Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
+          logoURI: token0Known?.logoURI || "/img/logos/unknown-token.png",
           verified: false,
           chainId,
         };
 
         const token1: Token = {
           address: pos.token1Address,
-          name: pos.token1Name,
-          symbol: pos.token1Symbol,
+          name: token1Known?.name || pos.token1Name,
+          symbol: token1Known?.symbol || pos.token1Symbol,
           decimals: pos.token1Decimals,
-          logoURI: tokens.find((t) => t.address.toLowerCase() === pos.token1Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
+          logoURI: token1Known?.logoURI || "/img/logos/unknown-token.png",
           verified: false,
           chainId,
         };
@@ -447,8 +522,8 @@ export function MigrateV2ToV3() {
             const isSelected = selectedPosition?.pairAddress === position.pairAddress;
             const token0Amount = formatAmount((position.reserve0 * position.lpBalance) / position.totalSupply, position.token0.decimals);
             const token1Amount = formatAmount((position.reserve1 * position.lpBalance) / position.totalSupply, position.token1.decimals);
-            const token0DisplaySymbol = getDisplaySymbol(position.token0.symbol);
-            const token1DisplaySymbol = getDisplaySymbol(position.token1.symbol);
+            const token0Display = getDisplayTokenMeta(position.token0);
+            const token1Display = getDisplayTokenMeta(position.token1);
             const v2Price = isSelected ? getV2Price() : null;
 
             return (
@@ -466,20 +541,20 @@ export function MigrateV2ToV3() {
                   <div className="flex items-center gap-3 px-4 py-3.5">
                     {/* Overlapping logos */}
                     <div className="relative w-10 h-7 flex-shrink-0">
-                      <img src={position.token0.logoURI} alt={position.token0.symbol}
+                      <img src={token0Display.logoURI} alt={token0Display.symbol}
                         className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-0 top-0 z-10"
                         onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                       />
-                      <img src={position.token1.logoURI} alt={position.token1.symbol}
+                      <img src={token1Display.logoURI} alt={token1Display.symbol}
                         className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-4 top-0"
                         onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                       />
                     </div>
 
                     <div className="flex-1 min-w-0 pl-1">
-                      <p className="font-bold text-sm">{token0DisplaySymbol}/{token1DisplaySymbol}</p>
+                      <p className="font-bold text-sm">{token0Display.symbol}/{token1Display.symbol}</p>
                       <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                        {parseFloat(token0Amount).toFixed(4)} {token0DisplaySymbol} + {parseFloat(token1Amount).toFixed(4)} {token1DisplaySymbol}
+                        {parseFloat(token0Amount).toFixed(4)} {token0Display.symbol} + {parseFloat(token1Amount).toFixed(4)} {token1Display.symbol}
                       </p>
                     </div>
 
@@ -675,12 +750,12 @@ export function MigrateV2ToV3() {
                           {/* V2 side */}
                           <div className="flex-1 min-w-0">
                             <p className="text-[10px] text-muted-foreground mb-1">From V2</p>
-                            <p className="text-xs font-semibold">{token0DisplaySymbol}/{token1DisplaySymbol}</p>
+                            <p className="text-xs font-semibold">{token0Display.symbol}/{token1Display.symbol}</p>
                             <p className="text-[10px] text-muted-foreground mt-0.5 truncate">
-                              {getTokenAmount(position.reserve0, position.token0.decimals)} {token0DisplaySymbol}
+                              {getTokenAmount(position.reserve0, position.token0.decimals)} {token0Display.symbol}
                             </p>
                             <p className="text-[10px] text-muted-foreground truncate">
-                              {getTokenAmount(position.reserve1, position.token1.decimals)} {token1DisplaySymbol}
+                              {getTokenAmount(position.reserve1, position.token1.decimals)} {token1Display.symbol}
                             </p>
                           </div>
 
@@ -694,7 +769,7 @@ export function MigrateV2ToV3() {
                           {/* V3 side */}
                           <div className="flex-1 min-w-0 text-left sm:text-right">
                             <p className="text-[10px] text-muted-foreground mb-1">To V3</p>
-                            <p className="text-xs font-semibold">{token0DisplaySymbol}/{token1DisplaySymbol}</p>
+                            <p className="text-xs font-semibold">{token0Display.symbol}/{token1Display.symbol}</p>
                             <p className="text-[10px] text-indigo-400 mt-0.5">
                               {FEE_TIER_LABELS[selectedFee as keyof typeof FEE_TIER_LABELS]} fee
                             </p>
