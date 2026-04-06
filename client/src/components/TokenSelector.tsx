@@ -62,7 +62,6 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(new Set());
   const [resetHoldingKey, setResetHoldingKey] = useState(0);
   const [balancesReady, setBalancesReady] = useState(false);
-  const [communityBalancesReady, setCommunityBalancesReady] = useState(false);
   const [initialRenderMode, setInitialRenderMode] = useState(true);
   const communityFetchStartedRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -88,7 +87,6 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       setMounted(true);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
       setBalancesReady(false);
-      setCommunityBalancesReady(false);
       setInitialRenderMode(true);
       window.setTimeout(() => {
         if (!cancelled) {
@@ -163,11 +161,6 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
               setCommunityTokens(rows);
             });
 
-            window.setTimeout(() => {
-              if (!cancelled) {
-                setCommunityBalancesReady(true);
-              }
-            }, 220);
           }
         })
         .finally(() => {
@@ -363,7 +356,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
   const totalCount = tokens.length + filteredCommunityTokens.length;
   const showRowBalances = showBalances && balancesReady;
-  const showCommunityBalances = showRowBalances && communityBalancesReady && !loadingCommunity;
+  const showCommunityBalances = showRowBalances;
   const hasRecentSection = filteredRecent.length > 0;
 
   return (
