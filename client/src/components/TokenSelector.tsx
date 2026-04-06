@@ -9,6 +9,7 @@ import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
 const MAX_RENDER_ITEMS_PER_SECTION = 80;
 const INITIAL_RENDER_ITEMS_PER_SECTION = 8;
 const MAX_RENDER_COMMUNITY_ITEMS = 30;
+const BALANCE_QUERY_BATCH_SIZE = 12;
 const communityTokenCache = new Map<number, CommunityToken[]>();
 const communityTokenInFlight = new Map<number, Promise<CommunityToken[]>>();
 
@@ -63,6 +64,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [resetHoldingKey, setResetHoldingKey] = useState(0);
   const [balancesReady, setBalancesReady] = useState(false);
   const [initialRenderMode, setInitialRenderMode] = useState(true);
+  const [balanceBatchIndex, setBalanceBatchIndex] = useState(0);
   const communityFetchStartedRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
@@ -88,6 +90,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
       setBalancesReady(false);
       setInitialRenderMode(true);
+      setBalanceBatchIndex(0);
       window.setTimeout(() => {
         if (!cancelled) {
           setInitialRenderMode(false);
@@ -116,6 +119,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     } else {
       setVisible(false);
       communityFetchStartedRef.current = false;
+      setBalanceBatchIndex(0);
       setResetHoldingKey(k => k + 1);
       const t = setTimeout(() => {
         setMounted(false);
@@ -359,6 +363,45 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const showCommunityBalances = showRowBalances;
   const hasRecentSection = filteredRecent.length > 0;
 
+  let absoluteRowIndex = 0;
+  const shouldShowBalanceForCurrentRow = (enabled: boolean) => {
+    const allow = enabled && absoluteRowIndex < (balanceBatchIndex + 1) * BALANCE_QUERY_BATCH_SIZE;
+    absoluteRowIndex += 1;
+    return allow;
+  };
+
+  useEffect(() => {
+    if (!open || !showBalances || !balancesReady) return;
+
+    const tokenRowsCount =
+      filteredFavorites.length +
+      filteredRecent.length +
+      filteredVerified.length +
+      filteredRWA.length +
+      filteredImported.length +
+      filteredCommunity.length;
+
+    const maxBatch = Math.max(0, Math.ceil(tokenRowsCount / BALANCE_QUERY_BATCH_SIZE) - 1);
+    if (balanceBatchIndex >= maxBatch) return;
+
+    const timer = window.setTimeout(() => {
+      setBalanceBatchIndex((prev) => Math.min(prev + 1, maxBatch));
+    }, 120);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    open,
+    showBalances,
+    balancesReady,
+    balanceBatchIndex,
+    filteredFavorites.length,
+    filteredRecent.length,
+    filteredVerified.length,
+    filteredRWA.length,
+    filteredImported.length,
+    filteredCommunity.length,
+  ]);
+
   return (
     <>
       {/* Backdrop */}
@@ -535,7 +578,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
-                    showBalance={showRowBalances}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
                     isFavorite
                     onToggleFavorite={() => onToggleFavorite?.(token)}
                   />
@@ -559,7 +602,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
-                    showBalance={showRowBalances}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
                     isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
                     onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
@@ -583,7 +626,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
-                    showBalance={showRowBalances}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
                     isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
                     onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
@@ -607,7 +650,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
-                    showBalance={showRowBalances}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
                     showRwaBadge
                     isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
                     onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
@@ -632,7 +675,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
-                    showBalance={showRowBalances}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
                     onDelete={onDelete}
                     resetHolding={resetHoldingKey}
                     isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
@@ -665,7 +708,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                       userAddress={userAddress}
                       index={i}
                       onClick={() => handleSelect(token)}
-                      showBalance={showCommunityBalances}
+                      showBalance={shouldShowBalanceForCurrentRow(showCommunityBalances)}
                       onDelete={handleDeleteCommunity}
                       resetHolding={resetHoldingKey}
                       isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
