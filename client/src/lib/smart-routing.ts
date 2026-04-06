@@ -13,6 +13,57 @@ const V2_ROUTER_ABI = [
 
 // Native token address (zero address)
 const NATIVE_TOKEN_ADDRESS = "0x0000000000000000000000000000000000000000";
+const V3_QUOTE_CONCURRENCY = 6;
+
+function getProbeAmount(amountIn: bigint): bigint {
+  if (amountIn <= 0n) return 1n;
+
+  const candidate = amountIn / 1000n; // 0.1%
+  const minProbe = amountIn / 10_000n; // 0.01%
+  const maxProbe = amountIn / 10n; // 10%
+
+  const lowerBound = minProbe > 0n ? minProbe : 1n;
+  const upperBound = maxProbe > 0n ? maxProbe : amountIn;
+
+  let probe = candidate;
+  if (probe < lowerBound) probe = lowerBound;
+  if (probe > upperBound) probe = upperBound;
+  if (probe > amountIn) probe = amountIn;
+
+  return probe > 0n ? probe : 1n;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+
+  const normalizedConcurrency = Number.isFinite(concurrency)
+    ? Math.max(1, Math.floor(concurrency))
+    : 1;
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const runners = Array.from(
+    { length: Math.min(normalizedConcurrency, items.length) },
+    async () => {
+      while (true) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= items.length) {
+          return;
+        }
+        results[currentIndex] = await worker(items[currentIndex]);
+      }
+    },
+  );
+
+  await Promise.all(runners);
+  return results;
+}
 
 function hasAdjacentDuplicateAddresses(path: string[]): boolean {
   for (let i = 0; i < path.length - 1; i++) {
@@ -184,15 +235,7 @@ export async function getV2Quote(
     const directPath = buildV2Path(fromToken, toToken, wrappedTokenAddress);
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
-    const MIN = 10_000n;
-    const MAX = 10_000_000_000n;
-    const testIn = amountIn > 0n
-      ? (() => {
-          const probeCandidate = amountIn / 1000n;
-          const bounded = probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
-          return bounded > amountIn ? amountIn : bounded;
-        })()
-      : MIN;
+    const testIn = getProbeAmount(amountIn);
 
     const calcV2Impact = (spotOut: bigint, outputAmount: bigint): number => {
       if (spotOut === 0n) return Number.NaN;
@@ -304,15 +347,7 @@ export async function getV3Quote(
     const fromERC20 = getERC20Address(fromToken.address, wrappedTokenAddress);
     const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
 
-    const MIN = 10_000n;
-    const MAX = 10_000_000_000n;
-    const testIn = amountIn > 0n
-      ? (() => {
-          const probeCandidate = amountIn / 1000n;
-          const bounded = probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
-          return bounded > amountIn ? amountIn : bounded;
-        })()
-      : MIN;
+    const testIn = getProbeAmount(amountIn);
 
     const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number => {
       if (spotOut === 0n) return Number.NaN;
@@ -321,8 +356,8 @@ export async function getV3Quote(
       return Number((num * 10000n) / (spotOut * amountIn)) / 100;
     };
 
-    // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────
-    const singleHopPromises = feeTiers.map(async (fee) => {
+    // ── Single-hop: capped concurrency across fee tiers ────────────────────────
+    const singleHopResults = await mapWithConcurrency(feeTiers, V3_QUOTE_CONCURRENCY, async (fee) => {
       try {
         const actualResult = await quoteWithRetry(() =>
           quoter.quoteExactInputSingle.staticCall({
@@ -358,7 +393,10 @@ export async function getV3Quote(
         )
       : [];
 
-    const multiHopPromises = multiHopCandidates.map(async ({ fee1, fee2, path }) => {
+    const multiHopResults = await mapWithConcurrency(
+      multiHopCandidates,
+      V3_QUOTE_CONCURRENCY,
+      async ({ fee1, fee2, path }) => {
       try {
         const actualResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(path, amountIn));
         return {
@@ -371,13 +409,8 @@ export async function getV3Quote(
       } catch {
         return null;
       }
-    });
-
-    // Run both in parallel
-    const [singleHopResults, multiHopResults] = await Promise.all([
-      Promise.all(singleHopPromises),
-      Promise.all(multiHopPromises),
-    ]);
+      },
+    );
 
     // Find best single-hop
     let bestSingle: {

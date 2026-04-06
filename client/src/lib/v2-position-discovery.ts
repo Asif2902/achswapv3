@@ -203,9 +203,6 @@ async function fetchTokenBalancesFromExplorer(
       tokenBalancesInFlight.delete(key);
     });
 
-  if (tokenBalancesInFlight.has(key)) {
-    tokenBalancesInFlight.delete(key);
-  }
   tokenBalancesInFlight.set(key, request);
   capInFlightEntries();
   return request;
@@ -460,7 +457,9 @@ export async function discoverV2PositionsFromExplorer(params: {
     } catch (fallbackErr) {
       if (discoveredByPair.size === 0) {
         const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-        const explorerMessage = explorerErr?.message ?? String(explorerErr);
+        const explorerMessage = explorerErr
+          ? explorerErr.message
+          : "no error (explorer returned no positions)";
         throw new Error(
           `V2 discovery failed (token-balances + RPC fallback scan). Explorer: ${explorerMessage}; Fallback: ${fallbackMessage}`,
         );
