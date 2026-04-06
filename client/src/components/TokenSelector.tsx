@@ -527,7 +527,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                       onDelete={handleDeleteCommunity}
                       resetHolding={resetHoldingKey}
                       isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
-                      onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token as any) : undefined}
+                      onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                     />
                   ))
                 )}

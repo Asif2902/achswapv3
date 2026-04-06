@@ -30,6 +30,8 @@ export function AddLiquidityV2() {
   const [showTokenASelector, setShowTokenASelector] = useState(false);
   const [showTokenBSelector, setShowTokenBSelector] = useState(false);
   const [tokens, setTokens] = useState<Token[]>([]);
+  const [recentTokens, setRecentTokens] = useState<Token[]>([]);
+  const [favoriteTokens, setFavoriteTokens] = useState<Token[]>([]);
   const [isAdding, setIsAdding] = useState(false);
   const [pairExists, setPairExists] = useState(false);
   const [reserveA, setReserveA] = useState<bigint>(0n);
@@ -72,6 +74,69 @@ export function AddLiquidityV2() {
     maxAmountBWeiRef.current = null;
   }, [chainId]);
 
+  useEffect(() => {
+    if (!chainId) {
+      setRecentTokens([]);
+      setFavoriteTokens([]);
+      return;
+    }
+
+    try {
+      const recentKey = `recentTokens:${chainId}`;
+      const storedRecent = localStorage.getItem(recentKey);
+      if (!storedRecent) {
+        setRecentTokens([]);
+      } else {
+        const parsedRecent: unknown = JSON.parse(storedRecent);
+        const validRecent = Array.isArray(parsedRecent)
+          ? parsedRecent.filter((item): item is Token => {
+              if (!item || typeof item !== "object") return false;
+              const candidate = item as Partial<Token>;
+              return typeof candidate.address === "string" && candidate.address.length > 0;
+            })
+          : [];
+        setRecentTokens(validRecent);
+      }
+    } catch {
+      setRecentTokens([]);
+    }
+
+    try {
+      const favoriteKey = `favoriteTokens:${chainId}`;
+      const storedFavorites = localStorage.getItem(favoriteKey);
+      if (!storedFavorites) {
+        setFavoriteTokens([]);
+      } else {
+        const parsedFavorites = JSON.parse(storedFavorites);
+        setFavoriteTokens(Array.isArray(parsedFavorites) ? parsedFavorites : []);
+      }
+    } catch {
+      setFavoriteTokens([]);
+    }
+  }, [chainId]);
+
+  const addRecentToken = (token: Token) => {
+    if (!chainId) return;
+    setRecentTokens((prev) => {
+      const filtered = prev.filter((item) => item.address.toLowerCase() !== token.address.toLowerCase());
+      const updated = [token, ...filtered].slice(0, 5);
+      localStorage.setItem(`recentTokens:${chainId}`, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const toggleFavoriteToken = (token: Token) => {
+    if (!chainId) return;
+    setFavoriteTokens((prev) => {
+      const exists = prev.some((item) => item.address.toLowerCase() === token.address.toLowerCase());
+      const updated = exists
+        ? prev.filter((item) => item.address.toLowerCase() !== token.address.toLowerCase())
+        : [...prev, token];
+      localStorage.setItem(`favoriteTokens:${chainId}`, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
   const getSafeMaxInput = (balanceWei: bigint, token: Token, isNative: boolean) => {
     let safeWei = balanceWei;
     if (isCanonicalUSDC(token) || isNative) {
@@ -97,7 +162,7 @@ export function AddLiquidityV2() {
   useEffect(() => {
     const checkPairExists = async () => {
       if (!tokenA || !tokenB || !window.ethereum) {
-        setPairExists(false); setReserveA(0n); setReserveB(0n); return;
+        setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return;
       }
 
       const wrappedToken = getWUSDC(chainId);
@@ -116,7 +181,7 @@ export function AddLiquidityV2() {
 
       setIsLoadingPair(true);
       try {
-        if (!contracts) return;
+        if (!contracts) { setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return; }
         const provider = new BrowserProvider(window.ethereum);
         const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
         if (!wrappedAddress) { setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return; }
@@ -829,11 +894,15 @@ export function AddLiquidityV2() {
         onSelect={token => {
           maxAmountAWeiRef.current = null;
           maxAmountBWeiRef.current = null;
+          addRecentToken(token);
           setTokenA(token);
           setShowTokenASelector(false);
         }}
         tokens={tokens.filter(t => !isRWAToken(t))}
         onImport={handleImportToken}
+        recentTokens={recentTokens.filter(t => !isRWAToken(t))}
+        favoriteTokens={favoriteTokens.filter(t => !isRWAToken(t))}
+        onToggleFavorite={toggleFavoriteToken}
       />
       <TokenSelector
         open={showTokenBSelector}
@@ -841,11 +910,15 @@ export function AddLiquidityV2() {
         onSelect={token => {
           maxAmountAWeiRef.current = null;
           maxAmountBWeiRef.current = null;
+          addRecentToken(token);
           setTokenB(token);
           setShowTokenBSelector(false);
         }}
         tokens={tokens.filter(t => !isRWAToken(t))}
         onImport={handleImportToken}
+        recentTokens={recentTokens.filter(t => !isRWAToken(t))}
+        favoriteTokens={favoriteTokens.filter(t => !isRWAToken(t))}
+        onToggleFavorite={toggleFavoriteToken}
       />
     </>
   );

@@ -27,6 +27,11 @@ import {
   type PendingBridgeTransfer,
 } from "@/lib/bridge-transfers";
 
+const TOKEN_MESSENGER_V2_INTERFACE = new Interface([
+  "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)",
+  "event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)",
+]);
+
 // ── Transfer status steps ────────────────────────────────────────────────────
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "complete" | "error";
 
@@ -725,28 +730,104 @@ export default function Bridge() {
         throw new Error(`Transaction was not made by your connected wallet. Please use the wallet that made the burn transaction.`);
       }
 
-      // Get receipt for amount
+      const expectedDepositMethod = TOKEN_MESSENGER_V2_INTERFACE.getFunction("depositForBurn")
+        ?.selector
+        ?.toLowerCase();
+      if (!expectedDepositMethod || !tx.data || tx.data.slice(0, 10).toLowerCase() !== expectedDepositMethod) {
+        throw new Error("Transaction is not a CCTP depositForBurn transaction");
+      }
+
+      const expectedTokenMessenger = manualClaimSourceChain.tokenMessengerV2.toLowerCase();
+      if (!tx.to || tx.to.toLowerCase() !== expectedTokenMessenger) {
+        throw new Error("Transaction was not sent to the chain's TokenMessengerV2 contract");
+      }
+
+      // Get receipt for amount and success validation
       const receipt = await provider.getTransactionReceipt(txHash);
-      let amount = "0";
-      
-      // Try to get amount from transaction input data first (depositForBurn function)
-      if (tx.data && tx.data.length > 10) {
-        try {
-          // depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)
-          // Function selector (4 bytes) + encoded params
-          const funcSig = tx.data.slice(0, 10);
-          if (funcSig === "0x1b3e3db4") { // depositForBurn
-            const amountArg = tx.data.slice(10, 74); // 64 bytes for uint256
-            if (amountArg && amountArg.length === 64) {
-              const amountWei = BigInt('0x' + amountArg);
-              if (amountWei > 0n) {
-                amount = (Number(amountWei) / 1000000).toString();
-              }
-            }
+      if (!receipt || receipt.status !== 1) {
+        throw new Error("Burn transaction failed on-chain");
+      }
+
+      let decodedDepositForBurn:
+        | {
+            amount: bigint;
+            destinationDomain: number;
           }
-        } catch (e) {
-          console.log("Could not parse amount from tx data:", e);
+        | null = null;
+      try {
+        const parsedTx = TOKEN_MESSENGER_V2_INTERFACE.parseTransaction({ data: tx.data, value: tx.value ?? 0n });
+        if (parsedTx && parsedTx.name === "depositForBurn") {
+          decodedDepositForBurn = {
+            amount: parsedTx.args[0] as bigint,
+            destinationDomain: Number(parsedTx.args[1]),
+          };
         }
+      } catch {
+        decodedDepositForBurn = null;
+      }
+
+      if (!decodedDepositForBurn || decodedDepositForBurn.amount <= 0n) {
+        throw new Error("Unable to decode burn transaction amount");
+      }
+
+      const depositForBurnEvent = TOKEN_MESSENGER_V2_INTERFACE.getEvent("DepositForBurn");
+      if (!depositForBurnEvent) {
+        throw new Error("DepositForBurn event definition unavailable");
+      }
+      const depositForBurnTopic = depositForBurnEvent.topicHash;
+      const burnEvent = receipt.logs.find((log) => {
+        if (log.address.toLowerCase() !== expectedTokenMessenger) return false;
+        if (!log.topics || log.topics.length === 0) return false;
+        return log.topics[0].toLowerCase() === depositForBurnTopic.toLowerCase();
+      });
+
+      if (!burnEvent) {
+        throw new Error("No TokenMessengerV2 DepositForBurn event found for this transaction");
+      }
+
+      let parsedBurnEvent:
+        | {
+            amount: bigint;
+            depositor: string;
+            destinationDomain: number;
+          }
+        | null = null;
+      try {
+        const parsed = TOKEN_MESSENGER_V2_INTERFACE.parseLog({
+          topics: burnEvent.topics,
+          data: burnEvent.data,
+        });
+        if (parsed && parsed.name === "DepositForBurn") {
+          parsedBurnEvent = {
+            amount: parsed.args.amount as bigint,
+            depositor: String(parsed.args.depositor),
+            destinationDomain: Number(parsed.args.destinationDomain),
+          };
+        }
+      } catch {
+        parsedBurnEvent = null;
+      }
+
+      if (!parsedBurnEvent) {
+        throw new Error("Failed to parse DepositForBurn event");
+      }
+
+      if (parsedBurnEvent.depositor.toLowerCase() !== address.toLowerCase()) {
+        throw new Error("Burn event depositor does not match connected wallet");
+      }
+      if (parsedBurnEvent.amount !== decodedDepositForBurn.amount) {
+        throw new Error("Burn event amount does not match transaction input");
+      }
+      if (parsedBurnEvent.destinationDomain !== decodedDepositForBurn.destinationDomain) {
+        throw new Error("Burn event destination domain does not match transaction input");
+      }
+
+      let amount = "0";
+
+      try {
+        amount = (Number(decodedDepositForBurn.amount) / 1000000).toString();
+      } catch {
+        amount = "0";
       }
       
       // If still 0, try parsing logs for USDC Transfer (Transfer single from ERC1155 or Transfer from ERC20)
@@ -897,11 +978,12 @@ export default function Bridge() {
             ? getChainByDomain(fetchedAttestationResult.destinationDomain)
             : undefined;
 
-        if (!resolvedDestChain) {
-          updateTransferStatus(txHash, {
-            status: "failed",
+      if (!resolvedDestChain) {
+        updateTransferStatus(txHash, {
+            status: "attesting",
             error: "Attestation did not provide a valid destination chain",
           });
+          setTransfer(prev => ({ ...prev, step: "error", error: "Attestation did not provide a valid destination chain" }));
 
           toast({
             title: "Destination unresolved",
@@ -946,6 +1028,11 @@ export default function Bridge() {
 
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
+      updateTransferStatus(txHash, {
+        status: "attesting",
+        error: msg,
+      });
+      setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({ title: "Claim Failed", description: msg, variant: "destructive" });
     } finally {
       setManualClaimLoading(false);

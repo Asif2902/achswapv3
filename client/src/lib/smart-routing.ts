@@ -23,6 +23,11 @@ function hasAdjacentDuplicateAddresses(path: string[]): boolean {
   return false;
 }
 
+function isSameAssetPath(path: string[]): boolean {
+  if (path.length < 2) return false;
+  return path[0].toLowerCase() === path[path.length - 1].toLowerCase();
+}
+
 function isTransientError(error: unknown): boolean {
   if (!error) return false;
 
@@ -48,25 +53,6 @@ function isTransientError(error: unknown): boolean {
     maybeError.error?.status;
   const status = typeof statusRaw === "number" ? statusRaw : Number.NaN;
 
-  if ([408, 429, 500, 502, 503, 504].includes(status)) {
-    return true;
-  }
-
-  if (
-    code === "ETIMEDOUT" ||
-    code === "ECONNRESET" ||
-    code === "ECONNABORTED" ||
-    code === "EAI_AGAIN" ||
-    code === "ENOTFOUND" ||
-    code === "SERVER_ERROR" ||
-    code === "TIMEOUT" ||
-    code === "UND_ERR_CONNECT_TIMEOUT" ||
-    code === "UND_ERR_HEADERS_TIMEOUT" ||
-    code === "UND_ERR_BODY_TIMEOUT"
-  ) {
-    return true;
-  }
-
   const message = [
     maybeError.message,
     maybeError.reason,
@@ -85,6 +71,25 @@ function isTransientError(error: unknown): boolean {
     code === "CALL_EXCEPTION"
   ) {
     return false;
+  }
+
+  if ([408, 429, 500, 502, 503, 504].includes(status)) {
+    return true;
+  }
+
+  if (
+    code === "ETIMEDOUT" ||
+    code === "ECONNRESET" ||
+    code === "ECONNABORTED" ||
+    code === "EAI_AGAIN" ||
+    code === "ENOTFOUND" ||
+    code === "SERVER_ERROR" ||
+    code === "TIMEOUT" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_BODY_TIMEOUT"
+  ) {
+    return true;
   }
 
   return (
@@ -195,7 +200,9 @@ export async function getV2Quote(
       return Number((num * 10000n) / (spotOut * amountIn)) / 100;
     };
 
+    const isSameAssetDirectPath = isSameAssetPath(directPath);
     const shouldProbeHopPath =
+      !isSameAssetDirectPath &&
       hopPath.length !== directPath.length &&
       !hasAdjacentDuplicateAddresses(hopPath);
 

@@ -458,6 +458,14 @@ export function RemoveLiquidityV2() {
         (position) => position.pairAddress.toLowerCase() !== removedPairLower,
       );
 
+      setPositions((prev) =>
+        prev.filter((position) => position.pairAddress.toLowerCase() !== removedPairLower),
+      );
+      setSelectedPosition((prev) => {
+        if (!prev) return null;
+        return prev.pairAddress.toLowerCase() === removedPairLower ? null : prev;
+      });
+
       toast({
         title: "Liquidity removed!",
         description: `Removed ${percentage[0]}% of your V2 liquidity`,

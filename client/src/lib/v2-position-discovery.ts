@@ -56,11 +56,14 @@ interface FallbackScanResult {
 }
 
 function createLimiter(maxConcurrent: number) {
+  const normalizedMaxConcurrent = Number.isFinite(maxConcurrent)
+    ? Math.max(1, Math.floor(maxConcurrent))
+    : 1;
   let active = 0;
   const queue: (() => void)[] = [];
 
   return async function run<T>(fn: () => Promise<T>): Promise<T> {
-    if (active >= maxConcurrent) {
+    if (active >= normalizedMaxConcurrent) {
       await new Promise<void>((resolve) => queue.push(resolve));
     }
 
