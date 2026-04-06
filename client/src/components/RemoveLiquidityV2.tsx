@@ -952,7 +952,7 @@ export function RemoveLiquidityV2() {
           setShowTokenASelector(false);
         }}
         tokens={tokens}
-        showBalances={false}
+        showBalances
       />
       <TokenSelector
         open={showTokenBSelector}
@@ -962,7 +962,7 @@ export function RemoveLiquidityV2() {
           setShowTokenBSelector(false);
         }}
         tokens={tokens}
-        showBalances={false}
+        showBalances
       />
     </div>
   );

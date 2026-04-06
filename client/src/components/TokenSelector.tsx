@@ -6,8 +6,33 @@ import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
 import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
 
-const MAX_RENDER_ITEMS_PER_SECTION = 40;
+const MAX_RENDER_ITEMS_PER_SECTION = 80;
 const communityTokenCache = new Map<number, CommunityToken[]>();
+const communityTokenInFlight = new Map<number, Promise<CommunityToken[]>>();
+
+function loadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
+  const cached = communityTokenCache.get(chainId);
+  if (cached) {
+    return Promise.resolve(cached);
+  }
+
+  const inFlight = communityTokenInFlight.get(chainId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = fetchCommunityTokens(chainId)
+    .then((rows) => {
+      communityTokenCache.set(chainId, rows);
+      return rows;
+    })
+    .finally(() => {
+      communityTokenInFlight.delete(chainId);
+    });
+
+  communityTokenInFlight.set(chainId, request);
+  return request;
+}
 
 interface TokenSelectorProps {
   open: boolean;
@@ -34,6 +59,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [loadingCommunity, setLoadingCommunity] = useState(false);
   const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(new Set());
   const [resetHoldingKey, setResetHoldingKey] = useState(0);
+  const [balancesReady, setBalancesReady] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
   const chainId = useChainId();
@@ -50,14 +76,24 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   // Animate in/out
   useEffect(() => {
     let communityFetchTimer: number | null = null;
+    let balanceTimer: number | null = null;
+    let cancelled = false;
 
     if (open) {
       setMounted(true);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
+      setBalancesReady(false);
+      balanceTimer = window.setTimeout(() => {
+        if (!cancelled) {
+          setBalancesReady(true);
+        }
+      }, 180);
+
       const isDesktop = window.matchMedia("(pointer: fine)").matches;
       if (isDesktop) {
         setTimeout(() => inputRef.current?.focus(), 120);
       }
+
       // Fetch community tokens
       if (chainId && !rwaOnly) {
         const cachedCommunity = communityTokenCache.get(chainId);
@@ -68,12 +104,17 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
           // Defer heavy community fetch until after the opening animation frame
           communityFetchTimer = window.setTimeout(() => {
             setLoadingCommunity(true);
-            fetchCommunityTokens(chainId)
+            loadCommunityTokens(chainId)
               .then((rows) => {
-                communityTokenCache.set(chainId, rows);
-                setCommunityTokens(rows);
+                if (!cancelled) {
+                  setCommunityTokens(rows);
+                }
               })
-              .finally(() => setLoadingCommunity(false));
+              .finally(() => {
+                if (!cancelled) {
+                  setLoadingCommunity(false);
+                }
+              });
           }, 120);
         }
       } else if (rwaOnly) {
@@ -89,16 +130,24 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         setImportError("");
       }, 300);
       return () => {
+        cancelled = true;
         if (communityFetchTimer !== null) {
           window.clearTimeout(communityFetchTimer);
+        }
+        if (balanceTimer !== null) {
+          window.clearTimeout(balanceTimer);
         }
         clearTimeout(t);
       };
     }
 
     return () => {
+      cancelled = true;
       if (communityFetchTimer !== null) {
         window.clearTimeout(communityFetchTimer);
+      }
+      if (balanceTimer !== null) {
+        window.clearTimeout(balanceTimer);
       }
     };
   }, [open, chainId, rwaOnly]);
@@ -269,7 +318,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   if (!mounted) return null;
 
   const totalCount = tokens.length + filteredCommunityTokens.length;
-  const showRowBalances = showBalances && !rwaOnly;
+  const showRowBalances = showBalances && !rwaOnly && balancesReady;
 
   return (
     <>

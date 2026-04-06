@@ -923,7 +923,7 @@ export function AddLiquidityV2() {
         recentTokens={filteredRecentTokens}
         favoriteTokens={filteredFavoriteTokens}
         onToggleFavorite={toggleFavoriteToken}
-        showBalances={false}
+        showBalances
       />
       <TokenSelector
         open={showTokenBSelector}
@@ -940,7 +940,7 @@ export function AddLiquidityV2() {
         recentTokens={filteredRecentTokens}
         favoriteTokens={filteredFavoriteTokens}
         onToggleFavorite={toggleFavoriteToken}
-        showBalances={false}
+        showBalances
       />
     </>
   );
