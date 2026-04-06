@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Plus, ExternalLink, RefreshCw, Info, Droplets, AlertTriangle, AlertOctagon } from "lucide-react";
@@ -7,7 +7,7 @@ import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
-import { defaultTokens, getTokensByChainId, isRWAToken, isCanonicalUSDC, getWUSDC } from "@/data/tokens";
+import { defaultTokens, getTokensByChainId, isRWAToken, isCanonicalUSDC, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount, calculateRatio, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -21,6 +21,8 @@ const ERC20_ABI = [
   "function approve(address spender, uint256 amount) returns (bool)",
   "function allowance(address owner, address spender) view returns (uint256)",
 ];
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 export function AddLiquidityV2() {
   const [tokenA, setTokenA] = useState<Token | null>(null);
@@ -172,12 +174,13 @@ export function AddLiquidityV2() {
         setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return;
       }
 
-      const wrappedToken = getWUSDC(chainId);
-      const wrappedAddress = wrappedToken?.address;
+      const wrappedAddress = chainId
+        ? getWrappedAddress(chainId, ZERO_ADDRESS)?.toLowerCase() ?? null
+        : null;
       const normalizeForPairComparison = (tokenAddress: string) => {
         const lower = tokenAddress.toLowerCase();
-        if (lower === "0x0000000000000000000000000000000000000000" && wrappedAddress) {
-          return wrappedAddress.toLowerCase();
+        if (lower === ZERO_ADDRESS && wrappedAddress) {
+          return wrappedAddress;
         }
         return lower;
       };
@@ -192,8 +195,8 @@ export function AddLiquidityV2() {
         const provider = new BrowserProvider(window.ethereum);
         const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
         if (!wrappedAddress) { setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return; }
-        const isTokenANative = tokenA.address === "0x0000000000000000000000000000000000000000";
-        const isTokenBNative = tokenB.address === "0x0000000000000000000000000000000000000000";
+        const isTokenANative = tokenA.address === ZERO_ADDRESS;
+        const isTokenBNative = tokenB.address === ZERO_ADDRESS;
         const tokenAAddress = isTokenANative ? wrappedAddress : tokenA.address;
         const tokenBAddress = isTokenBNative ? wrappedAddress : tokenB.address;
         const pairAddress = await factory.getPair(tokenAAddress, tokenBAddress);
@@ -326,8 +329,8 @@ export function AddLiquidityV2() {
     }
   };
 
-  const isTokenANative = tokenA?.address === "0x0000000000000000000000000000000000000000";
-  const isTokenBNative = tokenB?.address === "0x0000000000000000000000000000000000000000";
+  const isTokenANative = tokenA?.address === ZERO_ADDRESS;
+  const isTokenBNative = tokenB?.address === ZERO_ADDRESS;
 
   const { data: balanceA, refetch: refetchBalanceA } = useBalance({
     address: address as `0x${string}` | undefined,
@@ -342,10 +345,10 @@ export function AddLiquidityV2() {
   const balanceBFormatted = balanceB ? formatAmount(balanceB.value, balanceB.decimals) : "0.00";
 
   const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
-  const wrapped = getWUSDC(chainId);
+  const wrapped = chainId ? getWrappedAddress(chainId, ZERO_ADDRESS) : null;
   const getERC20AddressForCompare = (token: Token) =>
-    token.address.toLowerCase() === "0x0000000000000000000000000000000000000000" && wrapped
-      ? wrapped.address
+    token.address.toLowerCase() === ZERO_ADDRESS && wrapped
+      ? wrapped
       : token.address;
   const sameTokenSelected = !!(
     tokenA &&
@@ -357,6 +360,15 @@ export function AddLiquidityV2() {
   const poolHasLiquidity = pairExists && reserveA > 0n && reserveB > 0n;
   const isNewPool = !pairExists && !sameTokenSelected;
   const isEmptyPool = pairExists && (reserveA === 0n || reserveB === 0n);
+  const filteredTokens = useMemo(() => tokens.filter((t) => !isRWAToken(t)), [tokens]);
+  const filteredRecentTokens = useMemo(
+    () => recentTokens.filter((t) => !isRWAToken(t)),
+    [recentTokens],
+  );
+  const filteredFavoriteTokens = useMemo(
+    () => favoriteTokens.filter((t) => !isRWAToken(t)),
+    [favoriteTokens],
+  );
 
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !amountA || !amountB || parseFloat(amountA) <= 0 || parseFloat(amountB) <= 0) return;
@@ -376,10 +388,10 @@ export function AddLiquidityV2() {
       const amountAMin = (!pairExists || reserveA === 0n || reserveB === 0n) ? 0n : amountADesired * 95n / 100n;
       const amountBMin = (!pairExists || reserveA === 0n || reserveB === 0n) ? 0n : amountBDesired * 95n / 100n;
       const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
-      const wrappedToken = getWUSDC(chainId);
-      if (!wrappedToken?.address) throw new Error("wUSDC token not found");
-      const tokenAAddress = isTokenANative ? wrappedToken.address : tokenA.address;
-      const tokenBAddress = isTokenBNative ? wrappedToken.address : tokenB.address;
+      const wrappedAddress = chainId ? getWrappedAddress(chainId, ZERO_ADDRESS) : null;
+      if (!wrappedAddress) throw new Error("Wrapped native token not found");
+      const tokenAAddress = isTokenANative ? wrappedAddress : tokenA.address;
+      const tokenBAddress = isTokenBNative ? wrappedAddress : tokenB.address;
       toast({ title: "Adding liquidity", description: `Adding ${amountA} ${tokenA.symbol} and ${amountB} ${tokenB.symbol}` });
       let tx;
       if (isTokenANative || isTokenBNative) {
@@ -906,10 +918,10 @@ export function AddLiquidityV2() {
           setTokenA(token);
           setShowTokenASelector(false);
         }}
-        tokens={tokens.filter(t => !isRWAToken(t))}
+        tokens={filteredTokens}
         onImport={handleImportToken}
-        recentTokens={recentTokens.filter(t => !isRWAToken(t))}
-        favoriteTokens={favoriteTokens.filter(t => !isRWAToken(t))}
+        recentTokens={filteredRecentTokens}
+        favoriteTokens={filteredFavoriteTokens}
         onToggleFavorite={toggleFavoriteToken}
       />
       <TokenSelector
@@ -922,10 +934,10 @@ export function AddLiquidityV2() {
           setTokenB(token);
           setShowTokenBSelector(false);
         }}
-        tokens={tokens.filter(t => !isRWAToken(t))}
+        tokens={filteredTokens}
         onImport={handleImportToken}
-        recentTokens={recentTokens.filter(t => !isRWAToken(t))}
-        favoriteTokens={favoriteTokens.filter(t => !isRWAToken(t))}
+        recentTokens={filteredRecentTokens}
+        favoriteTokens={filteredFavoriteTokens}
         onToggleFavorite={toggleFavoriteToken}
       />
     </>

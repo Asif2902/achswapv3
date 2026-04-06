@@ -667,12 +667,13 @@ export async function getRWAQuote(
         return null;
       }
       const fee = result[1];
+      const netUsdc = result[2];
       const price = result[3];
       const isStale = result[4];
 
       // Price impact is 0 for vault swaps (no slippage from pool depth, only fee)
       // But we show fee impact for transparency
-      const priceImpact = amountIn > 0n ? Number((fee * 10000n) / amountIn) / 100 : 0;
+      const priceImpact = netUsdc > 0n ? Number((fee * 10000n) / netUsdc) / 100 : 0;
 
       return {
         protocol: "RWA",
@@ -699,11 +700,12 @@ export async function getRWAQuote(
         return null;
       }
       const fee = result[1];
+      const grossUsdc = result[2];
       const price = result[3];
       const isStale = result[4];
       const reserveOk = result[5];
 
-      const priceImpact = usdcOut > 0n ? Number((fee * 10000n) / (usdcOut + fee)) / 100 : 0;
+      const priceImpact = grossUsdc > 0n ? Number((fee * 10000n) / grossUsdc) / 100 : 0;
 
       return {
         protocol: "RWA",

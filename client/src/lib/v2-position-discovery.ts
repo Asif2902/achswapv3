@@ -398,8 +398,10 @@ export async function discoverV2PositionsFromExplorer(params: {
   const explorerDiscovered = await discoverValidatedPositions(uniqueCandidates);
   addDiscovered(explorerDiscovered);
 
-  if (explorerDiscovered.length === 0 && retryWithFallbackScan && explorerErr) {
-    console.warn("[V2 discovery] Explorer API failed, retrying with RPC fallback scan", explorerErr);
+  if (explorerDiscovered.length === 0 && retryWithFallbackScan) {
+    if (explorerErr) {
+      console.warn("[V2 discovery] Explorer API failed, retrying with RPC fallback scan", explorerErr);
+    }
     try {
       const fallbackCandidates = await collectV2CandidatesWithRpcScan(
         ownerAddress,
@@ -412,7 +414,7 @@ export async function discoverV2PositionsFromExplorer(params: {
     } catch (fallbackErr) {
       if (discoveredByPair.size === 0) {
         const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
-        const explorerMessage = explorerErr.message;
+        const explorerMessage = explorerErr?.message ?? String(explorerErr);
         throw new Error(
           `V2 discovery failed (token-balances + RPC fallback scan). Explorer: ${explorerMessage}; Fallback: ${fallbackMessage}`,
         );
