@@ -531,7 +531,15 @@ export function AddLiquidityV3Advanced() {
           : (usedMaxA ? maxAmountA : parseAmount(amountA, token1.decimals));
       }
       else {
-        if (amountBIsAuto && autoCalcAmounts?.forAmountA === amountA && autoCalcAmounts) { amount0Desired = autoCalcAmounts.amount0; amount1Desired = autoCalcAmounts.amount1; }
+        if (!amountBIsAuto) {
+          amount0Desired = isToken0A
+            ? (usedMaxA ? maxAmountA : parseAmount(amountA, token0.decimals))
+            : (usedMaxB ? maxAmountB : parseAmount(amountB, token0.decimals));
+          amount1Desired = isToken0A
+            ? (usedMaxB ? maxAmountB : parseAmount(amountB, token1.decimals))
+            : (usedMaxA ? maxAmountA : parseAmount(amountA, token1.decimals));
+        }
+        else if (amountBIsAuto && autoCalcAmounts?.forAmountA === amountA && autoCalcAmounts) { amount0Desired = autoCalcAmounts.amount0; amount1Desired = autoCalcAmounts.amount1; }
         else if (currentSqrtPriceX96 && ticksValid) {
           try { 
             const inputAmount = usedMaxA ? maxAmountA : parseAmount(amountA, isToken0A ? token0.decimals : token1.decimals); 

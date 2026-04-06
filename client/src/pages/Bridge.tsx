@@ -898,6 +898,11 @@ export default function Bridge() {
             : undefined;
 
         if (!resolvedDestChain) {
+          updateTransferStatus(txHash, {
+            status: "failed",
+            error: "Attestation did not provide a valid destination chain",
+          });
+
           toast({
             title: "Destination unresolved",
             description: "Attestation did not provide a valid destination chain",

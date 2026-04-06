@@ -142,6 +142,7 @@ export function MigrateV2ToV3() {
   const [v3PoolInfo, setV3PoolInfo] = useState<V3PoolInfo | null>(null);
   const [isCheckingPool, setIsCheckingPool] = useState(false);
   const [priceWarningConfirmed, setPriceWarningConfirmed] = useState(false);
+  const [zeroMinConfirmed, setZeroMinConfirmed] = useState(false);
   const [tokens, setTokens] = useState<Token[]>([]);
 
   const { address, isConnected } = useAccount();
@@ -280,6 +281,7 @@ export function MigrateV2ToV3() {
 
     checkV3Pool();
     setPriceWarningConfirmed(false);
+    setZeroMinConfirmed(false);
     return () => {
       cancelled = true;
     };
@@ -299,6 +301,7 @@ export function MigrateV2ToV3() {
 
   const priceDiff = getPriceDifference();
   const showPriceWarning = Boolean(v3PoolInfo?.exists && priceDiff && priceDiff.diff > 2 && !priceWarningConfirmed);
+  const showZeroMinWarning = Boolean(v3PoolInfo && !v3PoolInfo.exists && !zeroMinConfirmed);
 
   // ── Load V2 positions ───────────────────────────────────────────────────────
   const loadPositions = useCallback(async () => {
@@ -355,6 +358,14 @@ export function MigrateV2ToV3() {
       });
 
       setPositions(userPositions);
+      setSelectedPosition((current) => {
+        if (!current) return null;
+        const matchedPosition = userPositions.find(
+          (position) =>
+            position.pairAddress.toLowerCase() === current.pairAddress.toLowerCase(),
+        );
+        return matchedPosition ?? null;
+      });
       if (userPositions.length === 0) {
         setSelectedPosition(null);
       }
@@ -382,11 +393,34 @@ export function MigrateV2ToV3() {
       const pairContract = new Contract(selectedPosition.pairAddress, V2_PAIR_ABI, signer);
       const liquidityToMigrate = (selectedPosition.lpBalance * BigInt(percentToMigrate)) / 100n;
 
+      if (percentToMigrate < 1 || percentToMigrate > 100) {
+        throw new Error("Invalid migration percentage");
+      }
+
+      if (liquidityToMigrate <= 0n) {
+        throw new Error("Selected migration percentage is too small for current LP balance");
+      }
+
+      if (percentToMigrate < 100 && liquidityToMigrate >= selectedPosition.lpBalance) {
+        throw new Error("Migration amount safety check failed");
+      }
+
       toast({ title: "Approving LP tokens…", description: "Please approve LP token spending" });
       const allowance = await pairContract.allowance(address, contracts.v3.migrator);
-      if (allowance < liquidityToMigrate) {
-        const approveTx = await pairContract.approve(contracts.v3.migrator, liquidityToMigrate);
-        await approveTx.wait();
+      if (allowance !== liquidityToMigrate) {
+        try {
+          const approveTx = await pairContract.approve(contracts.v3.migrator, liquidityToMigrate);
+          await approveTx.wait();
+        } catch (approveError) {
+          if (allowance > 0n && liquidityToMigrate > 0n) {
+            const resetTx = await pairContract.approve(contracts.v3.migrator, 0n);
+            await resetTx.wait();
+            const approveTx = await pairContract.approve(contracts.v3.migrator, liquidityToMigrate);
+            await approveTx.wait();
+          } else {
+            throw approveError;
+          }
+        }
       }
 
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
@@ -464,7 +498,8 @@ export function MigrateV2ToV3() {
         return tx.wait();
       };
 
-      const useFlexibleFromStart = Boolean(priceWarningConfirmed || !freshPoolExists);
+      const allowZeroMinFallback = priceWarningConfirmed || (!freshPoolExists && zeroMinConfirmed);
+      const useFlexibleFromStart = Boolean(allowZeroMinFallback);
       let receipt;
       try {
         receipt = await executeMigration(useFlexibleFromStart ? relaxedParams : strictParams);
@@ -481,7 +516,7 @@ export function MigrateV2ToV3() {
         try {
           receipt = await executeMigration(mediumParams);
         } catch (mediumError) {
-          if (!isPriceSlippageCheckError(mediumError) || !priceWarningConfirmed) {
+          if (!isPriceSlippageCheckError(mediumError) || !allowZeroMinFallback) {
             throw mediumError;
           }
 
@@ -497,6 +532,7 @@ export function MigrateV2ToV3() {
       setSelectedPosition(null);
       setV3PoolInfo(null);
       setPriceWarningConfirmed(false);
+      setZeroMinConfirmed(false);
       await loadPositions();
 
       toast({
@@ -820,6 +856,38 @@ export function MigrateV2ToV3() {
                               }}
                             >
                               I understand, proceed anyway
+                            </button>
+                          </div>
+                        </>
+                      )}
+
+                      {showZeroMinWarning && (
+                        <>
+                          <div className="mx-4 h-px bg-border/30" />
+                          <div className="px-4 py-3 space-y-2.5">
+                            <div
+                              className="flex items-start gap-2.5 p-3 rounded-xl"
+                              style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)" }}
+                            >
+                              <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                              <div className="flex-1">
+                                <p className="text-xs font-semibold text-amber-300">New pool uses flexible minimums</p>
+                                <p className="text-[11px] text-amber-400/60 mt-1 leading-relaxed">
+                                  This migration initializes a new V3 pool. By default, strict minimums are used.
+                                  Confirm only if you want to allow a zero-min fallback.
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => setZeroMinConfirmed(true)}
+                              className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
+                              style={{
+                                background: "rgba(245,158,11,0.12)",
+                                border: "1px solid rgba(245,158,11,0.3)",
+                                color: "#fde68a",
+                              }}
+                            >
+                              I understand, allow flexible minimums
                             </button>
                           </div>
                         </>

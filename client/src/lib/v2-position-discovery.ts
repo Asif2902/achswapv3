@@ -113,20 +113,19 @@ async function fetchTokenBalancesFromExplorerNetwork(
           },
           signal: controller.signal,
         });
+        if (!response.ok) {
+          throw new Error(`Explorer API ${response.status} while fetching token balances`);
+        }
+
+        const data = await response.json();
+        if (!Array.isArray(data)) {
+          throw new Error("Explorer token-balances returned an unexpected response shape");
+        }
+
+        return data as ExplorerTokenBalanceItem[];
       } finally {
         clearTimeout(timeoutId);
       }
-
-      if (!response.ok) {
-        throw new Error(`Explorer API ${response.status} while fetching token balances`);
-      }
-
-      const data = await response.json();
-      if (!Array.isArray(data)) {
-        throw new Error("Explorer token-balances returned an unexpected response shape");
-      }
-
-      return data as ExplorerTokenBalanceItem[];
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 350));
@@ -329,7 +328,7 @@ export async function discoverV2PositionsFromExplorer(params: {
 
   const candidateEntries = Array.from(uniqueCandidates.entries());
   const discovered = await Promise.all(
-    candidateEntries.map(([pairAddressLower, liquidity]) =>
+    candidateEntries.map(([pairAddressLower]) =>
       limit(async (): Promise<V2DiscoveredPosition | null> => {
         try {
           const pairAddress = pairAddressLower;
@@ -349,14 +348,15 @@ export async function discoverV2PositionsFromExplorer(params: {
             return null;
           }
 
-          const [reserves, totalSupply, token0Info, token1Info] = await Promise.all([
+          const [reserves, totalSupply, liveLiquidity, token0Info, token1Info] = await Promise.all([
             pair.getReserves(),
             pair.totalSupply(),
+            pair.balanceOf(ownerAddress),
             safeTokenInfo(token0Address, provider, knownTokens),
             safeTokenInfo(token1Address, provider, knownTokens),
           ]);
 
-          if (totalSupply <= 0n || liquidity <= 0n) {
+          if (totalSupply <= 0n || liveLiquidity <= 0n) {
             return null;
           }
 
@@ -365,8 +365,8 @@ export async function discoverV2PositionsFromExplorer(params: {
           const reserve0 = typeof reserve0Raw === "bigint" ? reserve0Raw : BigInt(reserve0Raw.toString());
           const reserve1 = typeof reserve1Raw === "bigint" ? reserve1Raw : BigInt(reserve1Raw.toString());
 
-          const amount0 = (liquidity * reserve0) / totalSupply;
-          const amount1 = (liquidity * reserve1) / totalSupply;
+          const amount0 = (liveLiquidity * reserve0) / totalSupply;
+          const amount1 = (liveLiquidity * reserve1) / totalSupply;
 
           return {
             pairAddress,
@@ -378,7 +378,7 @@ export async function discoverV2PositionsFromExplorer(params: {
             token1Name: token1Info.name,
             token0Decimals: token0Info.decimals,
             token1Decimals: token1Info.decimals,
-            liquidity,
+            liquidity: liveLiquidity,
             totalSupply,
             reserve0,
             reserve1,

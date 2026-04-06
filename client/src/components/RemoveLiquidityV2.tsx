@@ -207,17 +207,16 @@ export function RemoveLiquidityV2() {
         amount1: pos.amount1,
       }));
 
-      // FIX 1: Merge on-chain positions with imported ones (deduplicated)
-      const merged = [
-        ...onChainPositions,
-        ...importedPositionsRef.current.filter(
-          (imp) =>
-            !onChainPositions.find(
-              (p) =>
-                p.pairAddress.toLowerCase() === imp.pairAddress.toLowerCase()
-            )
-        ),
-      ];
+      // Keep imported snapshots only for pools not currently discoverable on-chain
+      const onChainPairSet = new Set(
+        onChainPositions.map((position) => position.pairAddress.toLowerCase()),
+      );
+      const prunedImported = importedPositionsRef.current.filter(
+        (position) => !onChainPairSet.has(position.pairAddress.toLowerCase()),
+      );
+      importedPositionsRef.current = prunedImported;
+
+      const merged = [...onChainPositions, ...prunedImported];
 
       setPositions(merged);
       console.log("Found V2 positions:", merged.length);
@@ -452,6 +451,12 @@ export function RemoveLiquidityV2() {
       }
 
       await tx.wait();
+
+      // Prune imported snapshot for this pair so stale values are not reintroduced
+      const removedPairLower = selectedPosition.pairAddress.toLowerCase();
+      importedPositionsRef.current = importedPositionsRef.current.filter(
+        (position) => position.pairAddress.toLowerCase() !== removedPairLower,
+      );
 
       toast({
         title: "Liquidity removed!",

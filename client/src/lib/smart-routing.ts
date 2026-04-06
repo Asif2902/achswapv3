@@ -3,6 +3,7 @@ import { Token } from "@shared/schema";
 import { QUOTER_V2_ABI, V3_FEE_TIERS } from "./abis/v3";
 import { RWA_VAULT_ABI } from "./abis/rwa";
 import type { RouteHop } from "@/components/PathVisualizer";
+import { isCanonicalUSDC } from "@/data/tokens";
 import { encodePath } from "./v3-utils";
 
 // V2 Router ABI
@@ -13,23 +14,120 @@ const V2_ROUTER_ABI = [
 // Native token address (zero address)
 const NATIVE_TOKEN_ADDRESS = "0x0000000000000000000000000000000000000000";
 
+function hasAdjacentDuplicateAddresses(path: string[]): boolean {
+  for (let i = 0; i < path.length - 1; i++) {
+    if (path[i].toLowerCase() === path[i + 1].toLowerCase()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isTransientError(error: unknown): boolean {
+  if (!error) return false;
+
+  const maybeError = error as {
+    code?: unknown;
+    message?: unknown;
+    reason?: unknown;
+    shortMessage?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+    error?: { code?: unknown; message?: unknown; status?: unknown };
+    info?: { error?: { message?: unknown } };
+  };
+
+  const rawCode = maybeError.code ?? maybeError.error?.code;
+  const code = typeof rawCode === "string" ? rawCode.toUpperCase() : "";
+
+  const statusRaw =
+    maybeError.status ??
+    maybeError.statusCode ??
+    maybeError.response?.status ??
+    maybeError.error?.status;
+  const status = typeof statusRaw === "number" ? statusRaw : Number.NaN;
+
+  if ([408, 429, 500, 502, 503, 504].includes(status)) {
+    return true;
+  }
+
+  if (
+    code === "ETIMEDOUT" ||
+    code === "ECONNRESET" ||
+    code === "ECONNABORTED" ||
+    code === "EAI_AGAIN" ||
+    code === "ENOTFOUND" ||
+    code === "SERVER_ERROR" ||
+    code === "TIMEOUT" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_BODY_TIMEOUT"
+  ) {
+    return true;
+  }
+
+  const message = [
+    maybeError.message,
+    maybeError.reason,
+    maybeError.shortMessage,
+    maybeError.error?.message,
+    maybeError.info?.error?.message,
+  ]
+    .map((part) => (typeof part === "string" ? part.toLowerCase() : ""))
+    .join(" ");
+
+  if (
+    message.includes("execution reverted") ||
+    message.includes("revert") ||
+    message.includes("pool-missing") ||
+    message.includes("unsupported-fee") ||
+    code === "CALL_EXCEPTION"
+  ) {
+    return false;
+  }
+
+  return (
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests") ||
+    message.includes("service unavailable") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("failed to fetch") ||
+    message.includes("network") ||
+    message.includes("connection reset") ||
+    message.includes("socket hang up") ||
+    message.includes("503") ||
+    message.includes("429") ||
+    message.includes("408")
+  );
+}
+
 async function quoteWithRetry<T>(
   fn: () => Promise<T>,
   maxRetries = 2,
   baseDelayMs = 80,
 ): Promise<T> {
-  let lastError: unknown;
+  let lastTransientError: unknown;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      lastError = err;
-      if (attempt < maxRetries - 1) {
-        await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (attempt + 1)));
+      const transient = isTransientError(err);
+      if (!transient) {
+        throw err;
       }
+
+      lastTransientError = err;
+      if (attempt === maxRetries - 1) {
+        break;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (attempt + 1)));
     }
   }
-  throw lastError;
+  throw lastTransientError;
 }
 
 /**
@@ -97,9 +195,13 @@ export async function getV2Quote(
       return Number((num * 10000n) / (spotOut * amountIn)) / 100;
     };
 
+    const shouldProbeHopPath =
+      hopPath.length !== directPath.length &&
+      !hasAdjacentDuplicateAddresses(hopPath);
+
     const [directResult, hopResult] = await Promise.allSettled([
       quoteWithRetry(() => router.getAmountsOut(amountIn, directPath)),
-      hopPath.length !== directPath.length
+      shouldProbeHopPath
         ? quoteWithRetry(() => router.getAmountsOut(amountIn, hopPath))
         : Promise.resolve(null),
     ]);
@@ -528,6 +630,16 @@ export async function getRWAQuote(
       console.warn("Invalid RWA quote direction:", fromToken.symbol, "->", toToken.symbol);
       return null;
     }
+    const settlementToken = fromIsRWA ? toToken : fromToken;
+    if (!isCanonicalUSDC(settlementToken)) {
+      console.warn(
+        "Invalid RWA settlement token:",
+        settlementToken.symbol,
+        settlementToken.address,
+      );
+      return null;
+    }
+
     const isBuy = !fromToken.rwa && !!toToken.rwa; // USDC→RWA
     const rwaToken = isBuy ? toToken : fromToken;
     const pairId = rwaToken.rwaPairId;
@@ -539,7 +651,7 @@ export async function getRWAQuote(
 
     if (isBuy) {
       // quoteBuy(pairId, usdcIn) returns (synthOut, fee, netUsdc, price, isStale)
-      const result = await vault.quoteBuy(pairId, amountIn);
+      const result = await quoteWithRetry(() => vault.quoteBuy(pairId, amountIn));
       const synthOut = result[0];
       const fee = result[1];
       const price = result[3];
@@ -568,7 +680,7 @@ export async function getRWAQuote(
       };
     } else {
       // Redeem: quoteRedeem(pairId, synthAmount) returns (usdcOut, fee, grossUsdc, price, isStale, reserveOk)
-      const result = await vault.quoteRedeem(pairId, amountIn);
+      const result = await quoteWithRetry(() => vault.quoteRedeem(pairId, amountIn));
       const usdcOut = result[0];
       const fee = result[1];
       const price = result[3];

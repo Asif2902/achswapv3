@@ -92,6 +92,26 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       .filter(t => !q || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q) || t.address.toLowerCase().includes(q));
   }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity]);
 
+  const normalizedQuery = searchQuery.toLowerCase().trim();
+  const matchesSearch = useCallback(
+    (token: Pick<Token, "symbol" | "name" | "address">) =>
+      !normalizedQuery ||
+      token.symbol.toLowerCase().includes(normalizedQuery) ||
+      token.name.toLowerCase().includes(normalizedQuery) ||
+      token.address.toLowerCase().includes(normalizedQuery),
+    [normalizedQuery],
+  );
+
+  const rwaPredicate = useCallback(
+    (token: Pick<Token, "rwa">) => (rwaOnly ? !!token.rwa : true),
+    [rwaOnly],
+  );
+
+  const tokenPassesActiveFilters = useCallback(
+    (token: Token) => matchesSearch(token) && rwaPredicate(token),
+    [matchesSearch, rwaPredicate],
+  );
+
   const handleDeleteCommunity = (address: string) => {
     const lower = address.toLowerCase();
     setHiddenCommunity(prev => {
@@ -110,30 +130,21 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     filteredImported,
     filteredRWA,
   } = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
-    const matches = (t: Token) =>
-      !q ||
-      t.symbol.toLowerCase().includes(q) ||
-      t.name.toLowerCase().includes(q) ||
-      t.address.toLowerCase().includes(q);
-
-    const rwaPredicate = (t: Token) => (rwaOnly ? !!t.rwa : true);
-
     const favorites = favoriteTokens
-      .filter((t) => matches(t) && rwaPredicate(t))
+      .filter((t) => tokenPassesActiveFilters(t))
       .sort((a, b) => a.symbol.localeCompare(b.symbol));
 
     const recents = recentTokens
-      .filter((t) => matches(t) && rwaPredicate(t))
+      .filter((t) => tokenPassesActiveFilters(t))
       .sort((a, b) => a.symbol.localeCompare(b.symbol));
 
     const community = filteredCommunityTokens
-      .filter((t) => matches(t) && rwaPredicate(t));
+      .filter((t) => tokenPassesActiveFilters(t));
 
     // When rwaOnly mode, only show RWA tokens
     if (rwaOnly) {
       const rwa = tokens
-        .filter((t) => t.verified && t.rwa && matches(t))
+        .filter((t) => t.verified && t.rwa && matchesSearch(t))
         .sort((a, b) => {
           const catA = a.rwaCategory || "";
           const catB = b.rwaCategory || "";
@@ -151,11 +162,11 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       };
     }
 
-    const verified = tokens.filter((t) => t.verified && !t.rwa && matches(t));
-    const imported = tokens.filter((t) => !t.verified && matches(t));
+    const verified = tokens.filter((t) => t.verified && !t.rwa && matchesSearch(t));
+    const imported = tokens.filter((t) => !t.verified && matchesSearch(t));
     // RWA tokens sorted by category then symbol
     const rwa = tokens
-      .filter((t) => t.verified && t.rwa && matches(t))
+      .filter((t) => t.verified && t.rwa && matchesSearch(t))
       .sort((a, b) => {
         const catA = a.rwaCategory || "";
         const catB = b.rwaCategory || "";
@@ -168,9 +179,9 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       filteredCommunity: community,
       filteredVerified: verified,
       filteredImported: imported,
-      filteredRWA: rwa,
-    };
-  }, [tokens, searchQuery, rwaOnly, favoriteTokens, recentTokens, filteredCommunityTokens]);
+        filteredRWA: rwa,
+      };
+  }, [tokens, favoriteTokens, recentTokens, filteredCommunityTokens, rwaOnly, matchesSearch, tokenPassesActiveFilters]);
 
   const isValidAddress = Boolean(searchQuery.trim() && isAddress(searchQuery.trim()));
   const tokenExists =
@@ -185,6 +196,13 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     try {
       const token = await onImport(searchQuery.trim());
       if (token) {
+        if (!tokenPassesActiveFilters(token)) {
+          const filterMessage = rwaOnly
+            ? "Imported token is not eligible in RWA-only mode"
+            : "Imported token does not match the active search/filter";
+          setImportError(filterMessage);
+          return;
+        }
         onSelect(token);
         setSearchQuery("");
       }
@@ -829,6 +847,8 @@ function TokenRow({
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+              aria-label={isFavorite ? "Unfavorite token" : "Favorite token"}
+              aria-pressed={!!isFavorite}
               className="flex-shrink-0 p-1 rounded-full hover:bg-white/10 transition-colors"
             >
               <Star
@@ -889,12 +909,19 @@ function CommunityTokenRow({
       isUnverified={!!onDelete} 
       onDelete={() => onDelete?.(token.address)}
     >
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={onClick}
         onPointerDown={() => setPressed(true)}
         onPointerUp={() => setPressed(false)}
         onPointerLeave={() => setPressed(false)}
         onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onClick();
+            return;
+          }
           if ((e.key === "Delete" || e.key === "Backspace") && onDelete) {
             e.preventDefault();
             onDelete(token.address);
@@ -963,6 +990,8 @@ function CommunityTokenRow({
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+              aria-label={isFavorite ? "Unfavorite token" : "Favorite token"}
+              aria-pressed={!!isFavorite}
               className="flex-shrink-0 p-1 rounded-full hover:bg-white/10 transition-colors"
             >
               <Star
@@ -975,7 +1004,7 @@ function CommunityTokenRow({
             </button>
           )}
         </div>
-      </button>
+      </div>
     </HoldToRevealRow>
   );
 }

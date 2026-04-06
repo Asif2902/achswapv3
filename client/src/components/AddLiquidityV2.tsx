@@ -269,8 +269,21 @@ export function AddLiquidityV2() {
   const balanceAFormatted = balanceA ? formatAmount(balanceA.value, balanceA.decimals) : "0.00";
   const balanceBFormatted = balanceB ? formatAmount(balanceB.value, balanceB.decimals) : "0.00";
 
+  const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
+  const wrapped = getWUSDC(chainId);
+  const getERC20AddressForCompare = (token: Token) =>
+    token.address.toLowerCase() === "0x0000000000000000000000000000000000000000" && wrapped
+      ? wrapped.address
+      : token.address;
+  const sameTokenSelected = !!(
+    tokenA &&
+    tokenB &&
+    getERC20AddressForCompare(tokenA).toLowerCase() ===
+      getERC20AddressForCompare(tokenB).toLowerCase()
+  );
+
   const poolHasLiquidity = pairExists && reserveA > 0n && reserveB > 0n;
-  const isNewPool = !pairExists;
+  const isNewPool = !pairExists && !sameTokenSelected;
   const isEmptyPool = pairExists && (reserveA === 0n || reserveB === 0n);
 
   const handleAddLiquidity = async () => {
@@ -349,24 +362,13 @@ export function AddLiquidityV2() {
 
   const poolStatusConfig = isLoadingPair
     ? { label: "Checking", color: "rgba(255,255,255,0.1)", text: "rgba(255,255,255,0.4)", dot: "#6b7280" }
+    : sameTokenSelected
+    ? { label: "Invalid Pair", color: "rgba(251,191,36,0.12)", text: "#fbbf24", dot: "#fbbf24" }
     : poolHasLiquidity
     ? { label: "Active Pool", color: "rgba(34,197,94,0.12)", text: "#4ade80", dot: "#22c55e" }
     : isEmptyPool
     ? { label: "Empty Pool", color: "rgba(245,158,11,0.12)", text: "#fbbf24", dot: "#f59e0b" }
     : { label: "New Pool", color: "rgba(99,102,241,0.12)", text: "#818cf8", dot: "#6366f1" };
-
-  const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
-  const wrapped = getWUSDC(chainId);
-  const getERC20AddressForCompare = (token: Token) =>
-    token.address.toLowerCase() === "0x0000000000000000000000000000000000000000" && wrapped
-      ? wrapped.address
-      : token.address;
-  const sameTokenSelected = !!(
-    tokenA &&
-    tokenB &&
-    getERC20AddressForCompare(tokenA).toLowerCase() ===
-      getERC20AddressForCompare(tokenB).toLowerCase()
-  );
   const canSubmit = tokenA && tokenB && !sameTokenSelected && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !hasRwaToken;
 
   return (
