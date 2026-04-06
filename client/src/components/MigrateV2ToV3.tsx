@@ -100,7 +100,7 @@ function applySlippageMin(amount: bigint, bps: bigint = MIGRATION_SLIPPAGE_BPS):
 }
 
 function computeAdaptiveSlippageBps(priceDiffPercent: number | null): bigint {
-  if (!priceDiffPercent || !Number.isFinite(priceDiffPercent) || priceDiffPercent <= 0) {
+  if (!priceDiffPercent || !Number.isFinite(priceDiffPercent) || priceDiffPercent <= 0 || priceDiffPercent >= 99.9) {
     return MIGRATION_SLIPPAGE_BPS;
   }
 
@@ -165,6 +165,7 @@ export function MigrateV2ToV3() {
   const [priceWarningConfirmed, setPriceWarningConfirmed] = useState(false);
   const [zeroMinConfirmed, setZeroMinConfirmed] = useState(false);
   const [showZeroMinDialog, setShowZeroMinDialog] = useState(false);
+  const [showHighPriceDialog, setShowHighPriceDialog] = useState(false);
   const [tokens, setTokens] = useState<Token[]>([]);
 
   const { address, isConnected } = useAccount();
@@ -304,6 +305,7 @@ export function MigrateV2ToV3() {
     checkV3Pool();
     setPriceWarningConfirmed(false);
     setZeroMinConfirmed(false);
+    setShowHighPriceDialog(false);
     return () => {
       cancelled = true;
     };
@@ -322,6 +324,7 @@ export function MigrateV2ToV3() {
   };
 
   const priceDiff = getPriceDifference();
+  const isExtremePriceDiff = Boolean(priceDiff && priceDiff.diff > 15);
   const showPriceWarning = Boolean(v3PoolInfo?.exists && priceDiff && priceDiff.diff > 2 && !priceWarningConfirmed);
   const showZeroMinWarning = Boolean(v3PoolInfo && !v3PoolInfo.exists && !zeroMinConfirmed);
   const adaptiveSlippageBps = computeAdaptiveSlippageBps(priceDiff?.diff ?? null);
@@ -406,7 +409,14 @@ export function MigrateV2ToV3() {
   // ── Migrate ─────────────────────────────────────────────────────────────────
   const handleMigrate = async () => {
     if (!selectedPosition || !address || !contracts || !window.ethereum || !migratorExists) return;
-    if (showPriceWarning) { toast({ title: "Confirmation required", description: "Please confirm the price difference before migrating", variant: "destructive" }); return; }
+    if (isExtremePriceDiff && !priceWarningConfirmed) {
+      setShowHighPriceDialog(true);
+      return;
+    }
+    if (showPriceWarning) {
+      setShowHighPriceDialog(true);
+      return;
+    }
 
     setIsMigrating(true);
     try {
@@ -428,7 +438,6 @@ export function MigrateV2ToV3() {
         throw new Error("Migration amount safety check failed");
       }
 
-      toast({ title: "Approving LP tokens…", description: "Please approve LP token spending" });
       const allowance = await pairContract.allowance(address, contracts.v3.migrator);
       if (allowance !== liquidityToMigrate) {
         try {
@@ -566,12 +575,6 @@ export function MigrateV2ToV3() {
 
           lastSlippageError = error;
           if (attempt < strictAttemptBps.length - 1) {
-            const currentBps = Number(strictAttemptBps[attempt]) / 100;
-            const nextBps = Number(strictAttemptBps[attempt + 1]) / 100;
-            toast({
-              title: "Retrying migration",
-              description: `Price moved; widening slippage from ${currentBps.toFixed(2)}% to ${nextBps.toFixed(2)}%`,
-            });
             stateForAttempt = await readMigrationState();
           }
         }
@@ -586,11 +589,6 @@ export function MigrateV2ToV3() {
           }
           throw (lastSlippageError ?? new Error("Migration failed due to slippage checks"));
         }
-
-        toast({
-          title: "Retrying migration",
-          description: "Final retry with flexible min amounts",
-        });
 
         const relaxedState = await readMigrationState();
         const relaxedParams = buildMigrateParams(relaxedState, null);
@@ -899,7 +897,7 @@ export function MigrateV2ToV3() {
                       )}
 
                       {/* Price warning */}
-                      {showPriceWarning && (
+                      {showPriceWarning && !isExtremePriceDiff && (
                         <>
                           <div className="mx-4 h-px bg-border/30" />
                           <div className="px-4 py-3 space-y-2.5">
@@ -924,6 +922,36 @@ export function MigrateV2ToV3() {
                               }}
                             >
                               I understand, proceed anyway
+                            </button>
+                          </div>
+                        </>
+                      )}
+
+                      {isExtremePriceDiff && !priceWarningConfirmed && (
+                        <>
+                          <div className="mx-4 h-px bg-border/30" />
+                          <div className="px-4 py-3 space-y-2.5">
+                            <div className="flex items-start gap-2.5 p-3 rounded-xl"
+                              style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)" }}
+                            >
+                              <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                              <div className="flex-1">
+                                <p className="text-xs font-semibold text-red-300">Extreme price mismatch detected ({priceDiff?.diff.toFixed(2)}%)</p>
+                                <p className="text-[11px] text-red-300/70 mt-1 leading-relaxed">
+                                  Review the full risk details before migrating.
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => setShowHighPriceDialog(true)}
+                              className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
+                              style={{
+                                background: "rgba(239,68,68,0.12)",
+                                border: "1px solid rgba(239,68,68,0.3)",
+                                color: "#fecaca",
+                              }}
+                            >
+                              Review price mismatch risks
                             </button>
                           </div>
                         </>
@@ -1004,9 +1032,9 @@ export function MigrateV2ToV3() {
 
                         <Button
                           onClick={handleMigrate}
-                          disabled={!migratorExists || isMigrating || !!showPriceWarning || isCheckingPool}
+                          disabled={!migratorExists || isMigrating || !!showPriceWarning || (isExtremePriceDiff && !priceWarningConfirmed) || isCheckingPool}
                           className="w-full h-11 text-sm font-semibold disabled:opacity-40 transition-all"
-                          style={migratorExists && !isMigrating && !showPriceWarning
+                          style={migratorExists && !isMigrating && !showPriceWarning && !(isExtremePriceDiff && !priceWarningConfirmed)
                             ? { background: "linear-gradient(135deg, #6366f1, #8b5cf6)", border: "none" }
                             : {}
                           }
@@ -1018,6 +1046,8 @@ export function MigrateV2ToV3() {
                             </span>
                           ) : showPriceWarning ? (
                             "Confirm price warning above"
+                          ) : isExtremePriceDiff && !priceWarningConfirmed ? (
+                            "Review price mismatch risks"
                           ) : (
                             <span className="flex items-center gap-2">
                               <Zap className="w-4 h-4" />
@@ -1079,6 +1109,51 @@ export function MigrateV2ToV3() {
               className="bg-amber-500 text-black hover:bg-amber-400"
             >
               I understand, allow zero-min fallback
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showHighPriceDialog} onOpenChange={setShowHighPriceDialog}>
+        <DialogContent className="max-w-md border-red-500/30 bg-card/95 text-foreground">
+          <DialogHeader>
+            <DialogTitle className="text-base sm:text-lg text-red-300">Large Price Difference Detected</DialogTitle>
+            <DialogDescription className="text-sm leading-relaxed">
+              This migration sees a large mismatch between current V2 reserves and V3 pool price.
+              Execution can be significantly worse than expected.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 text-xs sm:text-sm">
+            <div className="rounded-lg border border-red-500/35 bg-red-500/10 p-3">
+              <p className="font-semibold text-red-200">Current mismatch</p>
+              <p className="mt-1 text-red-100/80">
+                V2 price: {formatPrice(priceDiff?.v2Price ?? null)}{" • "}
+                V3 price: {formatPrice(priceDiff?.v3Price ?? null)}{" • "}
+                Difference: {priceDiff ? `${priceDiff.diff.toFixed(2)}%` : "unavailable"}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-3">
+              <p className="font-semibold text-amber-200">Recommendation</p>
+              <p className="mt-1 text-amber-100/80">
+                Consider waiting for prices to converge or using a smaller migration percentage first.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter className="mt-1 flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button variant="outline" onClick={() => setShowHighPriceDialog(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                setPriceWarningConfirmed(true);
+                setShowHighPriceDialog(false);
+              }}
+              className="bg-red-500 text-white hover:bg-red-400"
+            >
+              I understand, continue anyway
             </Button>
           </DialogFooter>
         </DialogContent>
