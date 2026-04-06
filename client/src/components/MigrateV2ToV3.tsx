@@ -478,7 +478,9 @@ export function MigrateV2ToV3() {
       const baseMigrateParams = {
         pair: selectedPosition.pairAddress,
         liquidityToMigrate,
-        percentageToMigrate: percentToMigrate,
+        // This UI slider already scales LP amount via liquidityToMigrate.
+        // Keep migrator's internal percentage at 100 to avoid double-scaling.
+        percentageToMigrate: 100,
         token0: selectedPosition.token0.address,
         token1: selectedPosition.token1.address,
         fee: selectedFee,
