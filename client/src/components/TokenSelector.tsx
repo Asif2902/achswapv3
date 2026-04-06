@@ -6,6 +6,9 @@ import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
 import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
 
+const MAX_RENDER_ITEMS_PER_SECTION = 80;
+const communityTokenCache = new Map<number, CommunityToken[]>();
+
 interface TokenSelectorProps {
   open: boolean;
   onClose: () => void;
@@ -54,9 +57,19 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       }
       // Fetch community tokens
       if (chainId) {
+        const cachedCommunity = communityTokenCache.get(chainId);
+        if (cachedCommunity) {
+          setCommunityTokens(cachedCommunity);
+          setLoadingCommunity(false);
+          return;
+        }
+
         setLoadingCommunity(true);
         fetchCommunityTokens(chainId)
-          .then(setCommunityTokens)
+          .then((rows) => {
+            communityTokenCache.set(chainId, rows);
+            setCommunityTokens(rows);
+          })
           .finally(() => setLoadingCommunity(false));
       }
     } else {
@@ -91,6 +104,11 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       .filter(t => !hiddenCommunity.has(t.address.toLowerCase()))
       .filter(t => !q || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q) || t.address.toLowerCase().includes(q));
   }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity]);
+
+  const favoriteAddressSet = useMemo(
+    () => new Set(favoriteTokens.map((token) => token.address.toLowerCase())),
+    [favoriteTokens],
+  );
 
   const normalizedQuery = searchQuery.toLowerCase().trim();
   const matchesSearch = useCallback(
@@ -132,14 +150,17 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   } = useMemo(() => {
     const favorites = favoriteTokens
       .filter((t) => tokenPassesActiveFilters(t))
-      .sort((a, b) => a.symbol.localeCompare(b.symbol));
+      .sort((a, b) => a.symbol.localeCompare(b.symbol))
+      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
 
     const recents = recentTokens
       .filter((t) => tokenPassesActiveFilters(t))
-      .sort((a, b) => a.symbol.localeCompare(b.symbol));
+      .sort((a, b) => a.symbol.localeCompare(b.symbol))
+      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
 
     const community = filteredCommunityTokens
-      .filter((t) => tokenPassesActiveFilters(t));
+      .filter((t) => tokenPassesActiveFilters(t))
+      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
 
     // When rwaOnly mode, only show RWA tokens
     if (rwaOnly) {
@@ -150,7 +171,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
           const catB = b.rwaCategory || "";
           if (catA !== catB) return catA.localeCompare(catB);
           return a.symbol.localeCompare(b.symbol);
-        });
+        })
+        .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
 
       return {
         filteredFavorites: favorites,
@@ -162,8 +184,12 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       };
     }
 
-    const verified = tokens.filter((t) => t.verified && !t.rwa && matchesSearch(t));
-    const imported = tokens.filter((t) => !t.verified && matchesSearch(t));
+    const verified = tokens
+      .filter((t) => t.verified && !t.rwa && matchesSearch(t))
+      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
+    const imported = tokens
+      .filter((t) => !t.verified && matchesSearch(t))
+      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
     // RWA tokens sorted by category then symbol
     const rwa = tokens
       .filter((t) => t.verified && t.rwa && matchesSearch(t))
@@ -172,7 +198,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         const catB = b.rwaCategory || "";
         if (catA !== catB) return catA.localeCompare(catB);
         return a.symbol.localeCompare(b.symbol);
-      });
+      })
+      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
     return {
       filteredFavorites: favorites,
       filteredRecent: recents,
@@ -222,6 +249,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   if (!mounted) return null;
 
   const totalCount = tokens.length + filteredCommunityTokens.length;
+  const showRowBalances = !rwaOnly;
 
   return (
     <>
@@ -399,6 +427,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    showBalance={showRowBalances}
                     isFavorite
                     onToggleFavorite={() => onToggleFavorite?.(token)}
                   />
@@ -422,7 +451,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
-                    isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                    showBalance={showRowBalances}
+                    isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
                     onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
@@ -445,7 +475,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
-                    isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                    showBalance={showRowBalances}
+                    isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
                     onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
@@ -468,8 +499,9 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    showBalance={showRowBalances}
                     showRwaBadge
-                    isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                    isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
                     onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
@@ -492,9 +524,10 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    showBalance={showRowBalances}
                     onDelete={onDelete}
                     resetHolding={resetHoldingKey}
-                    isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                    isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
                     onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
@@ -524,9 +557,10 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                       userAddress={userAddress}
                       index={i}
                       onClick={() => handleSelect(token)}
+                      showBalance={showRowBalances}
                       onDelete={handleDeleteCommunity}
                       resetHolding={resetHoldingKey}
-                      isFavorite={favoriteTokens.some(f => f.address.toLowerCase() === token.address.toLowerCase())}
+                      isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
                       onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                     />
                   ))
@@ -707,6 +741,7 @@ function TokenRow({
   userAddress,
   index,
   onClick,
+  showBalance,
   onDelete,
   resetHolding,
   showRwaBadge,
@@ -717,6 +752,7 @@ function TokenRow({
   userAddress?: string;
   index: number;
   onClick: () => void;
+  showBalance?: boolean;
   onDelete?: (address: string) => void;
   resetHolding?: number;
   showRwaBadge?: boolean;
@@ -724,14 +760,15 @@ function TokenRow({
   onToggleFavorite?: () => void;
 }) {
   const isNativeToken = token.address === "0x0000000000000000000000000000000000000000";
+  const shouldQueryBalance = Boolean(showBalance && userAddress);
   const { data: balance } = useBalance({
-    address: userAddress as `0x${string}` | undefined,
-    ...(isNativeToken ? {} : { token: token.address as `0x${string}` }),
+    address: shouldQueryBalance ? (userAddress as `0x${string}`) : undefined,
+    ...(isNativeToken || !shouldQueryBalance ? {} : { token: token.address as `0x${string}` }),
   });
 
   let displayBalance = "";
   try {
-    if (balance && userAddress) {
+    if (balance && userAddress && showBalance) {
       const formatted = formatAmount(balance.value, balance.decimals);
       const num = parseFloat(formatted);
       displayBalance =
@@ -838,7 +875,7 @@ function TokenRow({
           </div>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-          {userAddress && displayBalance && (
+          {!!(showBalance && userAddress && displayBalance) && (
             <p className="text-xs font-mono font-medium tabular-nums text-right" data-testid={`text-balance-${token.symbol}`} style={{ color: "rgba(255,255,255,0.7)" }}>
               {displayBalance}
             </p>
@@ -873,6 +910,7 @@ function CommunityTokenRow({
   userAddress,
   index,
   onClick,
+  showBalance,
   onDelete,
   resetHolding,
   isFavorite,
@@ -882,19 +920,21 @@ function CommunityTokenRow({
   userAddress?: string;
   index: number;
   onClick: () => void;
+  showBalance?: boolean;
   onDelete?: (address: string) => void;
   resetHolding?: number;
   isFavorite?: boolean;
   onToggleFavorite?: () => void;
 }) {
+  const shouldQueryBalance = Boolean(showBalance && userAddress);
   const { data: balance } = useBalance({
-    address: userAddress as `0x${string}` | undefined,
-    token: token.address as `0x${string}`,
+    address: shouldQueryBalance ? (userAddress as `0x${string}`) : undefined,
+    ...(shouldQueryBalance ? { token: token.address as `0x${string}` } : {}),
   });
 
   let displayBalance = "";
   try {
-    if (balance && userAddress) {
+    if (balance && userAddress && showBalance) {
       const formatted = formatAmount(balance.value, balance.decimals);
       const num = parseFloat(formatted);
       displayBalance = num > 0 ? (num < 0.0001 ? "<0.0001" : num >= 1000 ? num.toLocaleString(undefined, { maximumFractionDigits: 2 }) : formatted) : "";
@@ -981,7 +1021,7 @@ function CommunityTokenRow({
           </div>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-          {userAddress && displayBalance && (
+          {showBalance && userAddress && displayBalance && (
             <p className="text-xs font-mono font-medium tabular-nums text-right" style={{ color: "rgba(255,255,255,0.7)" }}>
               {displayBalance}
             </p>
