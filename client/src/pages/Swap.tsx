@@ -26,6 +26,7 @@ import {
   approvePermit2,
   executeGaslessSwapV2,
   executeGaslessSwapV3,
+  executeGaslessSwapV3MultiHop,
 } from "@/lib/gasless-swap";
 import { GASLESS_CONFIG, NATIVE_TOKEN, NATIVE_TOKEN_DECIMALS } from "@/lib/gasless-config";
 
@@ -769,15 +770,9 @@ export default function Swap() {
           const useV2 = bestQuote.protocol === "V2" || (!v3Enabled && bestQuote.route.length > 1);
           const useV3 = bestQuote.protocol === "V3" && bestQuote.route.length === 1;
           const isV3MultiHop = bestQuote.protocol === "V3" && bestQuote.route.length > 1;
-          
-          // V3 multi-hop not supported in gasless - fallback to regular swap
-          if (isV3MultiHop && v3Enabled) {
-            toast({ title: "V3 multi-hop not supported in gasless", description: "Using regular swap instead" });
-            setGaslessMode(false);
-          }
 
           // Execute gasless swap if enabled and available
-          if (gaslessMode && !isV3MultiHop) {
+          if (gaslessMode) {
             const deadlineTimestamp = Math.floor(Date.now() / 1000) + deadline * 60;
             if (useV2 && v2Enabled) {
               const path: string[] = [];
@@ -795,6 +790,32 @@ export default function Swap() {
               const tokenOutV3 = isNativeToken(toToken.address) && wrappedAddr ? wrappedAddr : toToken.address;
               const fee = bestQuote.route[0].fee || 3000;
               result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountInForPermit2, minAmountOut, deadlineTimestamp);
+            } else if (isV3MultiHop && v3Enabled && bestQuote.route.length === 2) {
+              const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+              if (!wrappedAddr) throw new Error("Wrapped token address not found");
+
+              const tokenInForPath = isNativeToken(bestQuote.route[0].tokenIn.address)
+                ? wrappedAddr
+                : bestQuote.route[0].tokenIn.address;
+              const midForPath = isNativeToken(bestQuote.route[0].tokenOut.address)
+                ? wrappedAddr
+                : bestQuote.route[0].tokenOut.address;
+              const tokenOutForPath = isNativeToken(bestQuote.route[1].tokenOut.address)
+                ? wrappedAddr
+                : bestQuote.route[1].tokenOut.address;
+
+              const fee1 = bestQuote.route[0].fee || 3000;
+              const fee2 = bestQuote.route[1].fee || 3000;
+              const path = `0x${tokenInForPath.slice(2)}${fee1.toString(16).padStart(6, "0")}${midForPath.slice(2)}${fee2.toString(16).padStart(6, "0")}${tokenOutForPath.slice(2)}`;
+
+              result = await executeGaslessSwapV3MultiHop(
+                signer,
+                tokenInAddress,
+                path,
+                amountInForPermit2,
+                minAmountOut,
+                deadlineTimestamp,
+              );
             } else {
               throw new Error("Selected protocol not available. Try regular swap.");
             }

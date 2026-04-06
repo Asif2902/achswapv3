@@ -43,6 +43,7 @@ const V2_PAIR_ABI = [
 
 const MIGRATION_SLIPPAGE_BPS = 100n; // 1%
 const MIGRATION_SLIPPAGE_BPS_RETRY = 300n; // 3% fallback for volatile pools
+const MIGRATION_SLIPPAGE_BPS_RETRY_WIDE = 700n; // 7% final strict retry before optional zero-min
 const MIN_SQRT_RATIO = 4295128739n;
 const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
 
@@ -429,25 +430,50 @@ export function MigrateV2ToV3() {
       const latestPair = new Contract(selectedPosition.pairAddress, V2_PAIR_ABI, readProvider);
       const latestFactory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, readProvider);
 
-      const [latestReserves, latestTotalSupply, latestPoolAddress] = await Promise.all([
-        latestPair.getReserves(),
-        latestPair.totalSupply(),
-        latestFactory.getPool(selectedPosition.token0.address, selectedPosition.token1.address, selectedFee),
-      ]);
+      const readMigrationState = async () => {
+        const [latestReserves, latestTotalSupply, latestPoolAddress] = await Promise.all([
+          latestPair.getReserves(),
+          latestPair.totalSupply(),
+          latestFactory.getPool(selectedPosition.token0.address, selectedPosition.token1.address, selectedFee),
+        ]);
 
-      const reserve0Raw = latestReserves.reserve0 ?? latestReserves[0] ?? 0n;
-      const reserve1Raw = latestReserves.reserve1 ?? latestReserves[1] ?? 0n;
-      const latestReserve0 = typeof reserve0Raw === "bigint" ? reserve0Raw : BigInt(reserve0Raw.toString());
-      const latestReserve1 = typeof reserve1Raw === "bigint" ? reserve1Raw : BigInt(reserve1Raw.toString());
-      const latestSupply = typeof latestTotalSupply === "bigint" ? latestTotalSupply : BigInt(latestTotalSupply.toString());
+        const reserve0Raw = latestReserves.reserve0 ?? latestReserves[0] ?? 0n;
+        const reserve1Raw = latestReserves.reserve1 ?? latestReserves[1] ?? 0n;
+        const reserve0 = typeof reserve0Raw === "bigint" ? reserve0Raw : BigInt(reserve0Raw.toString());
+        const reserve1 = typeof reserve1Raw === "bigint" ? reserve1Raw : BigInt(reserve1Raw.toString());
+        const totalSupply = typeof latestTotalSupply === "bigint" ? latestTotalSupply : BigInt(latestTotalSupply.toString());
+        const poolExists = !!latestPoolAddress && latestPoolAddress !== "0x0000000000000000000000000000000000000000";
 
-      if (latestSupply <= 0n) {
-        throw new Error("Latest V2 pool supply is zero");
-      }
+        if (totalSupply <= 0n) {
+          throw new Error("Latest V2 pool supply is zero");
+        }
 
-      const expectedAmount0 = (latestReserve0 * liquidityToMigrate) / latestSupply;
-      const expectedAmount1 = (latestReserve1 * liquidityToMigrate) / latestSupply;
-      const freshPoolExists = !!latestPoolAddress && latestPoolAddress !== "0x0000000000000000000000000000000000000000";
+        return {
+          reserve0,
+          reserve1,
+          totalSupply,
+          poolExists,
+        };
+      };
+
+      const buildMigrateParams = (
+        state: {
+          reserve0: bigint;
+          reserve1: bigint;
+          totalSupply: bigint;
+          poolExists: boolean;
+        },
+        slippageBps: bigint | null,
+      ) => {
+        const expectedAmount0 = (state.reserve0 * liquidityToMigrate) / state.totalSupply;
+        const expectedAmount1 = (state.reserve1 * liquidityToMigrate) / state.totalSupply;
+
+        return {
+          ...baseMigrateParams,
+          amount0Min: slippageBps === null ? 0n : applySlippageMin(expectedAmount0, slippageBps),
+          amount1Min: slippageBps === null ? 0n : applySlippageMin(expectedAmount1, slippageBps),
+        };
+      };
 
       const baseMigrateParams = {
         pair: selectedPosition.pairAddress,
@@ -463,33 +489,23 @@ export function MigrateV2ToV3() {
         refundAsETH: false,
       };
 
-      const strictParams = {
-        ...baseMigrateParams,
-        amount0Min: applySlippageMin(expectedAmount0),
-        amount1Min: applySlippageMin(expectedAmount1),
-      };
-
-      const mediumParams = {
-        ...baseMigrateParams,
-        amount0Min: applySlippageMin(expectedAmount0, MIGRATION_SLIPPAGE_BPS_RETRY),
-        amount1Min: applySlippageMin(expectedAmount1, MIGRATION_SLIPPAGE_BPS_RETRY),
-      };
-
-      const relaxedParams = {
-        ...baseMigrateParams,
-        amount0Min: 0n,
-        amount1Min: 0n,
-      };
-
-      const executeMigration = async (params: typeof strictParams) => {
-        if (freshPoolExists) {
+      const executeMigration = async (
+        params: ReturnType<typeof buildMigrateParams>,
+        state: {
+          reserve0: bigint;
+          reserve1: bigint;
+          totalSupply: bigint;
+          poolExists: boolean;
+        },
+      ) => {
+        if (state.poolExists) {
           toast({ title: "Migrating…", description: "Removing V2 liquidity and adding to V3" });
           const gasEstimate = await migrator.migrate.estimateGas(params);
           const tx = await migrator.migrate(params, { gasLimit: (gasEstimate * 150n) / 100n });
           return tx.wait();
         }
 
-        const sqrtPriceX96 = sqrtPriceX96FromV2Reserves(latestReserve0, latestReserve1);
+        const sqrtPriceX96 = sqrtPriceX96FromV2Reserves(state.reserve0, state.reserve1);
         toast({ title: "Creating pool & migrating…", description: "Initializing V3 pool and migrating in one transaction" });
         const createData = migrator.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [selectedPosition.token0.address, selectedPosition.token1.address, selectedFee, sqrtPriceX96]);
         const migrateData = migrator.interface.encodeFunctionData("migrate", [params]);
@@ -498,35 +514,62 @@ export function MigrateV2ToV3() {
         return tx.wait();
       };
 
-      const allowZeroMinFallback = priceWarningConfirmed || (!freshPoolExists && zeroMinConfirmed);
-      const useFlexibleFromStart = Boolean(allowZeroMinFallback);
-      let receipt;
-      try {
-        receipt = await executeMigration(useFlexibleFromStart ? relaxedParams : strictParams);
-      } catch (error) {
-        if (!isPriceSlippageCheckError(error) || useFlexibleFromStart) {
-          throw error;
+      const initialState = await readMigrationState();
+      const allowZeroMinFallback = priceWarningConfirmed || (!initialState.poolExists && zeroMinConfirmed);
+      const strictAttemptBps = [
+        MIGRATION_SLIPPAGE_BPS,
+        MIGRATION_SLIPPAGE_BPS_RETRY,
+        MIGRATION_SLIPPAGE_BPS_RETRY_WIDE,
+      ];
+
+      let receipt: Awaited<ReturnType<typeof executeMigration>> | null = null;
+      let lastSlippageError: unknown = null;
+      let stateForAttempt = initialState;
+
+      for (let attempt = 0; attempt < strictAttemptBps.length; attempt++) {
+        const params = buildMigrateParams(stateForAttempt, strictAttemptBps[attempt]);
+        try {
+          receipt = await executeMigration(params, stateForAttempt);
+          break;
+        } catch (error) {
+          if (!isPriceSlippageCheckError(error)) {
+            throw error;
+          }
+
+          lastSlippageError = error;
+          if (attempt < strictAttemptBps.length - 1) {
+            toast({
+              title: "Retrying migration",
+              description:
+                attempt === 0
+                  ? "Price moved; retrying with wider slippage window"
+                  : "Price moved again; trying a wider slippage window",
+            });
+            stateForAttempt = await readMigrationState();
+          }
+        }
+      }
+
+      if (!receipt) {
+        if (!allowZeroMinFallback) {
+          if (!initialState.poolExists && !zeroMinConfirmed) {
+            toast({
+              title: "Enable flexible minimums",
+              description: "For new pools, confirm flexible minimums and retry to allow a final zero-min fallback",
+              variant: "destructive",
+            });
+          }
+          throw (lastSlippageError ?? new Error("Migration failed due to slippage checks"));
         }
 
         toast({
           title: "Retrying migration",
-          description: "Price moved; retrying with wider slippage window",
+          description: "Final retry with flexible min amounts",
         });
 
-        try {
-          receipt = await executeMigration(mediumParams);
-        } catch (mediumError) {
-          if (!isPriceSlippageCheckError(mediumError) || !allowZeroMinFallback) {
-            throw mediumError;
-          }
-
-          toast({
-            title: "Retrying migration",
-            description: "Final retry with flexible min amounts",
-          });
-
-          receipt = await executeMigration(relaxedParams);
-        }
+        const relaxedState = await readMigrationState();
+        const relaxedParams = buildMigrateParams(relaxedState, null);
+        receipt = await executeMigration(relaxedParams, relaxedState);
       }
 
       setSelectedPosition(null);
