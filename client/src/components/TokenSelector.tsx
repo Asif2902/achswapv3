@@ -7,6 +7,7 @@ import { formatAmount } from "@/lib/decimal-utils";
 import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
 
 const MAX_RENDER_ITEMS_PER_SECTION = 80;
+const INITIAL_RENDER_ITEMS_PER_SECTION = 8;
 const MAX_RENDER_COMMUNITY_ITEMS = 30;
 const communityTokenCache = new Map<number, CommunityToken[]>();
 const communityTokenInFlight = new Map<number, Promise<CommunityToken[]>>();
@@ -61,6 +62,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(new Set());
   const [resetHoldingKey, setResetHoldingKey] = useState(0);
   const [balancesReady, setBalancesReady] = useState(false);
+  const [initialRenderMode, setInitialRenderMode] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
   const chainId = useChainId();
@@ -90,6 +92,12 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       setMounted(true);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
       setBalancesReady(false);
+      setInitialRenderMode(true);
+      window.setTimeout(() => {
+        if (!cancelled) {
+          setInitialRenderMode(false);
+        }
+      }, 280);
       balanceTimer = window.setTimeout(() => {
         if (!cancelled) {
           setBalancesReady(true);
@@ -162,6 +170,32 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   }, [open, chainId, rwaOnly]);
 
   useEffect(() => {
+    if (!open || !visible) return;
+    if (!chainId || rwaOnly) return;
+    if (communityTokens.length > 0 || loadingCommunity) return;
+
+    let cancelled = false;
+    setLoadingCommunity(true);
+    loadCommunityTokens(chainId)
+      .then((rows) => {
+        if (!cancelled) {
+          startTransition(() => {
+            setCommunityTokens(rows);
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingCommunity(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, visible, chainId, rwaOnly, communityTokens.length, loadingCommunity]);
+
+  useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", handler);
@@ -229,16 +263,16 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     const favorites = favoriteTokens
       .filter((t) => tokenPassesActiveFilters(t))
       .sort((a, b) => a.symbol.localeCompare(b.symbol))
-      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
 
     const recents = recentTokens
       .filter((t) => tokenPassesActiveFilters(t))
       .sort((a, b) => a.symbol.localeCompare(b.symbol))
-      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
 
     const community = filteredCommunityTokens
       .filter((t) => tokenPassesActiveFilters(t))
-      .slice(0, MAX_RENDER_COMMUNITY_ITEMS);
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_COMMUNITY_ITEMS);
 
     // When rwaOnly mode, only show RWA tokens
     if (rwaOnly) {
@@ -250,7 +284,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
           if (catA !== catB) return catA.localeCompare(catB);
           return a.symbol.localeCompare(b.symbol);
         })
-        .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
+        .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
 
       return {
         filteredFavorites: favorites,
@@ -264,10 +298,10 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
     const verified = tokens
       .filter((t) => t.verified && !t.rwa && matchesSearch(t))
-      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
     const imported = tokens
       .filter((t) => !t.verified && matchesSearch(t))
-      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
     // RWA tokens sorted by category then symbol
     const rwa = tokens
       .filter((t) => t.verified && t.rwa && matchesSearch(t))
@@ -277,7 +311,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         if (catA !== catB) return catA.localeCompare(catB);
         return a.symbol.localeCompare(b.symbol);
       })
-      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
     return {
       filteredFavorites: favorites,
       filteredRecent: recents,
@@ -286,7 +320,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       filteredImported: imported,
         filteredRWA: rwa,
       };
-  }, [tokens, favoriteTokens, recentTokens, filteredCommunityTokens, rwaOnly, matchesSearch, tokenPassesActiveFilters]);
+  }, [tokens, favoriteTokens, recentTokens, filteredCommunityTokens, rwaOnly, matchesSearch, tokenPassesActiveFilters, initialRenderMode]);
 
   const isValidAddress = Boolean(searchQuery.trim() && isAddress(searchQuery.trim()));
   const tokenExists =
