@@ -107,8 +107,15 @@ export function AddLiquidityV2() {
       if (!storedFavorites) {
         setFavoriteTokens([]);
       } else {
-        const parsedFavorites = JSON.parse(storedFavorites);
-        setFavoriteTokens(Array.isArray(parsedFavorites) ? parsedFavorites : []);
+        const parsedFavorites: unknown = JSON.parse(storedFavorites);
+        const validFavorites = Array.isArray(parsedFavorites)
+          ? parsedFavorites.filter((item): item is Token => {
+              if (!item || typeof item !== "object") return false;
+              const candidate = item as Partial<Token>;
+              return typeof candidate.address === "string" && candidate.address.trim() !== "";
+            })
+          : [];
+        setFavoriteTokens(validFavorites);
       }
     } catch {
       setFavoriteTokens([]);
@@ -139,7 +146,7 @@ export function AddLiquidityV2() {
 
   const getSafeMaxInput = (balanceWei: bigint, token: Token, isNative: boolean) => {
     let safeWei = balanceWei;
-    if (isCanonicalUSDC(token) || isNative) {
+    if (isNative && !isCanonicalUSDC(token)) {
       safeWei = (balanceWei * 99n) / 100n;
     }
 
@@ -209,7 +216,7 @@ export function AddLiquidityV2() {
       } finally { setIsLoadingPair(false); }
     };
     checkPairExists();
-  }, [tokenA, tokenB, tokens, address]);
+  }, [tokenA, tokenB, tokens, address, chainId, contracts]);
 
   useEffect(() => {
     if (!pairExists || !tokenA || !tokenB || !amountA || parseFloat(amountA) <= 0) return;
@@ -684,6 +691,7 @@ export function AddLiquidityV2() {
               onChange={e => {
                 if (poolHasLiquidity) return;
                 setAmountB(e.target.value);
+                maxAmountAWeiRef.current = null;
                 maxAmountBWeiRef.current = null;
               }}
               disabled={poolHasLiquidity}

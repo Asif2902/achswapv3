@@ -148,6 +148,9 @@ async function fetchTokenBalancesFromExplorer(
   if (cached && cached.expiresAt > now) {
     return cached.data;
   }
+  if (cached && cached.expiresAt <= now) {
+    tokenBalancesCache.delete(key);
+  }
 
   const inFlight = tokenBalancesInFlight.get(key);
   if (inFlight) {
@@ -194,19 +197,25 @@ async function collectV2CandidatesWithRpcScan(
     const end = Math.min(start + batchSize, totalPairs);
     const indices = Array.from({ length: end - start }, (_, i) => start + i);
 
-    try {
-      const chunk = await Promise.all(
-        indices.map((index) => limit(() => factory.allPairs(index))),
-      );
-      pairAddresses.push(...chunk.map((addr) => String(addr).toLowerCase()));
-    } catch {
-      for (const index of indices) {
-        try {
-          const addr = await limit(() => factory.allPairs(index));
-          pairAddresses.push(String(addr).toLowerCase());
-        } catch {
-          continue;
-        }
+    const chunkResults = await Promise.allSettled(
+      indices.map((index) => limit(() => factory.allPairs(index))),
+    );
+
+    const failedIndices: number[] = [];
+    chunkResults.forEach((result, idx) => {
+      if (result.status === "fulfilled") {
+        pairAddresses.push(String(result.value).toLowerCase());
+      } else {
+        failedIndices.push(indices[idx]);
+      }
+    });
+
+    for (const index of failedIndices) {
+      try {
+        const addr = await limit(() => factory.allPairs(index));
+        pairAddresses.push(String(addr).toLowerCase());
+      } catch {
+        continue;
       }
     }
   }
@@ -296,7 +305,100 @@ export async function discoverV2PositionsFromExplorer(params: {
     explorerErr = err instanceof Error ? err : new Error(String(err));
   }
 
-  if (uniqueCandidates.size === 0 && retryWithFallbackScan && explorerErr) {
+  const factory = new Contract(factoryAddress, FACTORY_ABI, provider);
+  const limit = createLimiter(maxConcurrent);
+
+  const discoverValidatedPositions = async (
+    candidates: Map<string, bigint>,
+  ): Promise<V2DiscoveredPosition[]> => {
+    if (candidates.size === 0) {
+      return [];
+    }
+
+    const candidateEntries = Array.from(candidates.entries());
+    const discovered = await Promise.all(
+      candidateEntries.map(([pairAddressLower]) =>
+        limit(async (): Promise<V2DiscoveredPosition | null> => {
+          try {
+            const pairAddress = pairAddressLower;
+            const pair = new Contract(pairAddress, PAIR_ABI, provider);
+
+            const [token0Address, token1Address] = await Promise.all([
+              pair.token0(),
+              pair.token1(),
+            ]);
+
+            const factoryPairAddress = await factory.getPair(token0Address, token1Address);
+            if (!factoryPairAddress || factoryPairAddress.toLowerCase() === ZERO_ADDRESS) {
+              return null;
+            }
+
+            if (factoryPairAddress.toLowerCase() !== pairAddressLower) {
+              return null;
+            }
+
+            const [reserves, totalSupply, liveLiquidity, token0Info, token1Info] = await Promise.all([
+              pair.getReserves(),
+              pair.totalSupply(),
+              pair.balanceOf(ownerAddress),
+              safeTokenInfo(token0Address, provider, knownTokens),
+              safeTokenInfo(token1Address, provider, knownTokens),
+            ]);
+
+            if (totalSupply <= 0n || liveLiquidity <= 0n) {
+              return null;
+            }
+
+            const reserve0Raw = reserves.reserve0 ?? reserves[0] ?? 0n;
+            const reserve1Raw = reserves.reserve1 ?? reserves[1] ?? 0n;
+            const reserve0 = typeof reserve0Raw === "bigint" ? reserve0Raw : BigInt(reserve0Raw.toString());
+            const reserve1 = typeof reserve1Raw === "bigint" ? reserve1Raw : BigInt(reserve1Raw.toString());
+
+            const amount0 = (liveLiquidity * reserve0) / totalSupply;
+            const amount1 = (liveLiquidity * reserve1) / totalSupply;
+
+            return {
+              pairAddress,
+              token0Address,
+              token1Address,
+              token0Symbol: token0Info.symbol,
+              token1Symbol: token1Info.symbol,
+              token0Name: token0Info.name,
+              token1Name: token1Info.name,
+              token0Decimals: token0Info.decimals,
+              token1Decimals: token1Info.decimals,
+              liquidity: liveLiquidity,
+              totalSupply,
+              reserve0,
+              reserve1,
+              amount0,
+              amount1,
+            };
+          } catch {
+            return null;
+          }
+        }),
+      ),
+    );
+
+    return discovered.filter((position): position is V2DiscoveredPosition => position !== null);
+  };
+
+  const discoveredByPair = new Map<string, V2DiscoveredPosition>();
+  const addDiscovered = (positions: V2DiscoveredPosition[]) => {
+    for (const position of positions) {
+      const key = position.pairAddress.toLowerCase();
+      const existing = discoveredByPair.get(key);
+      if (!existing || position.liquidity > existing.liquidity) {
+        discoveredByPair.set(key, position);
+      }
+    }
+  };
+
+  const explorerDiscovered = await discoverValidatedPositions(uniqueCandidates);
+  addDiscovered(explorerDiscovered);
+
+  if (explorerDiscovered.length === 0 && retryWithFallbackScan && explorerErr) {
     console.warn("[V2 discovery] Explorer API failed, retrying with RPC fallback scan", explorerErr);
     try {
       const fallbackCandidates = await collectV2CandidatesWithRpcScan(
@@ -305,14 +407,10 @@ export async function discoverV2PositionsFromExplorer(params: {
         provider,
         maxConcurrent,
       );
-      for (const [addr, liq] of fallbackCandidates.entries()) {
-        const prev = uniqueCandidates.get(addr) ?? 0n;
-        if (liq > prev) {
-          uniqueCandidates.set(addr, liq);
-        }
-      }
+      const fallbackDiscovered = await discoverValidatedPositions(fallbackCandidates);
+      addDiscovered(fallbackDiscovered);
     } catch (fallbackErr) {
-      if (uniqueCandidates.size === 0) {
+      if (discoveredByPair.size === 0) {
         const fallbackMessage = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
         const explorerMessage = explorerErr.message;
         throw new Error(
@@ -322,83 +420,8 @@ export async function discoverV2PositionsFromExplorer(params: {
     }
   }
 
-  if (uniqueCandidates.size === 0) {
-    return [];
-  }
-
-  const factory = new Contract(factoryAddress, FACTORY_ABI, provider);
-  const limit = createLimiter(maxConcurrent);
-
-  const candidateEntries = Array.from(uniqueCandidates.entries());
-  const discovered = await Promise.all(
-    candidateEntries.map(([pairAddressLower]) =>
-      limit(async (): Promise<V2DiscoveredPosition | null> => {
-        try {
-          const pairAddress = pairAddressLower;
-          const pair = new Contract(pairAddress, PAIR_ABI, provider);
-
-          const [token0Address, token1Address] = await Promise.all([
-            pair.token0(),
-            pair.token1(),
-          ]);
-
-          const factoryPairAddress = await factory.getPair(token0Address, token1Address);
-          if (!factoryPairAddress || factoryPairAddress.toLowerCase() === ZERO_ADDRESS) {
-            return null;
-          }
-
-          if (factoryPairAddress.toLowerCase() !== pairAddressLower) {
-            return null;
-          }
-
-          const [reserves, totalSupply, liveLiquidity, token0Info, token1Info] = await Promise.all([
-            pair.getReserves(),
-            pair.totalSupply(),
-            pair.balanceOf(ownerAddress),
-            safeTokenInfo(token0Address, provider, knownTokens),
-            safeTokenInfo(token1Address, provider, knownTokens),
-          ]);
-
-          if (totalSupply <= 0n || liveLiquidity <= 0n) {
-            return null;
-          }
-
-          const reserve0Raw = reserves.reserve0 ?? reserves[0] ?? 0n;
-          const reserve1Raw = reserves.reserve1 ?? reserves[1] ?? 0n;
-          const reserve0 = typeof reserve0Raw === "bigint" ? reserve0Raw : BigInt(reserve0Raw.toString());
-          const reserve1 = typeof reserve1Raw === "bigint" ? reserve1Raw : BigInt(reserve1Raw.toString());
-
-          const amount0 = (liveLiquidity * reserve0) / totalSupply;
-          const amount1 = (liveLiquidity * reserve1) / totalSupply;
-
-          return {
-            pairAddress,
-            token0Address,
-            token1Address,
-            token0Symbol: token0Info.symbol,
-            token1Symbol: token1Info.symbol,
-            token0Name: token0Info.name,
-            token1Name: token1Info.name,
-            token0Decimals: token0Info.decimals,
-            token1Decimals: token1Info.decimals,
-            liquidity: liveLiquidity,
-            totalSupply,
-            reserve0,
-            reserve1,
-            amount0,
-            amount1,
-          };
-        } catch {
-          return null;
-        }
-      }),
-    ),
-  );
-
-  return discovered
-    .filter((position): position is V2DiscoveredPosition => position !== null)
-    .sort((a, b) => {
-      if (a.liquidity === b.liquidity) return 0;
-      return a.liquidity > b.liquidity ? -1 : 1;
-    });
+  return Array.from(discoveredByPair.values()).sort((a, b) => {
+    if (a.liquidity === b.liquidity) return 0;
+    return a.liquidity > b.liquidity ? -1 : 1;
+  });
 }

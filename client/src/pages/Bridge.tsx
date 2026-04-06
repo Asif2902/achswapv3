@@ -762,7 +762,12 @@ export default function Bridge() {
             destinationDomain: Number(parsedTx.args[1]),
           };
         }
-      } catch {
+      } catch (err) {
+        console.error("Failed to decode depositForBurn transaction", {
+          txHash,
+          dataPrefix: tx.data?.slice(0, 10),
+          error: err,
+        });
         decodedDepositForBurn = null;
       }
 
@@ -804,7 +809,12 @@ export default function Bridge() {
             destinationDomain: Number(parsed.args.destinationDomain),
           };
         }
-      } catch {
+      } catch (err) {
+        console.error("Failed to parse DepositForBurn event", {
+          txHash,
+          eventAddress: burnEvent.address,
+          error: err,
+        });
         parsedBurnEvent = null;
       }
 
@@ -853,8 +863,6 @@ export default function Bridge() {
         }
       }
       
-      console.log("Final amount:", amount, "receipt:", !!receipt, "logs:", receipt?.logs?.length);
-
       // Close modal and notification NOW that validation passed
       setManualClaimOpen(false);
       setNotifOpen(false);

@@ -115,7 +115,7 @@ async function quoteWithRetry<T>(
   baseDelayMs = 80,
 ): Promise<T> {
   let lastTransientError: unknown;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
@@ -125,7 +125,7 @@ async function quoteWithRetry<T>(
       }
 
       lastTransientError = err;
-      if (attempt === maxRetries - 1) {
+      if (attempt === maxRetries) {
         break;
       }
 
@@ -236,7 +236,8 @@ export async function getV2Quote(
     if (bestOutputAmount && bestPath.length > 0) {
       try {
         const spotAmounts = await quoteWithRetry(() => router.getAmountsOut(testIn, bestPath));
-        bestPriceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], bestOutputAmount);
+        const probeImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], bestOutputAmount);
+        bestPriceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
       } catch {
         // probe failed — impact unavailable
       }
@@ -416,7 +417,8 @@ export async function getV3Quote(
     try {
       if (useMultiHop && bestMultiHop) {
         const spotResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(bestMultiHop.path, testIn));
-        priceImpact = calcV3Impact(spotResult[0], bestMultiHop.outputAmount);
+        const probeImpact = calcV3Impact(spotResult[0], bestMultiHop.outputAmount);
+        priceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
       } else if (bestSingle) {
         const spotResult = await quoteWithRetry(() =>
           quoter.quoteExactInputSingle.staticCall({
@@ -427,7 +429,8 @@ export async function getV3Quote(
             sqrtPriceLimitX96: 0n,
           })
         );
-        priceImpact = calcV3Impact(spotResult[0], bestSingle.outputAmount);
+        const probeImpact = calcV3Impact(spotResult[0], bestSingle.outputAmount);
+        priceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
       }
     } catch {
       // probe failed — impact unavailable
@@ -660,6 +663,9 @@ export async function getRWAQuote(
       // quoteBuy(pairId, usdcIn) returns (synthOut, fee, netUsdc, price, isStale)
       const result = await quoteWithRetry(() => vault.quoteBuy(pairId, amountIn));
       const synthOut = result[0];
+      if (synthOut <= 0n) {
+        return null;
+      }
       const fee = result[1];
       const price = result[3];
       const isStale = result[4];
@@ -689,6 +695,9 @@ export async function getRWAQuote(
       // Redeem: quoteRedeem(pairId, synthAmount) returns (usdcOut, fee, grossUsdc, price, isStale, reserveOk)
       const result = await quoteWithRetry(() => vault.quoteRedeem(pairId, amountIn));
       const usdcOut = result[0];
+      if (usdcOut <= 0n) {
+        return null;
+      }
       const fee = result[1];
       const price = result[3];
       const isStale = result[4];
