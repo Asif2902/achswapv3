@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback, startTransition } from "react";
 import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2, BarChart3, Star, Clock } from "lucide-react";
 import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
@@ -7,6 +7,7 @@ import { formatAmount } from "@/lib/decimal-utils";
 import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
 
 const MAX_RENDER_ITEMS_PER_SECTION = 80;
+const MAX_RENDER_COMMUNITY_ITEMS = 30;
 const communityTokenCache = new Map<number, CommunityToken[]>();
 const communityTokenInFlight = new Map<number, Promise<CommunityToken[]>>();
 
@@ -67,6 +68,12 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const hiddenKey = `hiddenCommunityTokens:${chainId ?? ""}`;
 
   useEffect(() => {
+    if (!chainId || rwaOnly) return;
+    if (communityTokenCache.has(chainId)) return;
+    void loadCommunityTokens(chainId);
+  }, [chainId, rwaOnly]);
+
+  useEffect(() => {
     try {
       const stored = JSON.parse(localStorage.getItem(hiddenKey) || "[]");
       setHiddenCommunity(new Set(stored));
@@ -107,7 +114,9 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             loadCommunityTokens(chainId)
               .then((rows) => {
                 if (!cancelled) {
-                  setCommunityTokens(rows);
+                  startTransition(() => {
+                    setCommunityTokens(rows);
+                  });
                 }
               })
               .finally(() => {
@@ -229,7 +238,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
     const community = filteredCommunityTokens
       .filter((t) => tokenPassesActiveFilters(t))
-      .slice(0, MAX_RENDER_ITEMS_PER_SECTION);
+      .slice(0, MAX_RENDER_COMMUNITY_ITEMS);
 
     // When rwaOnly mode, only show RWA tokens
     if (rwaOnly) {
@@ -299,8 +308,12 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
           setImportError(filterMessage);
           return;
         }
-        onSelect(token);
         setSearchQuery("");
+        setImportError("");
+        onClose();
+        requestAnimationFrame(() => {
+          onSelect(token);
+        });
       }
     } catch (err: any) {
       setImportError(err.message || "Failed to import token");
@@ -310,9 +323,12 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   };
 
   const handleSelect = (token: Token) => {
-    onSelect(token);
+    onClose();
     setSearchQuery("");
     setImportError("");
+    requestAnimationFrame(() => {
+      onSelect(token);
+    });
   };
 
   if (!mounted) return null;
@@ -626,7 +642,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                       userAddress={userAddress}
                       index={i}
                       onClick={() => handleSelect(token)}
-                      showBalance={showRowBalances}
+                      showBalance={false}
                       onDelete={handleDeleteCommunity}
                       resetHolding={resetHoldingKey}
                       isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
