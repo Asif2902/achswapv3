@@ -845,13 +845,13 @@ export function AddLiquidityV3Basic() {
         maxAmountBWeiRef.current = null;
         setTokenA(t);
         setShowTokenASelector(false);
-      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} showBalances={false} />
       <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => {
         maxAmountAWeiRef.current = null;
         maxAmountBWeiRef.current = null;
         setTokenB(t);
         setShowTokenBSelector(false);
-      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} showBalances={false} />
     </>
   );
 }

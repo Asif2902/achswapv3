@@ -6,7 +6,7 @@ import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
 import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
 
-const MAX_RENDER_ITEMS_PER_SECTION = 80;
+const MAX_RENDER_ITEMS_PER_SECTION = 40;
 const communityTokenCache = new Map<number, CommunityToken[]>();
 
 interface TokenSelectorProps {
@@ -20,10 +20,11 @@ interface TokenSelectorProps {
   recentTokens?: Token[];
   favoriteTokens?: Token[];
   onToggleFavorite?: (token: Token) => void;
+  showBalances?: boolean;
 }
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete, rwaOnly, recentTokens = [], favoriteTokens = [], onToggleFavorite }: TokenSelectorProps) {
+export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete, rwaOnly, recentTokens = [], favoriteTokens = [], onToggleFavorite, showBalances = true }: TokenSelectorProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState("");
@@ -48,6 +49,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
   // Animate in/out
   useEffect(() => {
+    let communityFetchTimer: number | null = null;
+
     if (open) {
       setMounted(true);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
@@ -56,21 +59,26 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         setTimeout(() => inputRef.current?.focus(), 120);
       }
       // Fetch community tokens
-      if (chainId) {
+      if (chainId && !rwaOnly) {
         const cachedCommunity = communityTokenCache.get(chainId);
         if (cachedCommunity) {
           setCommunityTokens(cachedCommunity);
           setLoadingCommunity(false);
-          return;
+        } else {
+          // Defer heavy community fetch until after the opening animation frame
+          communityFetchTimer = window.setTimeout(() => {
+            setLoadingCommunity(true);
+            fetchCommunityTokens(chainId)
+              .then((rows) => {
+                communityTokenCache.set(chainId, rows);
+                setCommunityTokens(rows);
+              })
+              .finally(() => setLoadingCommunity(false));
+          }, 120);
         }
-
-        setLoadingCommunity(true);
-        fetchCommunityTokens(chainId)
-          .then((rows) => {
-            communityTokenCache.set(chainId, rows);
-            setCommunityTokens(rows);
-          })
-          .finally(() => setLoadingCommunity(false));
+      } else if (rwaOnly) {
+        setCommunityTokens([]);
+        setLoadingCommunity(false);
       }
     } else {
       setVisible(false);
@@ -80,9 +88,20 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         setSearchQuery("");
         setImportError("");
       }, 300);
-      return () => clearTimeout(t);
+      return () => {
+        if (communityFetchTimer !== null) {
+          window.clearTimeout(communityFetchTimer);
+        }
+        clearTimeout(t);
+      };
     }
-  }, [open, chainId]);
+
+    return () => {
+      if (communityFetchTimer !== null) {
+        window.clearTimeout(communityFetchTimer);
+      }
+    };
+  }, [open, chainId, rwaOnly]);
 
   useEffect(() => {
     if (!open) return;
@@ -97,13 +116,14 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     [tokens]
   );
   const filteredCommunityTokens = useMemo(() => {
+    if (rwaOnly) return [];
     if (!communityTokens.length) return [];
     const q = searchQuery.toLowerCase().trim();
     return communityTokens
       .filter(t => !regularAddresses.has(t.address.toLowerCase()))
       .filter(t => !hiddenCommunity.has(t.address.toLowerCase()))
       .filter(t => !q || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q) || t.address.toLowerCase().includes(q));
-  }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity]);
+  }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity, rwaOnly]);
 
   const favoriteAddressSet = useMemo(
     () => new Set(favoriteTokens.map((token) => token.address.toLowerCase())),
@@ -249,7 +269,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   if (!mounted) return null;
 
   const totalCount = tokens.length + filteredCommunityTokens.length;
-  const showRowBalances = !rwaOnly;
+  const showRowBalances = showBalances && !rwaOnly;
 
   return (
     <>
