@@ -348,6 +348,10 @@ export async function discoverV2PositionsFromExplorer(params: {
     explorerErr = err instanceof Error ? err : new Error(String(err));
   }
 
+  if (explorerErr && !retryWithFallbackScan) {
+    throw explorerErr;
+  }
+
   const factory = new Contract(factoryAddress, FACTORY_ABI, provider);
   const limit = createLimiter(maxConcurrent);
 
@@ -359,27 +363,34 @@ export async function discoverV2PositionsFromExplorer(params: {
     }
 
     const candidateEntries = Array.from(candidates.entries());
-    const discovered = await Promise.all(
+    const discoveryResults = await Promise.allSettled(
       candidateEntries.map(([pairAddressLower]) =>
         limit(async (): Promise<V2DiscoveredPosition | null> => {
-          try {
-            const pairAddress = pairAddressLower;
-            const pair = new Contract(pairAddress, PAIR_ABI, provider);
+          const pairAddress = pairAddressLower;
+          const pair = new Contract(pairAddress, PAIR_ABI, provider);
 
-            const [token0Address, token1Address] = await Promise.all([
+          let token0Address: string;
+          let token1Address: string;
+          let factoryPairAddress: string;
+          try {
+            [token0Address, token1Address] = await Promise.all([
               pair.token0(),
               pair.token1(),
             ]);
+            factoryPairAddress = await factory.getPair(token0Address, token1Address);
+          } catch {
+            return null;
+          }
 
-            const factoryPairAddress = await factory.getPair(token0Address, token1Address);
-            if (!factoryPairAddress || factoryPairAddress.toLowerCase() === ZERO_ADDRESS) {
-              return null;
-            }
+          if (!factoryPairAddress || factoryPairAddress.toLowerCase() === ZERO_ADDRESS) {
+            return null;
+          }
 
-            if (factoryPairAddress.toLowerCase() !== pairAddressLower) {
-              return null;
-            }
+          if (factoryPairAddress.toLowerCase() !== pairAddressLower) {
+            return null;
+          }
 
+          try {
             const [reserves, totalSupply, liveLiquidity, token0Info, token1Info] = await Promise.all([
               pair.getReserves(),
               pair.totalSupply(),
@@ -417,14 +428,43 @@ export async function discoverV2PositionsFromExplorer(params: {
               amount0,
               amount1,
             };
-          } catch {
-            return null;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            throw new Error(
+              `[V2 discovery] Confirmed pair read failed for ${pairAddress}: ${message}`,
+            );
           }
         }),
       ),
     );
 
-    return discovered.filter((position): position is V2DiscoveredPosition => position !== null);
+    const discovered: V2DiscoveredPosition[] = [];
+    const confirmedPairErrors: string[] = [];
+
+    for (const result of discoveryResults) {
+      if (result.status === "fulfilled") {
+        if (result.value) discovered.push(result.value);
+      } else {
+        confirmedPairErrors.push(
+          result.reason instanceof Error ? result.reason.message : String(result.reason),
+        );
+      }
+    }
+
+    if (confirmedPairErrors.length > 0) {
+      if (discovered.length === 0) {
+        throw new Error(
+          `V2 discovery confirmed-pair errors: ${confirmedPairErrors.join(" | ")}`,
+        );
+      }
+
+      console.warn(
+        `[V2 discovery] Confirmed pair errors (${confirmedPairErrors.length})`,
+        confirmedPairErrors,
+      );
+    }
+
+    return discovered;
   };
 
   const discoveredByPair = new Map<string, V2DiscoveredPosition>();
