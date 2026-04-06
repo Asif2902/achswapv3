@@ -351,7 +351,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
   const totalCount = tokens.length + filteredCommunityTokens.length;
   const showRowBalances = showBalances && balancesReady;
-  const showCommunityBalances = showRowBalances && !initialRenderMode && !loadingCommunity;
+  const showCommunityBalances = showRowBalances && !loadingCommunity;
   const hasRecentSection = filteredRecent.length > 0;
 
   return (
