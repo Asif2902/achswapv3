@@ -49,6 +49,22 @@ interface AttestationPollResult {
   destinationDomain?: number;
 }
 
+function resolveDestinationChain(
+  destinationDomain: unknown,
+  fallbackChain: CCTPChain | null | undefined,
+): CCTPChain | undefined {
+  if (typeof destinationDomain === "number") {
+    const byDomain = getChainByDomain(destinationDomain);
+    if (byDomain) return byDomain;
+  }
+
+  if (fallbackChain) {
+    return fallbackChain;
+  }
+
+  return undefined;
+}
+
 const INITIAL_STATE: TransferState = {
   step: "idle",
   burnTxHash: null,
@@ -529,10 +545,10 @@ export default function Bridge() {
 
         if (abortRef.current) return;
 
-        const resolvedDst =
-          attestationResult.destinationDomain !== undefined
-            ? getChainByDomain(attestationResult.destinationDomain)
-            : undefined;
+        const resolvedDst = resolveDestinationChain(
+          attestationResult.destinationDomain,
+          dstChain,
+        );
 
         if (!resolvedDst) {
           throw new Error("Could not resolve destination chain from attestation");
@@ -981,10 +997,10 @@ export default function Bridge() {
         
         if (abortRef.current) return;
 
-        const resolvedDestChain =
-          fetchedAttestationResult.destinationDomain !== undefined
-            ? getChainByDomain(fetchedAttestationResult.destinationDomain)
-            : undefined;
+        const resolvedDestChain = resolveDestinationChain(
+          fetchedAttestationResult.destinationDomain,
+          destChain,
+        );
 
       if (!resolvedDestChain) {
         updateTransferStatus(txHash, {
@@ -1191,10 +1207,10 @@ export default function Bridge() {
 
       if (abortRef.current) return;
 
-      const resolvedDestChain =
-        attestationResult.destinationDomain !== undefined
-          ? getChainByDomain(attestationResult.destinationDomain)
-          : undefined;
+      const resolvedDestChain = resolveDestinationChain(
+        attestationResult.destinationDomain,
+        destChain,
+      );
 
       if (!resolvedDestChain) {
         throw new Error("Could not resolve destination chain from attestation");

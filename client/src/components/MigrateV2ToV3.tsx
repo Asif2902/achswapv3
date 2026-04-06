@@ -44,6 +44,7 @@ const V2_PAIR_ABI = [
 const MIGRATION_SLIPPAGE_BPS = 100n; // 1%
 const MIGRATION_SLIPPAGE_BPS_RETRY = 300n; // 3% fallback for volatile pools
 const MIGRATION_SLIPPAGE_BPS_RETRY_WIDE = 700n; // 7% final strict retry before optional zero-min
+const MIGRATION_SLIPPAGE_BPS_RETRY_MAX = 1500n; // 15% final strict retry to avoid immediate zero-min fallback
 const MIN_SQRT_RATIO = 4295128739n;
 const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
 
@@ -522,6 +523,7 @@ export function MigrateV2ToV3() {
         MIGRATION_SLIPPAGE_BPS,
         MIGRATION_SLIPPAGE_BPS_RETRY,
         MIGRATION_SLIPPAGE_BPS_RETRY_WIDE,
+        MIGRATION_SLIPPAGE_BPS_RETRY_MAX,
       ];
 
       let receipt: Awaited<ReturnType<typeof executeMigration>> | null = null;
