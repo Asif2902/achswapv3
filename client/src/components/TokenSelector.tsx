@@ -84,7 +84,6 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
   // Animate in/out
   useEffect(() => {
-    let communityFetchTimer: number | null = null;
     let balanceTimer: number | null = null;
     let cancelled = false;
 
@@ -102,7 +101,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         if (!cancelled) {
           setBalancesReady(true);
         }
-      }, 180);
+      }, 120);
 
       const isDesktop = window.matchMedia("(pointer: fine)").matches;
       if (isDesktop) {
@@ -116,23 +115,9 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
           setCommunityTokens(cachedCommunity);
           setLoadingCommunity(false);
         } else {
-          // Defer heavy community fetch until after the opening animation frame
-          communityFetchTimer = window.setTimeout(() => {
-            setLoadingCommunity(true);
-            loadCommunityTokens(chainId)
-              .then((rows) => {
-                if (!cancelled) {
-                  startTransition(() => {
-                    setCommunityTokens(rows);
-                  });
-                }
-              })
-              .finally(() => {
-                if (!cancelled) {
-                  setLoadingCommunity(false);
-                }
-              });
-          }, 120);
+          // Defer network + heavy list update to the post-open effect
+          setCommunityTokens([]);
+          setLoadingCommunity(false);
         }
       } else if (rwaOnly) {
         setCommunityTokens([]);
@@ -148,9 +133,6 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       }, 300);
       return () => {
         cancelled = true;
-        if (communityFetchTimer !== null) {
-          window.clearTimeout(communityFetchTimer);
-        }
         if (balanceTimer !== null) {
           window.clearTimeout(balanceTimer);
         }
@@ -160,9 +142,6 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
     return () => {
       cancelled = true;
-      if (communityFetchTimer !== null) {
-        window.clearTimeout(communityFetchTimer);
-      }
       if (balanceTimer !== null) {
         window.clearTimeout(balanceTimer);
       }
@@ -368,7 +347,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   if (!mounted) return null;
 
   const totalCount = tokens.length + filteredCommunityTokens.length;
-  const showRowBalances = showBalances && !rwaOnly && balancesReady;
+  const showRowBalances = showBalances && balancesReady;
+  const showCommunityBalances = showRowBalances && !initialRenderMode && !loadingCommunity;
 
   return (
     <>
@@ -676,7 +656,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                       userAddress={userAddress}
                       index={i}
                       onClick={() => handleSelect(token)}
-                      showBalance={false}
+                      showBalance={showCommunityBalances}
                       onDelete={handleDeleteCommunity}
                       resetHolding={resetHoldingKey}
                       isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
