@@ -1,14 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
@@ -164,8 +156,9 @@ export function MigrateV2ToV3() {
   const [isCheckingPool, setIsCheckingPool] = useState(false);
   const [priceWarningConfirmed, setPriceWarningConfirmed] = useState(false);
   const [zeroMinConfirmed, setZeroMinConfirmed] = useState(false);
-  const [showZeroMinDialog, setShowZeroMinDialog] = useState(false);
-  const [showHighPriceDialog, setShowHighPriceDialog] = useState(false);
+  const [confirmModalType, setConfirmModalType] = useState<"price" | "zero-min" | null>(null);
+  const [confirmChecked, setConfirmChecked] = useState(false);
+  const [confirmText, setConfirmText] = useState("");
   const [tokens, setTokens] = useState<Token[]>([]);
 
   const { address, isConnected } = useAccount();
@@ -305,7 +298,9 @@ export function MigrateV2ToV3() {
     checkV3Pool();
     setPriceWarningConfirmed(false);
     setZeroMinConfirmed(false);
-    setShowHighPriceDialog(false);
+    setConfirmModalType(null);
+    setConfirmChecked(false);
+    setConfirmText("");
     return () => {
       cancelled = true;
     };
@@ -410,11 +405,15 @@ export function MigrateV2ToV3() {
   const handleMigrate = async () => {
     if (!selectedPosition || !address || !contracts || !window.ethereum || !migratorExists) return;
     if (isExtremePriceDiff && !priceWarningConfirmed) {
-      setShowHighPriceDialog(true);
+      setConfirmModalType("price");
+      setConfirmChecked(false);
+      setConfirmText("");
       return;
     }
     if (showPriceWarning) {
-      setShowHighPriceDialog(true);
+      setConfirmModalType("price");
+      setConfirmChecked(false);
+      setConfirmText("");
       return;
     }
 
@@ -583,7 +582,9 @@ export function MigrateV2ToV3() {
       if (!receipt) {
         if (!allowZeroMinFallback) {
           if (!initialState.poolExists && !zeroMinConfirmed) {
-            setShowZeroMinDialog(true);
+            setConfirmModalType("zero-min");
+            setConfirmChecked(false);
+            setConfirmText("");
             setIsMigrating(false);
             return;
           }
@@ -943,7 +944,11 @@ export function MigrateV2ToV3() {
                               </div>
                             </div>
                             <button
-                              onClick={() => setShowHighPriceDialog(true)}
+                              onClick={() => {
+                                setConfirmModalType("price");
+                                setConfirmChecked(false);
+                                setConfirmText("");
+                              }}
                               className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
                               style={{
                                 background: "rgba(239,68,68,0.12)",
@@ -975,7 +980,11 @@ export function MigrateV2ToV3() {
                               </div>
                             </div>
                             <button
-                              onClick={() => setShowZeroMinDialog(true)}
+                              onClick={() => {
+                                setConfirmModalType("zero-min");
+                                setConfirmChecked(false);
+                                setConfirmText("");
+                              }}
                               className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
                               style={{
                                 background: "rgba(245,158,11,0.12)",
@@ -1065,99 +1074,79 @@ export function MigrateV2ToV3() {
         </div>
       )}
 
-      <Dialog open={showZeroMinDialog} onOpenChange={setShowZeroMinDialog}>
-        <DialogContent className="max-w-md border-border/40 bg-card/95 text-foreground">
-          <DialogHeader>
-            <DialogTitle className="text-base sm:text-lg">Allow Flexible Minimums (Zero-Min)</DialogTitle>
-            <DialogDescription className="text-sm leading-relaxed">
-              This is a safety fallback for difficult migrations. It can complete even when price shifts are large,
-              but may accept materially worse execution if the market moves during transaction inclusion.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3 text-xs sm:text-sm">
-            <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-3">
-              <p className="font-semibold text-amber-200">What will happen</p>
-              <p className="mt-1 text-amber-100/80">
-                The migrator will set `amount0Min` and `amount1Min` to `0`, so the transaction won't fail on slippage check.
-                Any unspent dust is still refunded by the migrator.
-              </p>
+      {confirmModalType && (
+        <div className="sw-impact-overlay" onClick={(e) => {
+          if (e.target === e.currentTarget) {
+            setConfirmModalType(null);
+            setConfirmChecked(false);
+            setConfirmText("");
+          }
+        }}>
+          <div className="sw-impact-modal" style={confirmModalType === "price"
+            ? { border: "1px solid rgba(239,68,68,0.35)" }
+            : { border: "1px solid rgba(245,158,11,0.35)" }
+          }>
+            <div className="sw-impact-icon">
+              <AlertTriangle style={{ width: 42, height: 42, color: confirmModalType === "price" ? "#f87171" : "#fbbf24" }} />
             </div>
-
-            <div className="rounded-lg border border-indigo-400/30 bg-indigo-500/10 p-3">
-              <p className="font-semibold text-indigo-200">Current context</p>
-              <p className="mt-1 text-indigo-100/80">
-                V2 vs V3 price diff: {priceDiff?.diff !== undefined ? `${priceDiff.diff.toFixed(2)}%` : "unavailable"}
-                {" • "}
-                Current adaptive strict slippage: {(Number(adaptiveSlippageBps) / 100).toFixed(2)}%
-              </p>
+            <div className="sw-impact-title">
+              {confirmModalType === "price" ? "Large Price Difference Detected" : "Flexible Minimums (Zero-Min)"}
             </div>
-          </div>
-
-          <DialogFooter className="mt-1 flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <Button
-              variant="outline"
-              onClick={() => setShowZeroMinDialog(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={() => {
-                setZeroMinConfirmed(true);
-                setShowZeroMinDialog(false);
-              }}
-              className="bg-amber-500 text-black hover:bg-amber-400"
-            >
-              I understand, allow zero-min fallback
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={showHighPriceDialog} onOpenChange={setShowHighPriceDialog}>
-        <DialogContent className="max-w-md border-red-500/30 bg-card/95 text-foreground">
-          <DialogHeader>
-            <DialogTitle className="text-base sm:text-lg text-red-300">Large Price Difference Detected</DialogTitle>
-            <DialogDescription className="text-sm leading-relaxed">
-              This migration sees a large mismatch between current V2 reserves and V3 pool price.
-              Execution can be significantly worse than expected.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-3 text-xs sm:text-sm">
-            <div className="rounded-lg border border-red-500/35 bg-red-500/10 p-3">
-              <p className="font-semibold text-red-200">Current mismatch</p>
-              <p className="mt-1 text-red-100/80">
-                V2 price: {formatPrice(priceDiff?.v2Price ?? null)}{" • "}
-                V3 price: {formatPrice(priceDiff?.v3Price ?? null)}{" • "}
-                Difference: {priceDiff ? `${priceDiff.diff.toFixed(2)}%` : "unavailable"}
-              </p>
+            <div className="sw-impact-desc">
+              {confirmModalType === "price"
+                ? `This migration sees a large mismatch between V2 and V3 pricing (${priceDiff ? `${priceDiff.diff.toFixed(2)}%` : "unknown"}). Execution can be significantly worse than expected.`
+                : "This fallback sets amount0Min and amount1Min to zero so slippage checks won't block migration, but execution can be materially worse if price moves."}
             </div>
-
-            <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-3">
-              <p className="font-semibold text-amber-200">Recommendation</p>
-              <p className="mt-1 text-amber-100/80">
-                Consider waiting for prices to converge or using a smaller migration percentage first.
-              </p>
+            <div className="sw-impact-warn-box" style={confirmModalType === "price"
+              ? { background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.22)" }
+              : { background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.22)" }
+            }>
+              <AlertTriangle style={{ width: 16, height: 16, color: confirmModalType === "price" ? "#f87171" : "#fbbf24", flexShrink: 0 }} />
+              <span>
+                {confirmModalType === "price"
+                  ? `V2 ${formatPrice(priceDiff?.v2Price ?? null)} vs V3 ${formatPrice(priceDiff?.v3Price ?? null)}. Consider a smaller migration first.`
+                  : `Current adaptive strict slippage: ${(Number(adaptiveSlippageBps) / 100).toFixed(2)}%. Use zero-min only as a last resort.`}
+              </span>
+            </div>
+            <div className="sw-impact-check">
+              <input type="checkbox" id="migrate-impact-check" checked={confirmChecked} onChange={(e) => setConfirmChecked(e.target.checked)} />
+              <label htmlFor="migrate-impact-check">I understand the risks and want to proceed</label>
+            </div>
+            <div className="sw-impact-input-wrap">
+              <div className="sw-impact-input-label">Type "CONFIRM MIGRATE" to continue</div>
+              <input
+                type="text"
+                className="sw-impact-input"
+                placeholder="CONFIRM MIGRATE"
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+            <div className="sw-impact-btn-row">
+              <button className="sw-impact-btn sw-impact-btn-cancel" onClick={() => { setConfirmModalType(null); setConfirmChecked(false); setConfirmText(""); }}>
+                Cancel
+              </button>
+              <button
+                className="sw-impact-btn sw-impact-btn-confirm"
+                disabled={!confirmChecked || confirmText.trim().toUpperCase() !== "CONFIRM MIGRATE"}
+                onClick={() => {
+                  if (confirmModalType === "price") {
+                    setPriceWarningConfirmed(true);
+                  } else {
+                    setZeroMinConfirmed(true);
+                  }
+                  setConfirmModalType(null);
+                  setConfirmChecked(false);
+                  setConfirmText("");
+                }}
+              >
+                Confirm Migration
+              </button>
             </div>
           </div>
-
-          <DialogFooter className="mt-1 flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <Button variant="outline" onClick={() => setShowHighPriceDialog(false)}>
-              Cancel
-            </Button>
-            <Button
-              onClick={() => {
-                setPriceWarningConfirmed(true);
-                setShowHighPriceDialog(false);
-              }}
-              className="bg-red-500 text-white hover:bg-red-400"
-            >
-              I understand, continue anyway
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        </div>
+      )}
 
       {/* Refresh */}
       {positions.length > 0 && (
@@ -1171,6 +1160,33 @@ export function MigrateV2ToV3() {
           {isLoading ? "Refreshing…" : "Refresh Positions"}
         </Button>
       )}
+
+      <style>{`
+        .sw-impact-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.7); backdrop-filter:blur(4px); z-index:200; display:flex; align-items:center; justify-content:center; padding:16px; animation:fadeIn 0.15s ease; }
+        @keyframes fadeIn { from{opacity:0} to{opacity:1} }
+        .sw-impact-modal { background:#1a1a2e; border-radius:18px; padding:24px; width:100%; max-width:380px; box-shadow:0 24px 60px rgba(0,0,0,0.6); }
+        .sw-impact-icon { display:flex; justify-content:center; margin-bottom:14px; }
+        .sw-impact-title { font-size:17px; font-weight:800; color:white; text-align:center; margin-bottom:10px; }
+        .sw-impact-desc { font-size:13px; color:rgba(255,255,255,0.6); text-align:center; line-height:1.55; margin-bottom:18px; }
+        .sw-impact-warn-box { border-radius:12px; padding:12px 14px; margin-bottom:18px; display:flex; align-items:flex-start; gap:10px; }
+        .sw-impact-warn-box svg { flex-shrink:0; margin-top:1px; }
+        .sw-impact-warn-box span { font-size:12px; color:rgba(255,255,255,0.7); line-height:1.5; }
+        .sw-impact-check { display:flex; align-items:center; gap:10px; cursor:pointer; margin-bottom:14px; }
+        .sw-impact-check input[type=checkbox] { width:17px; height:17px; accent-color:#6366f1; cursor:pointer; flex-shrink:0; }
+        .sw-impact-check label { font-size:13px; color:rgba(255,255,255,0.75); cursor:pointer; }
+        .sw-impact-input-wrap { margin-bottom:20px; }
+        .sw-impact-input-label { font-size:11px; font-weight:700; color:rgba(255,255,255,0.4); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:7px; }
+        .sw-impact-input { width:100%; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.12); border-radius:10px; padding:10px 14px; color:white; font-size:14px; font-weight:700; letter-spacing:0.05em; outline:none; box-sizing:border-box; transition:border-color 0.2s; font-family:inherit; }
+        .sw-impact-input:focus { border-color:rgba(99,102,241,0.5); }
+        .sw-impact-input::placeholder { color:rgba(255,255,255,0.2); font-weight:400; letter-spacing:0; }
+        .sw-impact-btn-row { display:flex; gap:10px; }
+        .sw-impact-btn { flex:1; height:44px; border-radius:12px; font-weight:800; font-size:14px; cursor:pointer; transition:all 0.2s; border:none; }
+        .sw-impact-btn-cancel { background:rgba(255,255,255,0.07); color:rgba(255,255,255,0.6); border:1px solid rgba(255,255,255,0.1); }
+        .sw-impact-btn-cancel:hover { background:rgba(255,255,255,0.12); color:rgba(255,255,255,0.85); }
+        .sw-impact-btn-confirm { background:rgba(239,68,68,0.15); color:#f87171; border:1px solid rgba(239,68,68,0.35); }
+        .sw-impact-btn-confirm:hover:not(:disabled) { background:rgba(239,68,68,0.25); border-color:rgba(239,68,68,0.55); }
+        .sw-impact-btn-confirm:disabled { opacity:0.4; cursor:not-allowed; }
+      `}</style>
     </div>
   );
 }
