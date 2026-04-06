@@ -239,13 +239,16 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     filteredImported,
     filteredRWA,
   } = useMemo(() => {
+    const visibleRecents = recentTokens
+      .filter((t) => tokenPassesActiveFilters(t))
+      .filter((t) => !favoriteAddressSet.has(t.address.toLowerCase()));
+
     const favorites = favoriteTokens
       .filter((t) => tokenPassesActiveFilters(t))
       .sort((a, b) => a.symbol.localeCompare(b.symbol))
       .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
 
-    const recents = recentTokens
-      .filter((t) => tokenPassesActiveFilters(t))
+    const recents = visibleRecents
       .sort((a, b) => a.symbol.localeCompare(b.symbol))
       .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
 
@@ -299,7 +302,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       filteredImported: imported,
         filteredRWA: rwa,
       };
-  }, [tokens, favoriteTokens, recentTokens, filteredCommunityTokens, rwaOnly, matchesSearch, tokenPassesActiveFilters, initialRenderMode]);
+  }, [tokens, favoriteTokens, recentTokens, filteredCommunityTokens, rwaOnly, matchesSearch, tokenPassesActiveFilters, initialRenderMode, favoriteAddressSet]);
 
   const isValidAddress = Boolean(searchQuery.trim() && isAddress(searchQuery.trim()));
   const tokenExists =
@@ -349,6 +352,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const totalCount = tokens.length + filteredCommunityTokens.length;
   const showRowBalances = showBalances && balancesReady;
   const showCommunityBalances = showRowBalances && !initialRenderMode && !loadingCommunity;
+  const hasRecentSection = filteredRecent.length > 0;
 
   return (
     <>
@@ -535,7 +539,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             )}
 
             {/* ── Recent tokens section ── */}
-            {filteredRecent.length > 0 && (
+            {hasRecentSection && (
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 4px", marginBottom: 2 }}>
                   <Clock style={{ width: 11, height: 11, color: "#818cf8" }} />
@@ -668,7 +672,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             )}
 
             {/* Empty state */}
-            {filteredFavorites.length === 0 && filteredRecent.length === 0 && filteredVerified.length === 0 && filteredImported.length === 0 && filteredRWA.length === 0 && filteredCommunity.length === 0 && !showImportButton && !loadingCommunity && (
+            {filteredFavorites.length === 0 && !hasRecentSection && filteredVerified.length === 0 && filteredImported.length === 0 && filteredRWA.length === 0 && filteredCommunity.length === 0 && !showImportButton && !loadingCommunity && (
               <div className="flex flex-col items-center justify-center py-16 gap-3">
                 <div className="w-12 h-12 rounded-2xl flex items-center justify-center" style={{ background: "rgba(255,255,255,0.04)" }}>
                   <Search className="w-5 h-5 text-white/20" />

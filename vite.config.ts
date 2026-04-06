@@ -19,16 +19,6 @@ export default defineConfig({
   build: {
     outDir: path.resolve(__dirname, "dist/public"),
     emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          "vendor-ethers": ["ethers"],
-          "vendor-rainbowkit": ["@rainbow-me/rainbowkit"],
-          "vendor-react-query": ["@tanstack/react-query"],
-          "vendor-wagmi": ["wagmi"],
-        },
-      },
-    },
   },
   server: {
     host: "0.0.0.0",
