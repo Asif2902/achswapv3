@@ -1,6 +1,14 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
@@ -91,6 +99,17 @@ function applySlippageMin(amount: bigint, bps: bigint = MIGRATION_SLIPPAGE_BPS):
   return (amount * (10_000n - bps)) / 10_000n;
 }
 
+function computeAdaptiveSlippageBps(priceDiffPercent: number | null): bigint {
+  if (!priceDiffPercent || !Number.isFinite(priceDiffPercent) || priceDiffPercent <= 0) {
+    return MIGRATION_SLIPPAGE_BPS;
+  }
+
+  const scaledPercentBps = Math.round(priceDiffPercent * 100); // % -> bps
+  const withSafety = Math.max(Number(MIGRATION_SLIPPAGE_BPS), scaledPercentBps + 10); // +0.10%
+  const bounded = Math.min(withSafety, Number(MIGRATION_SLIPPAGE_BPS_RETRY_MAX));
+  return BigInt(bounded);
+}
+
 function isPriceSlippageCheckError(error: unknown): boolean {
   if (!error) return false;
 
@@ -145,6 +164,7 @@ export function MigrateV2ToV3() {
   const [isCheckingPool, setIsCheckingPool] = useState(false);
   const [priceWarningConfirmed, setPriceWarningConfirmed] = useState(false);
   const [zeroMinConfirmed, setZeroMinConfirmed] = useState(false);
+  const [showZeroMinDialog, setShowZeroMinDialog] = useState(false);
   const [tokens, setTokens] = useState<Token[]>([]);
 
   const { address, isConnected } = useAccount();
@@ -304,6 +324,7 @@ export function MigrateV2ToV3() {
   const priceDiff = getPriceDifference();
   const showPriceWarning = Boolean(v3PoolInfo?.exists && priceDiff && priceDiff.diff > 2 && !priceWarningConfirmed);
   const showZeroMinWarning = Boolean(v3PoolInfo && !v3PoolInfo.exists && !zeroMinConfirmed);
+  const adaptiveSlippageBps = computeAdaptiveSlippageBps(priceDiff?.diff ?? null);
 
   // ── Load V2 positions ───────────────────────────────────────────────────────
   const loadPositions = useCallback(async () => {
@@ -519,12 +540,15 @@ export function MigrateV2ToV3() {
 
       const initialState = await readMigrationState();
       const allowZeroMinFallback = priceWarningConfirmed || (!initialState.poolExists && zeroMinConfirmed);
-      const strictAttemptBps = [
-        MIGRATION_SLIPPAGE_BPS,
-        MIGRATION_SLIPPAGE_BPS_RETRY,
-        MIGRATION_SLIPPAGE_BPS_RETRY_WIDE,
-        MIGRATION_SLIPPAGE_BPS_RETRY_MAX,
-      ];
+      const strictAttemptBps = Array.from(
+        new Set([
+          adaptiveSlippageBps,
+          MIGRATION_SLIPPAGE_BPS,
+          MIGRATION_SLIPPAGE_BPS_RETRY,
+          MIGRATION_SLIPPAGE_BPS_RETRY_WIDE,
+          MIGRATION_SLIPPAGE_BPS_RETRY_MAX,
+        ]),
+      ).sort((a, b) => Number(a - b));
 
       let receipt: Awaited<ReturnType<typeof executeMigration>> | null = null;
       let lastSlippageError: unknown = null;
@@ -542,12 +566,11 @@ export function MigrateV2ToV3() {
 
           lastSlippageError = error;
           if (attempt < strictAttemptBps.length - 1) {
+            const currentBps = Number(strictAttemptBps[attempt]) / 100;
+            const nextBps = Number(strictAttemptBps[attempt + 1]) / 100;
             toast({
               title: "Retrying migration",
-              description:
-                attempt === 0
-                  ? "Price moved; retrying with wider slippage window"
-                  : "Price moved again; trying a wider slippage window",
+              description: `Price moved; widening slippage from ${currentBps.toFixed(2)}% to ${nextBps.toFixed(2)}%`,
             });
             stateForAttempt = await readMigrationState();
           }
@@ -557,11 +580,9 @@ export function MigrateV2ToV3() {
       if (!receipt) {
         if (!allowZeroMinFallback) {
           if (!initialState.poolExists && !zeroMinConfirmed) {
-            toast({
-              title: "Enable flexible minimums",
-              description: "For new pools, confirm flexible minimums and retry to allow a final zero-min fallback",
-              variant: "destructive",
-            });
+            setShowZeroMinDialog(true);
+            setIsMigrating(false);
+            return;
           }
           throw (lastSlippageError ?? new Error("Migration failed due to slippage checks"));
         }
@@ -926,7 +947,7 @@ export function MigrateV2ToV3() {
                               </div>
                             </div>
                             <button
-                              onClick={() => setZeroMinConfirmed(true)}
+                              onClick={() => setShowZeroMinDialog(true)}
                               className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
                               style={{
                                 background: "rgba(245,158,11,0.12)",
@@ -934,7 +955,7 @@ export function MigrateV2ToV3() {
                                 color: "#fde68a",
                               }}
                             >
-                              I understand, allow flexible minimums
+                              Review flexible minimum risks
                             </button>
                           </div>
                         </>
@@ -1013,6 +1034,55 @@ export function MigrateV2ToV3() {
           })}
         </div>
       )}
+
+      <Dialog open={showZeroMinDialog} onOpenChange={setShowZeroMinDialog}>
+        <DialogContent className="max-w-md border-border/40 bg-card/95 text-foreground">
+          <DialogHeader>
+            <DialogTitle className="text-base sm:text-lg">Allow Flexible Minimums (Zero-Min)</DialogTitle>
+            <DialogDescription className="text-sm leading-relaxed">
+              This is a safety fallback for difficult migrations. It can complete even when price shifts are large,
+              but may accept materially worse execution if the market moves during transaction inclusion.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 text-xs sm:text-sm">
+            <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-3">
+              <p className="font-semibold text-amber-200">What will happen</p>
+              <p className="mt-1 text-amber-100/80">
+                The migrator will set `amount0Min` and `amount1Min` to `0`, so the transaction won't fail on slippage check.
+                Any unspent dust is still refunded by the migrator.
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-indigo-400/30 bg-indigo-500/10 p-3">
+              <p className="font-semibold text-indigo-200">Current context</p>
+              <p className="mt-1 text-indigo-100/80">
+                V2 vs V3 price diff: {priceDiff?.diff !== undefined ? `${priceDiff.diff.toFixed(2)}%` : "unavailable"}
+                {" • "}
+                Current adaptive strict slippage: {(Number(adaptiveSlippageBps) / 100).toFixed(2)}%
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter className="mt-1 flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button
+              variant="outline"
+              onClick={() => setShowZeroMinDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                setZeroMinConfirmed(true);
+                setShowZeroMinDialog(false);
+              }}
+              className="bg-amber-500 text-black hover:bg-amber-400"
+            >
+              I understand, allow zero-min fallback
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Refresh */}
       {positions.length > 0 && (
