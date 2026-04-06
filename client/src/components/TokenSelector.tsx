@@ -356,20 +356,6 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     });
   };
 
-  if (!mounted) return null;
-
-  const totalCount = tokens.length + filteredCommunityTokens.length;
-  const showRowBalances = showBalances && balancesReady;
-  const showCommunityBalances = showRowBalances;
-  const hasRecentSection = filteredRecent.length > 0;
-
-  let absoluteRowIndex = 0;
-  const shouldShowBalanceForCurrentRow = (enabled: boolean) => {
-    const allow = enabled && absoluteRowIndex < (balanceBatchIndex + 1) * BALANCE_QUERY_BATCH_SIZE;
-    absoluteRowIndex += 1;
-    return allow;
-  };
-
   useEffect(() => {
     if (!open || !showBalances || !balancesReady) return;
 
@@ -401,6 +387,20 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     filteredImported.length,
     filteredCommunity.length,
   ]);
+
+  if (!mounted) return null;
+
+  const totalCount = tokens.length + filteredCommunityTokens.length;
+  const showRowBalances = showBalances && balancesReady;
+  const showCommunityBalances = showRowBalances;
+  const hasRecentSection = filteredRecent.length > 0;
+
+  let absoluteRowIndex = 0;
+  const shouldShowBalanceForCurrentRow = (enabled: boolean) => {
+    const allow = enabled && absoluteRowIndex < (balanceBatchIndex + 1) * BALANCE_QUERY_BATCH_SIZE;
+    absoluteRowIndex += 1;
+    return allow;
+  };
 
   return (
     <>
