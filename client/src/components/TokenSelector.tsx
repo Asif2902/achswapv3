@@ -64,6 +64,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [balancesReady, setBalancesReady] = useState(false);
   const [communityBalancesReady, setCommunityBalancesReady] = useState(false);
   const [initialRenderMode, setInitialRenderMode] = useState(true);
+  const communityFetchStartedRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
   const chainId = useChainId();
@@ -83,6 +84,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     let cancelled = false;
 
     if (open) {
+      communityFetchStartedRef.current = false;
       setMounted(true);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
       setBalancesReady(false);
@@ -115,6 +117,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       }
     } else {
       setVisible(false);
+      communityFetchStartedRef.current = false;
       setResetHoldingKey(k => k + 1);
       const t = setTimeout(() => {
         setMounted(false);
@@ -141,7 +144,10 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   useEffect(() => {
     if (!open || !visible) return;
     if (!chainId || rwaOnly) return;
-    if (communityTokens.length > 0 || loadingCommunity) return;
+    if (communityTokens.length > 0) return;
+    if (communityFetchStartedRef.current) return;
+
+    communityFetchStartedRef.current = true;
 
     let loadTimer: number | null = null;
     let cancelled = false;
@@ -177,7 +183,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         window.clearTimeout(loadTimer);
       }
     };
-  }, [open, visible, chainId, rwaOnly, communityTokens.length, loadingCommunity]);
+  }, [open, visible, chainId, rwaOnly, communityTokens.length]);
 
   useEffect(() => {
     if (!open) return;
