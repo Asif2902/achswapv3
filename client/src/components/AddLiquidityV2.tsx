@@ -94,7 +94,7 @@ export function AddLiquidityV2() {
           ? parsedRecent.filter((item): item is Token => {
               if (!item || typeof item !== "object") return false;
               const candidate = item as Partial<Token>;
-              return typeof candidate.address === "string" && candidate.address.length > 0;
+              return typeof candidate.address === "string" && candidate.address.trim() !== "";
             })
           : [];
         setRecentTokens(validRecent);

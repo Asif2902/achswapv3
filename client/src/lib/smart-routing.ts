@@ -175,10 +175,11 @@ export async function getV2Quote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedTokenAddress: string
+  wrappedToken: Token
 ): Promise<QuoteResult | null> {
   try {
     const router = new Contract(routerAddress, V2_ROUTER_ABI, provider);
+    const wrappedTokenAddress = wrappedToken.address;
 
     const directPath = buildV2Path(fromToken, toToken, wrappedTokenAddress);
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
@@ -248,8 +249,8 @@ export async function getV2Quote(
     const route: RouteHop[] = [];
     for (let i = 0; i < bestPath.length - 1; i++) {
       route.push({
-        tokenIn: i === 0 ? fromToken : getTokenForAddress(bestPath[i], fromToken, toToken, wrappedTokenAddress),
-        tokenOut: i === bestPath.length - 2 ? toToken : getTokenForAddress(bestPath[i + 1], fromToken, toToken, wrappedTokenAddress),
+        tokenIn: i === 0 ? fromToken : getTokenForAddress(bestPath[i], fromToken, toToken, wrappedToken),
+        tokenOut: i === bestPath.length - 2 ? toToken : getTokenForAddress(bestPath[i + 1], fromToken, toToken, wrappedToken),
         protocol: "V2",
       });
     }
@@ -277,9 +278,10 @@ export async function getV3Quote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedTokenAddress: string
+  wrappedToken: Token
 ): Promise<QuoteResult | null> {
   try {
+    const wrappedTokenAddress = wrappedToken.address;
     if (!wrappedTokenAddress) {
       console.warn("Wrapped token address required for V3 quotes");
       return null;
@@ -437,7 +439,12 @@ export async function getV3Quote(
     }
 
     if (useMultiHop && bestMultiHop) {
-      const wrappedToken = getTokenForAddress(wrappedTokenAddress, fromToken, toToken, wrappedTokenAddress);
+      const wrappedIntermediateToken = getTokenForAddress(
+        wrappedTokenAddress,
+        fromToken,
+        toToken,
+        wrappedToken,
+      );
       return {
         protocol: "V3",
         outputAmount: bestMultiHop.outputAmount,
@@ -446,12 +453,12 @@ export async function getV3Quote(
         route: [
           {
             tokenIn: fromToken,
-            tokenOut: wrappedToken,
+            tokenOut: wrappedIntermediateToken,
             protocol: "V3",
             fee: bestMultiHop.fee1,
           },
           {
-            tokenIn: wrappedToken,
+            tokenIn: wrappedIntermediateToken,
             tokenOut: toToken,
             protocol: "V3",
             fee: bestMultiHop.fee2,
@@ -497,10 +504,9 @@ export async function getSmartRouteQuote(
   v3Enabled: boolean
 ): Promise<SmartRoutingResult | null> {
   try {
-    const wrappedTokenAddress = wrappedToken.address;
     const quotes = await Promise.allSettled([
-      v2Enabled ? getV2Quote(provider, v2RouterAddress, fromToken, toToken, amountIn, wrappedTokenAddress) : Promise.resolve(null),
-      v3Enabled ? getV3Quote(provider, v3QuoterAddress, fromToken, toToken, amountIn, wrappedTokenAddress) : Promise.resolve(null),
+      v2Enabled ? getV2Quote(provider, v2RouterAddress, fromToken, toToken, amountIn, wrappedToken) : Promise.resolve(null),
+      v3Enabled ? getV3Quote(provider, v3QuoterAddress, fromToken, toToken, amountIn, wrappedToken) : Promise.resolve(null),
     ]);
     
     const v2Quote = quotes[0].status === "fulfilled" ? quotes[0].value : null;
@@ -590,20 +596,12 @@ function getTokenForAddress(
   address: string,
   fromToken: Token,
   toToken: Token,
-  wrappedTokenAddress: string
+  wrappedToken: Token,
 ): Token {
   if (address.toLowerCase() === fromToken.address.toLowerCase()) return fromToken;
   if (address.toLowerCase() === toToken.address.toLowerCase()) return toToken;
-  
-  return {
-    address: wrappedTokenAddress,
-    symbol: "wUSDC",
-    name: "Wrapped USDC",
-    decimals: 18,
-    logoURI: "/img/logos/wusdc.png",
-    verified: true,
-    chainId: fromToken.chainId,
-  };
+
+  return wrappedToken;
 }
 
 // ── RWA Vault Routing ─────────────────────────────────────────────────────────
@@ -673,7 +671,8 @@ export async function getRWAQuote(
 
       // Price impact is 0 for vault swaps (no slippage from pool depth, only fee)
       // But we show fee impact for transparency
-      const priceImpact = netUsdc > 0n ? Number((fee * 10000n) / netUsdc) / 100 : 0;
+      const grossUsdc = netUsdc + fee;
+      const priceImpact = netUsdc > 0n ? Number((fee * 10000n) / grossUsdc) / 100 : 0;
 
       return {
         protocol: "RWA",

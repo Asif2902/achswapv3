@@ -90,8 +90,37 @@ function parsePositiveBigInt(value: string | undefined): bigint | null {
 
 const TOKEN_BALANCES_CACHE_TTL_MS = 15_000;
 const EXPLORER_FETCH_TIMEOUT_MS = 5_000;
+const TOKEN_BALANCES_CACHE_MAX_ENTRIES = 100;
+const TOKEN_BALANCES_IN_FLIGHT_MAX_ENTRIES = 32;
 const tokenBalancesCache = new Map<string, TokenBalancesCacheEntry>();
 const tokenBalancesInFlight = new Map<string, Promise<ExplorerTokenBalanceItem[]>>();
+
+function pruneTokenBalancesCache(now: number) {
+  for (const [cacheKey, entry] of tokenBalancesCache.entries()) {
+    if (entry.expiresAt <= now) {
+      tokenBalancesCache.delete(cacheKey);
+    }
+  }
+
+  while (tokenBalancesCache.size > TOKEN_BALANCES_CACHE_MAX_ENTRIES) {
+    const oldestKey = tokenBalancesCache.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    tokenBalancesCache.delete(oldestKey);
+  }
+}
+
+function touchTokenBalancesCacheEntry(key: string, entry: TokenBalancesCacheEntry) {
+  tokenBalancesCache.delete(key);
+  tokenBalancesCache.set(key, entry);
+}
+
+function capInFlightEntries() {
+  while (tokenBalancesInFlight.size > TOKEN_BALANCES_IN_FLIGHT_MAX_ENTRIES) {
+    const oldestKey = tokenBalancesInFlight.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    tokenBalancesInFlight.delete(oldestKey);
+  }
+}
 
 function balancesCacheKey(ownerAddress: string, apiBaseUrl: string): string {
   return `${apiBaseUrl.toLowerCase()}::${ownerAddress.toLowerCase()}`;
@@ -144,8 +173,11 @@ async function fetchTokenBalancesFromExplorer(
 ): Promise<ExplorerTokenBalanceItem[]> {
   const key = balancesCacheKey(ownerAddress, apiBaseUrl);
   const now = Date.now();
+  pruneTokenBalancesCache(now);
+
   const cached = tokenBalancesCache.get(key);
   if (cached && cached.expiresAt > now) {
+    touchTokenBalancesCacheEntry(key, cached);
     return cached.data;
   }
   if (cached && cached.expiresAt <= now) {
@@ -159,17 +191,23 @@ async function fetchTokenBalancesFromExplorer(
 
   const request = fetchTokenBalancesFromExplorerNetwork(ownerAddress, apiBaseUrl)
     .then((rows) => {
-      tokenBalancesCache.set(key, {
+      const entry = {
         expiresAt: Date.now() + TOKEN_BALANCES_CACHE_TTL_MS,
         data: rows,
-      });
+      };
+      touchTokenBalancesCacheEntry(key, entry);
+      pruneTokenBalancesCache(Date.now());
       return rows;
     })
     .finally(() => {
       tokenBalancesInFlight.delete(key);
     });
 
+  if (tokenBalancesInFlight.has(key)) {
+    tokenBalancesInFlight.delete(key);
+  }
   tokenBalancesInFlight.set(key, request);
+  capInFlightEntries();
   return request;
 }
 
@@ -184,14 +222,20 @@ async function collectV2CandidatesWithRpcScan(
   const limit = createLimiter(maxConcurrent);
 
   const pairsLength = await factory.allPairsLength();
+  if (pairsLength < 0n) {
+    throw new Error("Factory allPairsLength returned a negative value");
+  }
+  if (pairsLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("Factory pair count exceeds safe integer limit for indexed scan");
+  }
   const totalPairs = Number(pairsLength);
 
-  if (!Number.isFinite(totalPairs) || totalPairs <= 0) {
+  if (totalPairs <= 0) {
     return uniqueCandidates;
   }
 
   const batchSize = 60;
-  const pairAddresses: string[] = [];
+  const pairAddressSet = new Set<string>();
 
   for (let start = 0; start < totalPairs; start += batchSize) {
     const end = Math.min(start + batchSize, totalPairs);
@@ -204,7 +248,7 @@ async function collectV2CandidatesWithRpcScan(
     const failedIndices: number[] = [];
     chunkResults.forEach((result, idx) => {
       if (result.status === "fulfilled") {
-        pairAddresses.push(String(result.value).toLowerCase());
+        pairAddressSet.add(String(result.value).toLowerCase());
       } else {
         failedIndices.push(indices[idx]);
       }
@@ -213,12 +257,14 @@ async function collectV2CandidatesWithRpcScan(
     for (const index of failedIndices) {
       try {
         const addr = await limit(() => factory.allPairs(index));
-        pairAddresses.push(String(addr).toLowerCase());
+        pairAddressSet.add(String(addr).toLowerCase());
       } catch {
         continue;
       }
     }
   }
+
+  const pairAddresses = Array.from(pairAddressSet);
 
   if (pairAddresses.length === 0) {
     return uniqueCandidates;
