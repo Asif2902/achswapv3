@@ -18,10 +18,10 @@ function getGatewayUrlFromCid(cidOrUrl: string): string {
   if (cidOrUrl.startsWith("/img/") || cidOrUrl.startsWith("data:")) return cidOrUrl;
   if (cidOrUrl.startsWith("http")) return cidOrUrl;
   if (cidOrUrl.startsWith("ipfs://")) {
-    return cidOrUrl.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
+    return cidOrUrl.replace("ipfs://", "https://cloudflare-ipfs.com/ipfs/");
   }
   // Handle direct CID without protocol
-  return `https://gateway.pinata.cloud/ipfs/${cidOrUrl}`;
+  return `https://cloudflare-ipfs.com/ipfs/${cidOrUrl}`;
 }
 
 export async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> {

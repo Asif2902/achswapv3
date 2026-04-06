@@ -62,18 +62,13 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(new Set());
   const [resetHoldingKey, setResetHoldingKey] = useState(0);
   const [balancesReady, setBalancesReady] = useState(false);
+  const [communityBalancesReady, setCommunityBalancesReady] = useState(false);
   const [initialRenderMode, setInitialRenderMode] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
   const chainId = useChainId();
 
   const hiddenKey = `hiddenCommunityTokens:${chainId ?? ""}`;
-
-  useEffect(() => {
-    if (!chainId || rwaOnly) return;
-    if (communityTokenCache.has(chainId)) return;
-    void loadCommunityTokens(chainId);
-  }, [chainId, rwaOnly]);
 
   useEffect(() => {
     try {
@@ -91,6 +86,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       setMounted(true);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
       setBalancesReady(false);
+      setCommunityBalancesReady(false);
       setInitialRenderMode(true);
       window.setTimeout(() => {
         if (!cancelled) {
@@ -110,15 +106,9 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
       // Fetch community tokens
       if (chainId && !rwaOnly) {
-        const cachedCommunity = communityTokenCache.get(chainId);
-        if (cachedCommunity) {
-          setCommunityTokens(cachedCommunity);
-          setLoadingCommunity(false);
-        } else {
-          // Defer network + heavy list update to the post-open effect
-          setCommunityTokens([]);
-          setLoadingCommunity(false);
-        }
+        // Keep open interaction lightweight; hydrate community after panel is visible
+        setCommunityTokens([]);
+        setLoadingCommunity(false);
       } else if (rwaOnly) {
         setCommunityTokens([]);
         setLoadingCommunity(false);
@@ -153,24 +143,39 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     if (!chainId || rwaOnly) return;
     if (communityTokens.length > 0 || loadingCommunity) return;
 
+    let loadTimer: number | null = null;
     let cancelled = false;
-    setLoadingCommunity(true);
-    loadCommunityTokens(chainId)
-      .then((rows) => {
-        if (!cancelled) {
-          startTransition(() => {
-            setCommunityTokens(rows);
-          });
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoadingCommunity(false);
-        }
-      });
+
+    loadTimer = window.setTimeout(() => {
+      if (cancelled) return;
+
+      setLoadingCommunity(true);
+      loadCommunityTokens(chainId)
+        .then((rows) => {
+          if (!cancelled) {
+            startTransition(() => {
+              setCommunityTokens(rows);
+            });
+
+            window.setTimeout(() => {
+              if (!cancelled) {
+                setCommunityBalancesReady(true);
+              }
+            }, 220);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setLoadingCommunity(false);
+          }
+        });
+    }, 180);
 
     return () => {
       cancelled = true;
+      if (loadTimer !== null) {
+        window.clearTimeout(loadTimer);
+      }
     };
   }, [open, visible, chainId, rwaOnly, communityTokens.length, loadingCommunity]);
 
@@ -241,7 +246,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   } = useMemo(() => {
     const visibleRecents = recentTokens
       .filter((t) => tokenPassesActiveFilters(t))
-      .filter((t) => !favoriteAddressSet.has(t.address.toLowerCase()));
+      .filter((t) => !favoriteAddressSet.has(t.address.toLowerCase()))
+      .filter((t) => (t as { community?: boolean }).community !== true);
 
     const favorites = favoriteTokens
       .filter((t) => tokenPassesActiveFilters(t))
@@ -351,7 +357,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
   const totalCount = tokens.length + filteredCommunityTokens.length;
   const showRowBalances = showBalances && balancesReady;
-  const showCommunityBalances = showRowBalances && !loadingCommunity;
+  const showCommunityBalances = showRowBalances && communityBalancesReady && !loadingCommunity;
   const hasRecentSection = filteredRecent.length > 0;
 
   return (
