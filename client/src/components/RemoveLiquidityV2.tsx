@@ -11,6 +11,7 @@ import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import { createAlchemyProvider } from "@/lib/config";
+import { discoverV2PositionsFromExplorer, explorerApiBaseFromTxUrl } from "@/lib/v2-position-discovery";
 import {
   ExternalLink,
   Trash2,
@@ -32,8 +33,6 @@ const ERC20_ABI = [
 ];
 
 const FACTORY_ABI = [
-  "function allPairsLength() view returns (uint256)",
-  "function allPairs(uint256) view returns (address)",
   "function getPair(address, address) view returns (address)",
 ];
 
@@ -83,6 +82,11 @@ export function RemoveLiquidityV2() {
 
   // FIX 5: Track whether we've done the initial auto-select, avoids stale-closure bug
   const hasAutoSelected = useRef(false);
+  const selectedPairAddressRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    selectedPairAddressRef.current = selectedPosition?.pairAddress.toLowerCase() ?? null;
+  }, [selectedPosition]);
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
   const getTokenLogo = (symbol: string): string => {
@@ -172,114 +176,59 @@ export function RemoveLiquidityV2() {
     }
     setIsLoading(true);
     try {
-      console.log("Loading V2 positions for:", address);
+      console.log("Loading V2 positions from explorer API for:", address);
       const provider = createAlchemyProvider(chainId);
-      const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
+      const explorerApiBase = explorerApiBaseFromTxUrl(contracts.explorer);
+      if (!explorerApiBase) {
+        throw new Error("Could not derive explorer API base URL");
+      }
 
-      const pairsLength = await factory.allPairsLength();
-      console.log("Total V2 pairs:", pairsLength.toString());
-
-      // Cap the number of pairs to fetch to avoid too many RPC calls
-      const MAX_PAIRS = 50;
-      const pairsToFetch = Math.min(Number(pairsLength), MAX_PAIRS);
-
-      // Get pair addresses first (capped)
-      const pairAddresses: string[] = await Promise.all(
-        Array.from({ length: pairsToFetch }, (_, i) => factory.allPairs(i))
-      );
-
-      console.log("Got all pair addresses:", pairAddresses.length);
-
-      // Check balances for all pairs in parallel
-      const pairContracts = pairAddresses.map(
-        (addr) => new Contract(addr, PAIR_ABI, provider)
-      );
-      const balances = await Promise.all(
-        pairContracts.map((pair) => pair.balanceOf(address))
-      );
-
-      // Filter pairs with balance
-      const positionsWithBalance = pairAddresses.filter((_, i) => balances[i] > 0n);
-      console.log("Pairs with balance:", positionsWithBalance.length);
-
-      // For batching to work perfectly on Alchemy, we should use a single `Promise.all`
-      // array that holds all the individual contract calls directly.
-      const positionCalls = positionsWithBalance.map((pairAddress) => {
-        const pair = new Contract(pairAddress, PAIR_ABI, provider);
-        return Promise.all([
-          pairAddress,
-          pair.token0(),
-          pair.token1(),
-          pair.getReserves(),
-          pair.totalSupply(),
-          pair.balanceOf(address),
-        ]);
+      const discovered = await discoverV2PositionsFromExplorer({
+        ownerAddress: address,
+        factoryAddress: contracts.v2.factory,
+        provider,
+        knownTokens: tokens,
+        apiBaseUrl: explorerApiBase,
+        maxConcurrent: 10,
       });
 
-      const rawPairsData = await Promise.all(positionCalls);
+      console.log("Explorer-discovered V2 positions:", discovered.length);
 
-      // Now fetch token details in a second batched wave
-      const tokenCalls: Promise<any>[] = [];
-      for (const raw of rawPairsData) {
-        const [, token0Address, token1Address] = raw;
-        const token0Contract = new Contract(token0Address, ERC20_ABI, provider);
-        const token1Contract = new Contract(token1Address, ERC20_ABI, provider);
-        
-        tokenCalls.push(
-          Promise.all([
-            token0Contract.symbol(),
-            token0Contract.decimals(),
-            token1Contract.symbol(),
-            token1Contract.decimals(),
-          ])
-        );
-      }
+      const onChainPositions: V2Position[] = discovered.map((pos) => ({
+        pairAddress: pos.pairAddress,
+        token0Address: pos.token0Address,
+        token0Symbol: pos.token0Symbol,
+        token0Decimals: pos.token0Decimals,
+        token1Address: pos.token1Address,
+        token1Symbol: pos.token1Symbol,
+        token1Decimals: pos.token1Decimals,
+        liquidity: pos.liquidity,
+        amount0: pos.amount0,
+        amount1: pos.amount1,
+      }));
 
-      const rawTokensData = await Promise.all(tokenCalls);
+      // Keep imported snapshots only for pools not currently discoverable on-chain
+      const onChainPairSet = new Set(
+        onChainPositions.map((position) => position.pairAddress.toLowerCase()),
+      );
+      const prunedImported = importedPositionsRef.current.filter(
+        (position) => !onChainPairSet.has(position.pairAddress.toLowerCase()),
+      );
+      importedPositionsRef.current = prunedImported;
 
-      // Construct final array
-      const onChainPositions: V2Position[] = [];
-      for (let i = 0; i < rawPairsData.length; i++) {
-        try {
-          const [pairAddress, token0Address, token1Address, reserves, totalSupply, liquidity] = rawPairsData[i] as [string, string, string, any, bigint, bigint];
-          const [token0Symbol, token0Decimals, token1Symbol, token1Decimals] = rawTokensData[i] as [string, bigint, string, bigint];
-
-          const r0 = BigInt(reserves.reserve0);
-          const r1 = BigInt(reserves.reserve1);
-          const amount0 = (liquidity * r0) / totalSupply;
-          const amount1 = (liquidity * r1) / totalSupply;
-
-          onChainPositions.push({
-            pairAddress,
-            token0Address,
-            token0Symbol,
-            token0Decimals: Number(token0Decimals),
-            token1Address,
-            token1Symbol,
-            token1Decimals: Number(token1Decimals),
-            liquidity,
-            amount0,
-            amount1,
-          });
-        } catch (e) {
-             console.warn(`Failed to process V2 pair`, e);
-        }
-      }
-
-      // FIX 1: Merge on-chain positions with imported ones (deduplicated)
-      const merged = [
-        ...onChainPositions,
-        ...importedPositionsRef.current.filter(
-          (imp) =>
-            !onChainPositions.find(
-              (p) =>
-                p.pairAddress.toLowerCase() === imp.pairAddress.toLowerCase()
-            )
-        ),
-      ];
+      const merged = [...onChainPositions, ...prunedImported];
 
       setPositions(merged);
       console.log("Found V2 positions:", merged.length);
+
+      if (merged.length === 0) {
+        setSelectedPosition(null);
+      } else if (selectedPairAddressRef.current) {
+        const refreshedSelected = merged.find(
+          (p) => p.pairAddress.toLowerCase() === selectedPairAddressRef.current,
+        );
+        setSelectedPosition(refreshedSelected ?? null);
+      }
 
       // FIX 5: Use ref to guard auto-select, no stale closure
       if (merged.length > 0 && !hasAutoSelected.current) {
@@ -288,10 +237,15 @@ export function RemoveLiquidityV2() {
       }
     } catch (error) {
       console.error("Failed to load V2 positions:", error);
+      toast({
+        title: "Failed to load positions",
+        description: "Could not fetch V2 positions from explorer API",
+        variant: "destructive",
+      });
     } finally {
       setIsLoading(false);
     }
-  }, [address, contracts, chainId]); // selectedPosition intentionally NOT here — use ref instead
+  }, [address, contracts, chainId, tokens, toast]);
 
   // FIX 6: loadPositions added to dep array
   useEffect(() => {
@@ -497,6 +451,20 @@ export function RemoveLiquidityV2() {
       }
 
       await tx.wait();
+
+      // Prune imported snapshot for this pair so stale values are not reintroduced
+      const removedPairLower = selectedPosition.pairAddress.toLowerCase();
+      importedPositionsRef.current = importedPositionsRef.current.filter(
+        (position) => position.pairAddress.toLowerCase() !== removedPairLower,
+      );
+
+      setPositions((prev) =>
+        prev.filter((position) => position.pairAddress.toLowerCase() !== removedPairLower),
+      );
+      setSelectedPosition((prev) => {
+        if (!prev) return null;
+        return prev.pairAddress.toLowerCase() === removedPairLower ? null : prev;
+      });
 
       toast({
         title: "Liquidity removed!",
@@ -984,6 +952,7 @@ export function RemoveLiquidityV2() {
           setShowTokenASelector(false);
         }}
         tokens={tokens}
+        showBalances
       />
       <TokenSelector
         open={showTokenBSelector}
@@ -993,6 +962,7 @@ export function RemoveLiquidityV2() {
           setShowTokenBSelector(false);
         }}
         tokens={tokens}
+        showBalances
       />
     </div>
   );

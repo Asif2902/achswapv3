@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="oil" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2a2a2a"/>
+      <stop offset="1" stop-color="#111"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#oil)"/>
+  <path d="M32 14c0 0-12 12-12 22a12 12 0 0024 0c0-10-12-22-12-22z" fill="#D4A843" opacity="0.9"/>
+  <path d="M32 18c0 0-9 9-9 18a9 9 0 0018 0c0-9-9-18-9-18z" fill="#E8C45A" opacity="0.8"/>
+  <path d="M32 22c0 0-6 7-6 14a6 6 0 0012 0c0-7-6-14-6-14z" fill="#F0D878" opacity="0.6"/>
+</svg>

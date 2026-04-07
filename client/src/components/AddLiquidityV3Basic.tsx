@@ -6,7 +6,7 @@ import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits } from "ethers";
 import { createAlchemyProvider } from "@/lib/config";
-import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
+import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isCanonicalUSDC, getUSDC } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -77,6 +77,23 @@ export function AddLiquidityV3Basic() {
 
   const maxAmountAWeiRef = useRef<bigint | null>(null);
   const maxAmountBWeiRef = useRef<bigint | null>(null);
+
+  const getSafeMaxInput = useCallback((balanceWei: bigint, token: Token) => {
+    let safeWei = balanceWei;
+    if (isCanonicalUSDC(token) || isNativeToken(token.address)) {
+      safeWei = (balanceWei * 99n) / 100n;
+    }
+
+    const displayRaw = getMaxAmount(safeWei, token.decimals, token.symbol);
+    const displayAmount = displayRaw.toLowerCase().includes("e")
+      ? formatUnits(safeWei, token.decimals)
+      : displayRaw;
+
+    return {
+      displayAmount,
+      amountWei: parseAmount(displayAmount, token.decimals),
+    };
+  }, []);
 
   const [poolAddress, setPoolAddress]         = useState<string | null>(null);
   const [poolExists, setPoolExists]           = useState(false);
@@ -163,9 +180,9 @@ export function AddLiquidityV3Basic() {
   // ── Default tokens ─────────────────────────────────────────────────────────
   useEffect(() => {
     if (tokens.length === 0) return;
-    if (!tokenA) { const u = tokens.find(t => t.symbol === "USDC"); if (u) setTokenA(u); }
+    if (!tokenA) { const u = getUSDC(chainId); if (u) setTokenA(u); }
     if (!tokenB) { const a = tokens.find(t => t.symbol === "ACHS"); if (a) setTokenB(a); }
-  }, [tokens, tokenA, tokenB]);
+  }, [tokens, tokenA, tokenB, chainId]);
 
   // ── Import token ───────────────────────────────────────────────────────────
   const handleImportToken = async (addr: string): Promise<Token | null> => {
@@ -226,6 +243,15 @@ export function AddLiquidityV3Basic() {
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const erc20A = getERC20Address(tokenA, chainId);
       const erc20B = getERC20Address(tokenB, chainId);
+      if (erc20A.toLowerCase() === erc20B.toLowerCase()) {
+        setPoolAddress(null);
+        setPoolExists(false);
+        setCurrentPrice(null);
+        setCurrentSqrtPriceX96(null);
+        setCurrentTick(null);
+        setActiveLiquidity(null);
+        return;
+      }
       const [tok0, tok1] = sortTokens({ ...tokenA, address: erc20A }, { ...tokenB, address: erc20B });
       setToken0Symbol(tok0.symbol); setToken1Symbol(tok1.symbol);
       const addr = await factory.getPool(tok0.address, tok1.address, selectedFee);
@@ -302,6 +328,12 @@ export function AddLiquidityV3Basic() {
   // ── Add liquidity ──────────────────────────────────────────────────────────
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !amountA || !amountB || !address || !contracts || !window.ethereum || !chainId) return;
+    const tokenAERC20Check = getERC20Address(tokenA, chainId);
+    const tokenBERC20Check = getERC20Address(tokenB, chainId);
+    if (tokenAERC20Check.toLowerCase() === tokenBERC20Check.toLowerCase()) {
+      toast({ title: "Invalid pair", description: "Select two different tokens", variant: "destructive" });
+      return;
+    }
     setIsAdding(true);
     try {
       const provider = new BrowserProvider(window.ethereum);
@@ -369,7 +401,9 @@ export function AddLiquidityV3Basic() {
     } finally { setIsAdding(false); }
   };
 
-  const canSubmit = tokenA && tokenB && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !amountAExceedsBalance && !amountBExceedsBalance && poolHealth?.severity !== "error";
+  const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
+  const sameTokenSelected = !!(tokenA && tokenB && chainId && getERC20Address(tokenA, chainId).toLowerCase() === getERC20Address(tokenB, chainId).toLowerCase());
+  const canSubmit = tokenA && tokenB && !sameTokenSelected && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !amountAExceedsBalance && !amountBExceedsBalance && poolHealth?.severity !== "error" && !hasRwaToken;
 
   return (
     <>
@@ -511,7 +545,11 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder="0.00" value={amountA}
-              onChange={e => { setAmountA(e.target.value); maxAmountAWeiRef.current = null; }}
+              onChange={e => {
+                setAmountA(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               className="v3b-input" style={{ flex: 1, minWidth: 0 }}
             />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
@@ -520,13 +558,9 @@ export function AddLiquidityV3Basic() {
               </button>
               {isConnected && tokenA && balanceA !== null && (
                 <button className="v3b-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceA, tokenA);
                   setAmountA(displayAmount);
-                  let maxWei = balanceA;
-                  if (tokenA.symbol === "USDC" || isNativeToken(tokenA.address)) {
-                    maxWei = (balanceA * 99n) / 100n;
-                  }
-                  maxAmountAWeiRef.current = maxWei;
+                  maxAmountAWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -567,7 +601,11 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder={poolExists && currentPrice ? "Auto-calculated" : "0.00"} value={amountB}
-              onChange={e => { setAmountB(e.target.value); maxAmountBWeiRef.current = null; }}
+              onChange={e => {
+                setAmountB(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               disabled={poolExists && !!currentPrice}
               className="v3b-input" style={{ flex: 1, minWidth: 0, opacity: poolExists && currentPrice ? 0.7 : 1 }}
             />
@@ -577,13 +615,9 @@ export function AddLiquidityV3Basic() {
               </button>
               {isConnected && tokenB && balanceB !== null && !(poolExists && currentPrice) && (
                 <button className="v3b-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceB, tokenB);
                   setAmountB(displayAmount);
-                  let maxWei = balanceB;
-                  if (tokenB.symbol === "USDC" || isNativeToken(tokenB.address)) {
-                    maxWei = (balanceB * 99n) / 100n;
-                  }
-                  maxAmountBWeiRef.current = maxWei;
+                  maxAmountBWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -744,6 +778,42 @@ export function AddLiquidityV3Basic() {
           />
         )}
 
+        {/* ── RWA warning ── */}
+        {hasRwaToken && (
+          <div style={{
+            display: "flex", alignItems: "flex-start", gap: 10,
+            padding: "14px 16px", borderRadius: 14,
+            background: "rgba(239,68,68,0.06)",
+            border: "1px solid rgba(239,68,68,0.2)",
+          }}>
+            <AlertTriangle style={{ width: 16, height: 16, color: "#f87171", flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <p style={{ fontSize: 12, fontWeight: 700, color: "#f87171", margin: 0 }}>RWA tokens cannot be used for liquidity</p>
+              <p style={{ fontSize: 11, color: "rgba(248,113,113,0.6)", margin: "4px 0 0", lineHeight: 1.5 }}>
+                RWA synthetic tokens are vault-backed and are only supported in USDC swap mode.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Same token warning ── */}
+        {sameTokenSelected && tokenA && tokenB && (
+          <div style={{
+            display: "flex", alignItems: "flex-start", gap: 10,
+            padding: "14px 16px", borderRadius: 14,
+            background: "rgba(251,191,36,0.06)",
+            border: "1px solid rgba(251,191,36,0.2)",
+          }}>
+            <AlertTriangle style={{ width: 16, height: 16, color: "#fbbf24", flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <p style={{ fontSize: 12, fontWeight: 700, color: "#fbbf24", margin: 0 }}>Select two different tokens</p>
+              <p style={{ fontSize: 11, color: "rgba(251,191,36,0.65)", margin: "4px 0 0", lineHeight: 1.5 }}>
+                {tokenA.symbol} and {tokenB.symbol} resolve to the same underlying token.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* ── Submit ── */}
         {isConnected ? (
           <button
@@ -770,8 +840,18 @@ export function AddLiquidityV3Basic() {
         )}
       </div>
 
-      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens} onImport={handleImportToken} />
-      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens} onImport={handleImportToken} />
+      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => {
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+        setTokenA(t);
+        setShowTokenASelector(false);
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} showBalances />
+      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => {
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+        setTokenB(t);
+        setShowTokenBSelector(false);
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} showBalances />
     </>
   );
 }

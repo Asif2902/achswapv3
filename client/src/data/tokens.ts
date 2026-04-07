@@ -98,7 +98,68 @@ const arcTestnetTokens: Token[] = [
     logoURI: "/img/logos/achs-token.png",
     verified: true,
     chainId: 5042002
-  }
+  },
+  // ── RWA Synth Tokens ───────────────────────────────────────────────────
+  {
+    address: "0xB7d0e4FBB6C31997aeBc8070f9BF326Bb0ef859E",
+    name: "Synth Apple Inc.",
+    symbol: "sAAPL",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-aapl.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 1,
+    rwaCategory: "Stock",
+  },
+  {
+    address: "0x22Dd732d8bf020d1Cd6D2ec3342ce43f15a982b1",
+    name: "Synth Alphabet Inc.",
+    symbol: "sGOOGL",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-googl.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 2,
+    rwaCategory: "Stock",
+  },
+  {
+    address: "0x3fEa75ABE23B1C01F00F03eb6a7a9f75d9De957e",
+    name: "Synth Crude Oil WTI",
+    symbol: "sWTI",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-wti.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 3,
+    rwaCategory: "Commodity",
+  },
+  {
+    address: "0x77643b9D8470C8959B92651F57cEcA08D770b89c",
+    name: "Synth Gold",
+    symbol: "sGOLD",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-gold.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 4,
+    rwaCategory: "Commodity",
+  },
+  {
+    address: "0x80Ca3b18F75702B0626Eb7441aCaA33a8e24100d",
+    name: "Synth Silver",
+    symbol: "sSILVER",
+    decimals: 18,
+    logoURI: "/img/logos/rwa-silver.svg",
+    verified: true,
+    chainId: 5042002,
+    rwa: true,
+    rwaPairId: 5,
+    rwaCategory: "Commodity",
+  },
 ];
 
 // Wrapped token mappings: native -> wrapped address
@@ -170,4 +231,64 @@ export async function fetchTokensWithCommunity(chainId: number): Promise<Token[]
     ...t,
     logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : "/img/logos/unknown-token.png"
   }));
+}
+
+// ── RWA Helpers ───────────────────────────────────────────────────────────────
+
+export function isRWAToken(token: Token | null | undefined): boolean {
+  return !!token?.rwa;
+}
+
+export function getRWATokens(chainId: number): Token[] {
+  return getTokensByChainId(chainId).filter(t => t.rwa === true);
+}
+
+export function getNonRWATokens(chainId: number): Token[] {
+  return getTokensByChainId(chainId).filter(t => !t.rwa);
+}
+
+const CANONICAL_USDC_ADDRESSES: Record<number, { usdc: string; wusdc: string }> = {
+  5042002: {
+    usdc: "0x0000000000000000000000000000000000000000",
+    wusdc: "0xDe5DB9049a8dd344dC1B7Bbb098f9da60930A6dA",
+  },
+};
+
+function normalize(addr: string): string {
+  return addr.toLowerCase();
+}
+
+export function getUSDC(chainId: number): Token | undefined {
+  const canonical = CANONICAL_USDC_ADDRESSES[chainId];
+  if (!canonical) return undefined;
+  return getTokensByChainId(chainId).find(t => normalize(t.address) === normalize(canonical.usdc));
+}
+
+export function getWUSDC(chainId: number): Token | undefined {
+  const canonical = CANONICAL_USDC_ADDRESSES[chainId];
+  if (!canonical) return undefined;
+  return getTokensByChainId(chainId).find(t => normalize(t.address) === normalize(canonical.wusdc));
+}
+
+export function isCanonicalUSDC(token: Token | null | undefined): boolean {
+  if (!token) return false;
+  const canonical = CANONICAL_USDC_ADDRESSES[token.chainId];
+  if (!canonical) return false;
+  return normalize(token.address) === normalize(canonical.usdc);
+}
+
+export function isCanonicalWUSDC(token: Token | null | undefined): boolean {
+  if (!token) return false;
+  const canonical = CANONICAL_USDC_ADDRESSES[token.chainId];
+  if (!canonical) return false;
+  return normalize(token.address) === normalize(canonical.wusdc);
+}
+
+export function isRWASwapPair(from: Token | null, to: Token | null): boolean {
+  if (!from || !to) return false;
+  const fromIsRWA = isRWAToken(from);
+  const toIsRWA = isRWAToken(to);
+  const fromIsUSDC = isCanonicalUSDC(from);
+  const toIsUSDC = isCanonicalUSDC(to);
+  return (fromIsRWA && toIsUSDC) || (fromIsUSDC && toIsRWA);
 }

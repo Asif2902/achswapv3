@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="goldbg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD700"/>
+      <stop offset="1" stop-color="#B8860B"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="20" y1="22" x2="44" y2="46" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFF1A8"/>
+      <stop offset="0.5" stop-color="#FFD700"/>
+      <stop offset="1" stop-color="#B8860B"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#goldbg)"/>
+  <rect x="18" y="26" width="28" height="16" rx="2" fill="url(#bar)" stroke="#B8860B" stroke-width="1"/>
+  <path d="M20 26l3-6h18l3 6" fill="#FFF1A8" stroke="#B8860B" stroke-width="1"/>
+  <line x1="25" y1="26" x2="28" y2="20" stroke="#B8860B" stroke-width="0.8" opacity="0.5"/>
+  <line x1="32" y1="26" x2="32" y2="20" stroke="#B8860B" stroke-width="0.8" opacity="0.5"/>
+  <line x1="39" y1="26" x2="36" y2="20" stroke="#B8860B" stroke-width="0.8" opacity="0.5"/>
+  <text x="32" y="38" text-anchor="middle" font-family="Arial,sans-serif" font-size="8" font-weight="bold" fill="#8B6914">Au</text>
+</svg>

@@ -9,6 +9,9 @@ export const tokenSchema = z.object({
   logoURI: z.string(),
   verified: z.boolean().default(false),
   chainId: z.number(),
+  rwa: z.boolean().optional(),
+  rwaPairId: z.number().optional(),
+  rwaCategory: z.string().optional(),
 });
 
 export type Token = z.infer<typeof tokenSchema>;

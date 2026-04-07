@@ -10,21 +10,23 @@ import { PathVisualizer, type RouteHop } from "@/components/PathVisualizer";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
-import { Contract, BrowserProvider, JsonRpcProvider, getAddress } from "ethers";
-import { getTokensByChainId, isNativeToken, getWrappedAddress } from "@/data/tokens";
+import { Contract, BrowserProvider, getAddress, formatUnits } from "ethers";
+import { getTokensByChainId, isNativeToken, getWrappedAddress, isRWAToken, isRWASwapPair, getUSDC, getWUSDC, isCanonicalUSDC, isCanonicalWUSDC } from "@/data/tokens";
 import { formatAmount, parseAmount, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
-import { getSmartRouteQuote, type SmartRoutingResult } from "@/lib/smart-routing";
+import { getSmartRouteQuote, getRWAQuote, type SmartRoutingResult, type RWAQuoteResult } from "@/lib/smart-routing";
 import { loadDexSettings, saveDexSettings } from "@/lib/dex-settings";
 import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
 import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
-import { createAlchemyProvider, FALLBACK_RPC } from "@/lib/config";
+import { RWA_VAULT_ABI } from "@/lib/abis/rwa";
+import { createAlchemyProvider } from "@/lib/config";
 import { getErrorForToast } from "@/lib/error-utils";
 import {
   checkPermit2Approval,
   approvePermit2,
   executeGaslessSwapV2,
   executeGaslessSwapV3,
+  executeGaslessSwapV3MultiHop,
 } from "@/lib/gasless-swap";
 import { GASLESS_CONFIG, NATIVE_TOKEN, NATIVE_TOKEN_DECIMALS } from "@/lib/gasless-config";
 
@@ -53,8 +55,13 @@ function fmtBal(raw: string): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
+function isValidStoredTokenAddress(value: unknown): value is string {
+  return typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value);
+}
+
 export default function Swap() {
   const HIGH_IMPACT_THRESHOLD = 15;
+  const QUOTE_DEBOUNCE_MS = 120;
   const [fromToken, setFromToken] = useState<Token | null>(null);
   const [toToken, setToToken] = useState<Token | null>(null);
   const [fromAmount, setFromAmount] = useState("");
@@ -96,6 +103,7 @@ export default function Swap() {
   const [isApprovingPermit2, setIsApprovingPermit2] = useState(false);
 
   const [smartRoutingResult, setSmartRoutingResult] = useState<SmartRoutingResult | null>(null);
+  const [rwaQuoteResult, setRwaQuoteResult] = useState<RWAQuoteResult | null>(null);
   const [routeHops, setRouteHops] = useState<RouteHop[]>([]);
   const [v2Enabled, setV2Enabled] = useState(true);
   const [v3Enabled, setV3Enabled] = useState(true);
@@ -111,8 +119,113 @@ export default function Swap() {
   const chainId = useChainId();
   const { toast } = useToast();
 
+  // Recent tokens: last 5 selected tokens (per chain), stored in localStorage
+  const [recentTokens, setRecentTokens] = useState<Token[]>([]);
+
+  useEffect(() => {
+    if (!chainId) return;
+    try {
+      const key = `recentTokens:${chainId}`;
+      const stored = localStorage.getItem(key);
+      if (!stored) {
+        setRecentTokens([]);
+        return;
+      }
+
+      const parsed: unknown = JSON.parse(stored);
+      if (!Array.isArray(parsed)) {
+        setRecentTokens([]);
+        return;
+      }
+
+      const valid = parsed.filter((item): item is Token => {
+        if (!item || typeof item !== "object") return false;
+        const v = item as Partial<Token>;
+        return typeof v.address === "string" && v.address.length > 0;
+      });
+
+      setRecentTokens(valid);
+    } catch (error) {
+      console.warn("Failed to parse recent tokens from localStorage", error);
+      setRecentTokens([]);
+    }
+  }, [chainId]);
+
+  const addRecentToken = (token: Token) => {
+    if (!chainId) return;
+    setRecentTokens(prev => {
+      const filtered = prev.filter(t => t.address.toLowerCase() !== token.address.toLowerCase());
+      const updated = [token, ...filtered].slice(0, 5);
+      const key = `recentTokens:${chainId}`;
+      localStorage.setItem(key, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  // Favorite tokens: user-starred tokens (per chain), stored in localStorage
+  const [favoriteTokens, setFavoriteTokens] = useState<Token[]>([]);
+
+  useEffect(() => {
+    if (!chainId) return;
+    try {
+      const key = `favoriteTokens:${chainId}`;
+      const stored = localStorage.getItem(key);
+      if (stored) {
+        const parsed: unknown = JSON.parse(stored);
+        if (!Array.isArray(parsed)) {
+          setFavoriteTokens([]);
+          return;
+        }
+
+        const dedupe = new Set<string>();
+        const valid = parsed.filter((item): item is Token => {
+          if (!item || typeof item !== "object") return false;
+          const candidate = item as Partial<Token>;
+          if (!isValidStoredTokenAddress(candidate.address)) return false;
+          if (candidate.chainId !== chainId) return false;
+          const key = candidate.address.toLowerCase();
+          if (dedupe.has(key)) return false;
+          dedupe.add(key);
+          return true;
+        });
+        setFavoriteTokens(valid);
+      } else {
+        setFavoriteTokens([]);
+      }
+    } catch {
+      setFavoriteTokens([]);
+    }
+  }, [chainId]);
+
+  const toggleFavoriteToken = (token: Token) => {
+    if (!chainId) return;
+    if (!isValidStoredTokenAddress(token.address) || token.chainId !== chainId) return;
+    setFavoriteTokens(prev => {
+      const normalizedPrev = prev.filter((item): item is Token => {
+        if (!item || typeof item !== "object") return false;
+        return isValidStoredTokenAddress(item.address) && item.chainId === chainId;
+      });
+      const exists = normalizedPrev.find(t => t.address.toLowerCase() === token.address.toLowerCase());
+      let updated: Token[];
+      if (exists) {
+        updated = normalizedPrev.filter(t => t.address.toLowerCase() !== token.address.toLowerCase());
+      } else {
+        updated = [...normalizedPrev, token];
+      }
+      const key = `favoriteTokens:${chainId}`;
+      localStorage.setItem(key, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
   let contracts: ReturnType<typeof getContractsForChain> | null = null;
   try { contracts = chainId ? getContractsForChain(chainId) : null; } catch { /* wrong chain */ }
+
+  const isRWAPair = isRWASwapPair(fromToken, toToken);
+  const isRwaBuy = isRWAPair && isRWAToken(toToken);  // USDC → RWA
+  const isRwaRedeem = isRWAPair && isRWAToken(fromToken); // RWA → USDC
+  const isWrapPair = !!(fromToken && toToken && isCanonicalUSDC(fromToken) && isCanonicalWUSDC(toToken));
+  const isUnwrapPair = !!(fromToken && toToken && isCanonicalWUSDC(fromToken) && isCanonicalUSDC(toToken));
 
   useEffect(() => { const s = loadDexSettings(); setV2Enabled(s.v2Enabled); setV3Enabled(s.v3Enabled); }, []);
   useEffect(() => { saveDexSettings({ v2Enabled, v3Enabled }); }, [v2Enabled, v3Enabled]);
@@ -139,7 +252,7 @@ export default function Swap() {
     quoteRefreshNonceRef.current = next;
     setQuoteRefreshNonce(next);
     let maxWei = balance.value;
-    if (token.symbol === "USDC") {
+    if (isCanonicalUSDC(token)) {
       maxWei = (balance.value * 99n) / 100n;
     }
     maxAmountWeiRef.current = maxWei;
@@ -196,7 +309,7 @@ export default function Swap() {
 
   useEffect(() => {
     if (!tokens.length || !chainId) return;
-    if (!fromToken || fromToken.chainId !== chainId) { const t = tokens.find(t => t.symbol === "USDC"); if (t) setFromToken(t); }
+    if (!fromToken || fromToken.chainId !== chainId) { const t = getUSDC(chainId); if (t) setFromToken(t); }
     if (!toToken || toToken.chainId !== chainId) { const t = tokens.find(t => t.symbol === "ACHS"); if (t) setToToken(t); }
   }, [tokens, fromToken, toToken, chainId]);
 
@@ -320,7 +433,7 @@ export default function Swap() {
       const controller = new AbortController();
       abortControllerRef.current = controller;
       fetchQuote(controller.signal);
-    }, 300);
+    }, QUOTE_DEBOUNCE_MS);
     return () => {
       if (debounceTimeoutRef.current) clearTimeout(debounceTimeoutRef.current);
       if (abortControllerRef.current) abortControllerRef.current.abort();
@@ -333,58 +446,100 @@ export default function Swap() {
     setToAmountBelowThreshold(false);
   }, [fromToken?.address, toToken?.address]);
 
+  useEffect(() => {
+    if (!quoteRefreshInterval || quoteRefreshInterval < 5) return;
+    const id = setInterval(() => {
+      if (!fromAmount || parseFloat(fromAmount) <= 0) return;
+      const next = quoteRefreshNonceRef.current + 1;
+      quoteRefreshNonceRef.current = next;
+      setQuoteRefreshNonce(next);
+    }, quoteRefreshInterval * 1000);
+    return () => clearInterval(id);
+  }, [quoteRefreshInterval, fromAmount]);
+
   const fetchQuote = async (signal: AbortSignal) => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) {
-      setToAmount(""); setPriceImpact(null); setToAmountBelowThreshold(false); return;
+      setIsLoadingQuote(false);
+      setToAmount(""); setPriceImpact(null); setToAmountBelowThreshold(false); setRwaQuoteResult(null); return;
     }
-    const isWrap = fromToken.symbol === "USDC" && toToken.symbol === "wUSDC";
-    const isUnwrap = fromToken.symbol === "wUSDC" && toToken.symbol === "USDC";
+    const isWrap = isCanonicalUSDC(fromToken) && isCanonicalWUSDC(toToken);
+    const isUnwrap = isCanonicalWUSDC(fromToken) && isCanonicalUSDC(toToken);
     if (isWrap || isUnwrap) {
+      setIsLoadingQuote(false);
       setToAmount(fromAmount); setPriceImpact(0);
-      setRouteHops([{ tokenIn: fromToken, tokenOut: toToken, protocol: "V2" }]); return;
+      setRouteHops([{ tokenIn: fromToken, tokenOut: toToken, protocol: "V2" }]); setRwaQuoteResult(null); return;
     }
-    if (!contracts) return;
-    setIsLoadingQuote(true);
-    let provider;
-    try {
-      // Always use alchemy provider first
-      provider = createAlchemyProvider(chainId);
-      // Guard with timeout to avoid hanging
-      await Promise.race([
-        provider.getBlockNumber(),
-        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Alchemy timeout")), 3000))
-      ]);
-    } catch {
-      // Fallback to wallet RPC if alchemy fails or times out
-      if (window.ethereum) {
-        provider = new BrowserProvider(window.ethereum);
-      } else {
-        provider = new JsonRpcProvider(FALLBACK_RPC);
+
+    // ── RWA Swap Path ───────────────────────────────────────────────────────
+    const isRwa = isRWASwapPair(fromToken, toToken);
+    if (isRwa && contracts?.rwa) {
+      setIsLoadingQuote(true);
+      try {
+        const provider = createAlchemyProvider(chainId);
+        if (signal.aborted) return;
+        const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
+        const rwaResult = await getRWAQuote(provider, contracts.rwa.vault, fromToken, toToken, amountIn, signal);
+        if (signal.aborted) return;
+        if (!rwaResult) {
+          setToAmount(""); setPriceImpact(null); setRouteHops([]); setRwaQuoteResult(null); setToAmountBelowThreshold(false);
+          return;
+        }
+        if (rwaResult.isStale) {
+          toast({ title: "Price is stale", description: "Oracle price may be outdated. Swap may fail.", variant: "destructive" });
+        }
+        setRwaQuoteResult(rwaResult);
+        setSmartRoutingResult(null);
+        const formatted = formatAmount(rwaResult.outputAmount, toToken.decimals);
+        const rawOutput = parseFloat(formatUnits(rwaResult.outputAmount, toToken.decimals));
+        const displayDecimals = Math.min(4, toToken.decimals);
+        const threshold = 10 ** -displayDecimals;
+        setToAmountBelowThreshold(rawOutput > 0 && rawOutput < threshold);
+        setToAmount(formatted);
+        setPriceImpact(rwaResult.priceImpact);
+        setRouteHops(rwaResult.route);
+      } catch {
+        if (signal.aborted) return;
+        setToAmount(""); setPriceImpact(null); setRouteHops([]); setRwaQuoteResult(null);
+      } finally {
+        if (!signal.aborted) setIsLoadingQuote(false);
       }
+      return;
     }
+
+    if (!contracts) {
+      setIsLoadingQuote(false);
+      setToAmount("");
+      setPriceImpact(null);
+      setRouteHops([]);
+      setSmartRoutingResult(null);
+      return;
+    }
+    setIsLoadingQuote(true);
+    const provider = createAlchemyProvider(chainId);
     try {
-      const wrappedTokenData = tokens.find(t => t.symbol === "wUSDC");
+      const wrappedTokenData = getWUSDC(chainId);
       if (!wrappedTokenData) throw new Error("wUSDC not found");
       // Use maxAmountWeiRef directly if set (from MAX button), otherwise parse from display
       const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
       if (!v2Enabled && !v3Enabled) {
         toast({ title: "No protocols enabled", description: "Enable at least one in settings", variant: "destructive" });
-        setToAmount(""); setPriceImpact(null); setRouteHops([]); return;
+        setToAmount(""); setPriceImpact(null); setRouteHops([]); setSmartRoutingResult(null); return;
       }
       if (signal.aborted) return;
       const cached = getCachedQuote(fromToken.address, toToken.address, fromAmount + (quoteRefreshNonceRef.current ? `#${quoteRefreshNonceRef.current}` : ""), v2Enabled, v3Enabled);
       let result: SmartRoutingResult | null;
       if (cached) { result = cached; }
       else {
-        result = await getSmartRouteQuote(provider, contracts.v2.router, contracts.v3.quoter02, fromToken, toToken, amountIn, wrappedTokenData, v2Enabled, v3Enabled);
+        result = await getSmartRouteQuote(provider, contracts.v2.router, contracts.v3.quoter02, fromToken, toToken, amountIn, wrappedTokenData, v2Enabled, v3Enabled, signal);
         if (signal.aborted) return;
         if (result) setCachedQuote(fromToken.address, toToken.address, fromAmount + (quoteRefreshNonceRef.current ? `#${quoteRefreshNonceRef.current}` : ""), v2Enabled, v3Enabled, result);
       }
-      if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); setToAmountBelowThreshold(false); return; }
+      if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); setToAmountBelowThreshold(false); setSmartRoutingResult(null); return; }
       setSmartRoutingResult(result);
+      setRwaQuoteResult(null);
       const displayDecimals = Math.min(4, toToken.decimals);
       const threshold = 10 ** -displayDecimals;
-      const rawOutput = Number(result.bestQuote.outputAmount) / 10 ** toToken.decimals;
+      const rawOutput = parseFloat(formatUnits(result.bestQuote.outputAmount, toToken.decimals));
       const formatted = formatAmount(result.bestQuote.outputAmount, toToken.decimals);
       setToAmountBelowThreshold(rawOutput > 0 && rawOutput < threshold);
       setToAmount(formatted);
@@ -396,12 +551,38 @@ export default function Swap() {
 
   const handleSwapTokens = () => {
     setFromToken(toToken); setToToken(fromToken);
-    setFromAmount(""); setToAmount(""); setSmartRoutingResult(null);
+    setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRwaQuoteResult(null);
+  };
+
+  // ── RWA token selection constraints ─────────────────────────────────────────
+  // When one side is RWA, the other must be USDC
+  const handleFromSelect = (t: Token) => {
+    if (isRWAToken(t)) {
+      const usdc = getUSDC(chainId);
+      if (usdc && toToken?.address !== usdc.address) setToToken(usdc);
+    } else if (isRWAToken(toToken) && !isCanonicalUSDC(t)) {
+      setToToken(null);
+    }
+    setFromToken(t); setShowFromSelector(false);
+    setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRwaQuoteResult(null);
+    addRecentToken(t);
+  };
+
+  const handleToSelect = (t: Token) => {
+    if (isRWAToken(t)) {
+      const usdc = getUSDC(chainId);
+      if (usdc && fromToken?.address !== usdc.address) setFromToken(usdc);
+    } else if (isRWAToken(fromToken) && !isCanonicalUSDC(t)) {
+      setFromToken(null);
+    }
+    setToToken(t); setShowToSelector(false);
+    setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRwaQuoteResult(null);
+    addRecentToken(t);
   };
 
   // ── Wrap / Unwrap ──────────────────────────────────────────────────────────
-  const nativeToken = tokens.find(t => t.symbol === "USDC");
-  const wrappedToken = tokens.find(t => t.symbol === "wUSDC");
+  const nativeToken = getUSDC(chainId);
+  const wrappedToken = getWUSDC(chainId);
 
   const handleWrap = async (amount: string) => {
     if (!address || !window.ethereum || !wrappedToken || !nativeToken) return;
@@ -456,8 +637,109 @@ export default function Swap() {
   // ── Main swap ──────────────────────────────────────────────────────────────
   const executeSwapCore = async () => {
     if (!fromToken || !toToken || !fromAmount || parseFloat(fromAmount) <= 0) return;
-    if (fromToken.symbol === "USDC" && toToken.symbol === "wUSDC") { await handleWrap(fromAmount); return; }
-    if (fromToken.symbol === "wUSDC" && toToken.symbol === "USDC") { await handleUnwrap(fromAmount); return; }
+    if (isWrapPair) {
+      const amountArg = maxAmountWeiRef.current !== null ? formatUnits(maxAmountWeiRef.current, fromToken.decimals) : fromAmount;
+      await handleWrap(amountArg);
+      return;
+    }
+    if (isUnwrapPair) {
+      const amountArg = maxAmountWeiRef.current !== null ? formatUnits(maxAmountWeiRef.current, fromToken.decimals) : fromAmount;
+      await handleUnwrap(amountArg);
+      return;
+    }
+
+    // ── RWA SWAP PATH ─────────────────────────────────────────────────────
+    if (isRWAPair && rwaQuoteResult && contracts?.rwa) {
+      setIsSwapping(true);
+      try {
+        if (!address || !window.ethereum) throw new Error("Please connect your wallet");
+        const provider = new BrowserProvider(window.ethereum);
+        const signer = await provider.getSigner();
+        const vault = new Contract(contracts.rwa.vault, RWA_VAULT_ABI, signer);
+        const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
+
+        if (!isCanonicalUSDC(fromToken) && !isCanonicalUSDC(toToken)) {
+          toast({ title: "Invalid RWA pair", description: "RWA swaps require native USDC", variant: "destructive" });
+          setIsSwapping(false);
+          return;
+        }
+
+        const currentRwaInput = amountIn.toString();
+        const quotedRwaInput = (rwaQuoteResult as any).inputAmount ? String((rwaQuoteResult as any).inputAmount) : null;
+        if (!quotedRwaInput || quotedRwaInput !== currentRwaInput) {
+          toast({ title: "Quote out of date", description: "Please re-quote before swapping", variant: "destructive" });
+          setIsSwapping(false);
+          return;
+        }
+
+        maxAmountWeiRef.current = null;
+        const slippageBps = BigInt(Math.floor(slippage * 100));
+
+        if (recipientAddress) {
+          let normalizedRecipient: string;
+          try {
+            normalizedRecipient = getAddress(recipientAddress);
+          } catch {
+            toast({ title: "Invalid recipient", description: "Recipient address format is invalid", variant: "destructive" });
+            setIsSwapping(false);
+            return;
+          }
+          if (normalizedRecipient.toLowerCase() !== address.toLowerCase()) {
+            toast({ title: "Custom recipient not supported", description: "RWA swaps only send to connected wallet", variant: "destructive" });
+            setIsSwapping(false);
+            return;
+          }
+        }
+
+        if (rwaQuoteResult.isBuy) {
+          // USDC → RWA: vault.buy(pairId, minSynth) with msg.value
+          const minSynth = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
+          toast({ title: "Buying RWA token…", description: `Buying ${toToken.symbol} with USDC` });
+          const g = await vault.buy.estimateGas(rwaQuoteResult.pairId, minSynth, { value: amountIn });
+          const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, gasLimit: g * 150n / 100n });
+          const receipt = await tx.wait();
+          saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
+          await Promise.all([refetchFromBalance(), refetchToBalance()]);
+          setFromAmount(""); setToAmount(""); setRwaQuoteResult(null); setRouteHops([]);
+          toast({
+            title: "RWA buy successful!",
+            description: (
+              <div className="flex items-center gap-2">
+                <span>Bought {toAmount} {toToken.symbol}</span>
+                <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button>
+              </div>
+            ),
+          });
+        } else {
+          // RWA → USDC: vault.redeem burns directly from balanceOf (no approve needed)
+          const minUsdc = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
+          toast({ title: "Redeeming RWA token…", description: `Redeeming ${fromToken.symbol} for USDC` });
+          const g = await vault.redeem.estimateGas(rwaQuoteResult.pairId, amountIn, minUsdc);
+          const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { gasLimit: g * 150n / 100n });
+          const receipt = await tx.wait();
+          saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
+          await Promise.all([refetchFromBalance(), refetchToBalance()]);
+          setFromAmount(""); setToAmount(""); setRwaQuoteResult(null); setRouteHops([]);
+          toast({
+            title: "RWA redeem successful!",
+            description: (
+              <div className="flex items-center gap-2">
+                <span>Redeemed {fromAmount} {fromToken.symbol} → {toAmount} USDC</span>
+                <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button>
+              </div>
+            ),
+          });
+        }
+        setIsSwapping(false);
+        return;
+      } catch (error: any) {
+        const errorInfo = getErrorForToast(error);
+        toast({ title: errorInfo.title, description: errorInfo.description, rawError: errorInfo.rawError, variant: "destructive" });
+        setIsSwapping(false);
+        return;
+      }
+    }
+
     setIsSwapping(true);
     let swapSucceeded = false;
     try {
@@ -514,15 +796,9 @@ export default function Swap() {
           const useV2 = bestQuote.protocol === "V2" || (!v3Enabled && bestQuote.route.length > 1);
           const useV3 = bestQuote.protocol === "V3" && bestQuote.route.length === 1;
           const isV3MultiHop = bestQuote.protocol === "V3" && bestQuote.route.length > 1;
-          
-          // V3 multi-hop not supported in gasless - fallback to regular swap
-          if (isV3MultiHop && v3Enabled) {
-            toast({ title: "V3 multi-hop not supported in gasless", description: "Using regular swap instead" });
-            setGaslessMode(false);
-          }
-          
+
           // Execute gasless swap if enabled and available
-          if (gaslessMode && !isV3MultiHop) {
+          if (gaslessMode) {
             const deadlineTimestamp = Math.floor(Date.now() / 1000) + deadline * 60;
             if (useV2 && v2Enabled) {
               const path: string[] = [];
@@ -540,6 +816,32 @@ export default function Swap() {
               const tokenOutV3 = isNativeToken(toToken.address) && wrappedAddr ? wrappedAddr : toToken.address;
               const fee = bestQuote.route[0].fee || 3000;
               result = await executeGaslessSwapV3(signer, tokenInAddress, tokenOutV3, fee, amountInForPermit2, minAmountOut, deadlineTimestamp);
+            } else if (isV3MultiHop && v3Enabled && bestQuote.route.length === 2) {
+              const wrappedAddr = getWrappedAddress(chainId, "0x0000000000000000000000000000000000000000");
+              if (!wrappedAddr) throw new Error("Wrapped token address not found");
+
+              const tokenInForPath = isNativeToken(bestQuote.route[0].tokenIn.address)
+                ? wrappedAddr
+                : bestQuote.route[0].tokenIn.address;
+              const midForPath = isNativeToken(bestQuote.route[0].tokenOut.address)
+                ? wrappedAddr
+                : bestQuote.route[0].tokenOut.address;
+              const tokenOutForPath = isNativeToken(bestQuote.route[1].tokenOut.address)
+                ? wrappedAddr
+                : bestQuote.route[1].tokenOut.address;
+
+              const fee1 = bestQuote.route[0].fee || 3000;
+              const fee2 = bestQuote.route[1].fee || 3000;
+              const path = `0x${tokenInForPath.slice(2)}${fee1.toString(16).padStart(6, "0")}${midForPath.slice(2)}${fee2.toString(16).padStart(6, "0")}${tokenOutForPath.slice(2)}`;
+
+              result = await executeGaslessSwapV3MultiHop(
+                signer,
+                tokenInAddress,
+                path,
+                amountInForPermit2,
+                minAmountOut,
+                deadlineTimestamp,
+              );
             } else {
               throw new Error("Selected protocol not available. Try regular swap.");
             }
@@ -547,12 +849,12 @@ export default function Swap() {
             saveTransaction(fromToken, toToken, fromAmount, toAmount, result.txHash);
             await Promise.all([refetchFromBalance(), refetchToBalance()]);
             setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
-            const toSymbol = toToken.symbol === "wUSDC" ? "USDC" : toToken.symbol;
+            const toSymbol = isCanonicalWUSDC(toToken) ? "USDC" : toToken.symbol;
             toast({
               title: "Gasless swap successful!",
               description: (
                 <div className="flex items-center gap-2">
-                    <span>Swapped {fromAmount} {fromToken.symbol} → {toAmountDisplay} {toSymbol}{toToken.symbol === "wUSDC" && " (auto-converted)"}</span>
+                    <span>Swapped {fromAmount} {fromToken.symbol} → {toAmountDisplay} {toSymbol}{isCanonicalWUSDC(toToken) && " (auto-converted)"}</span>
                   <Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(result.txHash)}><ExternalLink className="h-3 w-3" /></Button>
                 </div>
               ),
@@ -754,6 +1056,7 @@ export default function Swap() {
   };
 
   const handleSwap = async () => {
+    if (!canSwap) return;
     if (priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged) {
       setHighImpactConfirm(true);
       return;
@@ -794,8 +1097,27 @@ export default function Swap() {
   const impactColor = priceImpact === null ? "" : priceImpact >= HIGH_IMPACT_THRESHOLD ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
   const toAmountNum = parseFloat(toAmount);
   const toAmountDisplay = toAmountBelowThreshold && toAmount ? `<${toAmount}` : toAmount;
-  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping);
-  const protocolLabel = smartRoutingResult?.bestQuote?.protocol;
+  let currentInputAmount: bigint | null = null;
+  try {
+    if (fromToken && fromAmount && parseFloat(fromAmount) > 0) {
+      currentInputAmount =
+        maxAmountWeiRef.current !== null
+          ? maxAmountWeiRef.current
+          : parseAmount(fromAmount, fromToken.decimals);
+    }
+  } catch {
+    currentInputAmount = null;
+  }
+  const hasCurrentSmartQuote = Boolean(
+    smartRoutingResult?.bestQuote &&
+    currentInputAmount !== null &&
+    smartRoutingResult.inputAmount === currentInputAmount &&
+    Date.now() - (smartRoutingResult.timestamp || 0) <= 30000,
+  );
+  const hasValidRwaQuote = !isRWAPair || (!!rwaQuoteResult && !rwaQuoteResult.isStale && (rwaQuoteResult.isBuy || rwaQuoteResult.reserveOk));
+  const hasSmartQuote = isRWAPair || isWrapPair || isUnwrapPair || hasCurrentSmartQuote;
+  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping && !isLoadingQuote && hasValidRwaQuote && hasSmartQuote);
+  const protocolLabel = isRWAPair ? "RWA" : smartRoutingResult?.bestQuote?.protocol;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -874,6 +1196,7 @@ export default function Swap() {
         .sw-proto { display:inline-flex; align-items:center; padding:2px 8px; border-radius:8px; font-size:10px; font-weight:800; letter-spacing:0.04em; text-transform:uppercase; }
         .sw-proto-v2 { background:rgba(99,102,241,0.14); color:#818cf8; border:1px solid rgba(99,102,241,0.25); }
         .sw-proto-v3 { background:rgba(139,92,246,0.14); color:#c4b5fd; border:1px solid rgba(139,92,246,0.25); }
+        .sw-proto-rwa { background:rgba(16,185,129,0.14); color:#6ee7b7; border:1px solid rgba(16,185,129,0.25); }
 
         /* submit */
         .sw-submit { width:100%; height:52px; border-radius:16px; font-weight:800; font-size:16px; letter-spacing:0.02em; border:none; cursor:pointer; display:flex; align-items:center; justify-content:center; gap:9px; transition:all 0.22s; margin-top:14px; }
@@ -942,10 +1265,11 @@ export default function Swap() {
               <div className="sw-hdr-btns">
                 {isConnected && (
                   <button 
-                    className={`sw-hdr-btn ${gaslessMode ? 'sw-gasless-active' : ''}`} 
+                    className={`sw-hdr-btn ${gaslessMode ? 'sw-gasless-active' : ''}`}
                     onClick={() => setGaslessMode(!gaslessMode)}
-                    title={gaslessMode ? "Gasless mode ON - click to disable" : "Gasless mode OFF - click to enable"}
-                    style={gaslessMode ? { background: 'rgba(34,197,94,0.2)', borderColor: 'rgba(34,197,94,0.4)', color: '#4ade80' } : {}}
+                    title={isRWAPair ? "Gasless not available for RWA swaps" : gaslessMode ? "Gasless mode ON - click to disable" : "Gasless mode OFF - click to enable"}
+                    style={gaslessMode ? { background: 'rgba(34,197,94,0.2)', borderColor: 'rgba(34,197,94,0.4)', color: '#4ade80' } : isRWAPair ? { opacity: 0.3, cursor: 'not-allowed' } : {}}
+                    disabled={isRWAPair}
                   >
                     {gaslessMode ? <Zap style={{ width: 15, height: 15 }} /> : <ZapOff style={{ width: 15, height: 15 }} />}
                   </button>
@@ -960,7 +1284,7 @@ export default function Swap() {
             </div>
             
             {/* Gasless Mode Notice */}
-            {gaslessMode && isConnected && (
+            {gaslessMode && isConnected && !isRWAPair && (
               <div className="sw-gasless-notice">
                 {isCheckingPermit2 ? (
                   <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -1091,8 +1415,8 @@ export default function Swap() {
                       <span style={{ fontSize: 12, fontWeight: 700, color: "rgba(255,255,255,0.45)" }}>
                         1 {fromToken!.symbol} = {(toAmountNum / parseFloat(fromAmount)).toFixed(6)} {toToken!.symbol}
                       </span>
-                      {protocolLabel && (
-                        <span className={`sw-proto ${protocolLabel === "V3" ? "sw-proto-v3" : "sw-proto-v2"}`}>{protocolLabel}</span>
+                        {protocolLabel && (
+                        <span className={`sw-proto ${protocolLabel === "V3" ? "sw-proto-v3" : protocolLabel === "RWA" ? "sw-proto-rwa" : "sw-proto-v2"}`}>{protocolLabel}</span>
                       )}
                     </div>
                     <ChevronDown style={{ width: 15, height: 15, color: "rgba(255,255,255,0.3)", transform: tradeDetailsOpen ? "rotate(180deg)" : "none", transition: "transform 0.2s" }} />
@@ -1148,10 +1472,10 @@ export default function Swap() {
               {isConnected ? (
                 <button data-testid="button-swap" onClick={handleSwap} disabled={!canSwap} className={`sw-submit ${isSwapping ? "loading" : canSwap && priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged ? "highimpact" : canSwap ? "active" : "off"}`}>
                   {isSwapping
-                    ? <><span className="sw-spin" />Swapping…</>
+                    ? <><span className="sw-spin" />{isRWAPair ? (isRwaBuy ? "Buying…" : "Redeeming…") : "Swapping…"}</>
                     : priceImpact !== null && priceImpact >= HIGH_IMPACT_THRESHOLD && !impactAcknowledged
                       ? <><AlertTriangle style={{ width: 18, height: 18 }} />Confirm High Impact Swap</>
-                      : <><ArrowDownUp style={{ width: 18, height: 18 }} />Swap</>
+                      : <><ArrowDownUp style={{ width: 18, height: 18 }} />{isRWAPair ? (isRwaBuy ? `Buy ${toToken?.symbol || "RWA"}` : `Redeem ${fromToken?.symbol || "RWA"}`) : "Swap"}</>
                   }
                 </button>
               ) : (
@@ -1162,8 +1486,8 @@ export default function Swap() {
         </div>
       </div>
 
-      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={t => { setFromToken(t); setShowFromSelector(false); }} tokens={tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
-      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={t => { setToToken(t); setShowToSelector(false); }} tokens={tokens} onImport={handleImportToken} onDelete={handleDeleteToken} />
+      <TokenSelector open={showFromSelector} onClose={() => setShowFromSelector(false)} onSelect={handleFromSelect} tokens={isRWAToken(toToken) ? tokens.filter(t => isCanonicalUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={isRWAToken(toToken) ? recentTokens.filter(t => isCanonicalUSDC(t)) : recentTokens} favoriteTokens={isRWAToken(toToken) ? favoriteTokens.filter(t => isCanonicalUSDC(t)) : favoriteTokens} onToggleFavorite={toggleFavoriteToken} showBalances />
+      <TokenSelector open={showToSelector} onClose={() => setShowToSelector(false)} onSelect={handleToSelect} tokens={isRWAToken(fromToken) ? tokens.filter(t => isCanonicalUSDC(t)) : tokens} onImport={handleImportToken} onDelete={handleDeleteToken} recentTokens={isRWAToken(fromToken) ? recentTokens.filter(t => isCanonicalUSDC(t)) : recentTokens} favoriteTokens={isRWAToken(fromToken) ? favoriteTokens.filter(t => isCanonicalUSDC(t)) : favoriteTokens} onToggleFavorite={toggleFavoriteToken} showBalances />
       <SwapSettings open={showSettings} onClose={() => setShowSettings(false)} slippage={slippage} onSlippageChange={setSlippage} deadline={deadline} onDeadlineChange={setDeadline} recipientAddress={recipientAddress} onRecipientAddressChange={setRecipientAddress} quoteRefreshInterval={quoteRefreshInterval} onQuoteRefreshIntervalChange={setQuoteRefreshInterval} v2Enabled={v2Enabled} v3Enabled={v3Enabled} onV2EnabledChange={setV2Enabled} onV3EnabledChange={setV3Enabled} />
       <TransactionHistory open={showTransactionHistory} onClose={() => setShowTransactionHistory(false)} />
 

@@ -5,7 +5,7 @@ import { FEE_TIER_LABELS } from "@/lib/abis/v3";
 export interface RouteHop {
   tokenIn: Token;
   tokenOut: Token;
-  protocol: "V2" | "V3";
+  protocol: "V2" | "V3" | "RWA";
   fee?: number; // For V3 only
 }
 
@@ -67,8 +67,9 @@ function TokenBadge({ token }: { token: Token }) {
   );
 }
 
-function ProtocolBadge({ protocol, fee }: { protocol: "V2" | "V3"; fee?: number }) {
+function ProtocolBadge({ protocol, fee }: { protocol: "V2" | "V3" | "RWA"; fee?: number }) {
   const isV3 = protocol === "V3";
+  const isRWA = protocol === "RWA";
   const feeLabel = fee && isV3 ? FEE_TIER_LABELS[fee as keyof typeof FEE_TIER_LABELS] : null;
   
   return (
@@ -76,7 +77,9 @@ function ProtocolBadge({ protocol, fee }: { protocol: "V2" | "V3"; fee?: number 
       className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border ${
         isV3
           ? "bg-purple-500/10 border-purple-500/30 text-purple-400"
-          : "bg-blue-500/10 border-blue-500/30 text-blue-400"
+          : isRWA
+            ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
+            : "bg-blue-500/10 border-blue-500/30 text-blue-400"
       }`}
     >
       <div className="flex items-center gap-1.5">

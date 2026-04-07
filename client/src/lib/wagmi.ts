@@ -10,6 +10,8 @@ import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
 import { RPC_CONFIG } from './config';
 
+const ARC_WALLET_ADD_RPC = RPC_CONFIG.arcTestnet;
+
 // Define ARC Testnet chain
 export const arcTestnet = defineChain({
   id: 5042002,
@@ -21,10 +23,10 @@ export const arcTestnet = defineChain({
   },
   rpcUrls: {
     default: {
-      http: [RPC_CONFIG.arcTestnet],
+      http: [ARC_WALLET_ADD_RPC],
     },
     public: {
-      http: [RPC_CONFIG.arcTestnet],
+      http: [ARC_WALLET_ADD_RPC],
     },
   },
   blockExplorers: {
