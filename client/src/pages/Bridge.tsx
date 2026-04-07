@@ -768,16 +768,18 @@ export default function Bridge() {
         | {
             amount: bigint;
             destinationDomain: number;
+            mintRecipient: string;
           }
         | null = null;
       try {
         const parsedTx = TOKEN_MESSENGER_V2_INTERFACE.parseTransaction({ data: tx.data, value: tx.value ?? 0n });
-        if (parsedTx && parsedTx.name === "depositForBurn") {
-          decodedDepositForBurn = {
-            amount: parsedTx.args[0] as bigint,
-            destinationDomain: Number(parsedTx.args[1]),
-          };
-        }
+          if (parsedTx && parsedTx.name === "depositForBurn") {
+            decodedDepositForBurn = {
+              amount: parsedTx.args[0] as bigint,
+              destinationDomain: Number(parsedTx.args[1]),
+              mintRecipient: String(parsedTx.args[2]),
+            };
+          }
       } catch (err) {
         console.error("Failed to decode depositForBurn transaction", {
           txHash,
@@ -811,6 +813,7 @@ export default function Bridge() {
             amount: bigint;
             depositor: string;
             destinationDomain: number;
+            mintRecipient: string;
           }
         | null = null;
       try {
@@ -818,13 +821,14 @@ export default function Bridge() {
           topics: burnEvent.topics,
           data: burnEvent.data,
         });
-        if (parsed && parsed.name === "DepositForBurn") {
-          parsedBurnEvent = {
-            amount: parsed.args.amount as bigint,
-            depositor: String(parsed.args.depositor),
-            destinationDomain: Number(parsed.args.destinationDomain),
-          };
-        }
+          if (parsed && parsed.name === "DepositForBurn") {
+            parsedBurnEvent = {
+              amount: parsed.args.amount as bigint,
+              depositor: String(parsed.args.depositor),
+              destinationDomain: Number(parsed.args.destinationDomain),
+              mintRecipient: String(parsed.args.mintRecipient),
+            };
+          }
       } catch (err) {
         console.error("Failed to parse DepositForBurn event", {
           txHash,
@@ -846,6 +850,14 @@ export default function Bridge() {
       }
       if (parsedBurnEvent.destinationDomain !== decodedDepositForBurn.destinationDomain) {
         throw new Error("Burn event destination domain does not match transaction input");
+      }
+
+      const expectedMintRecipient = zeroPadValue(address, 32).toLowerCase();
+      if (decodedDepositForBurn.mintRecipient.toLowerCase() !== expectedMintRecipient) {
+        throw new Error("Burn transaction mint recipient does not match connected wallet");
+      }
+      if (parsedBurnEvent.mintRecipient.toLowerCase() !== expectedMintRecipient) {
+        throw new Error("Burn event mint recipient does not match connected wallet");
       }
 
       let amount = "0";
@@ -886,8 +898,14 @@ export default function Bridge() {
       setManualClaimSourceChain(null);
       setManualClaimStatus("idle");
 
-      // Try to get destination from API
-      let destChain: CCTPChain | undefined;
+      // Use burn transaction destination as source of truth
+      const decodedDestinationDomain = Number(decodedDepositForBurn.destinationDomain);
+      const decodedDestinationChain = getChainByDomain(decodedDestinationDomain);
+      if (!decodedDestinationChain) {
+        throw new Error("Burn transaction destination chain is not supported");
+      }
+
+      let destChain: CCTPChain | undefined = decodedDestinationChain;
       let attestation: { message: string; attestation: string } | undefined;
 
       try {
@@ -909,8 +927,18 @@ export default function Bridge() {
           
           if (data?.messages?.[0]) {
             const msg = data.messages[0];
-            destChain = getChainByDomain(msg.destinationDomain);
-            if (destChain && msg.status === "complete" && msg.attestation) {
+            const apiDestinationDomain =
+              typeof msg.destinationDomain === "number"
+                ? msg.destinationDomain
+                : Number(msg.destinationDomain);
+            if (
+              Number.isFinite(apiDestinationDomain) &&
+              Number(apiDestinationDomain) !== decodedDestinationDomain
+            ) {
+              throw new Error("Attestation destination does not match burn transaction");
+            }
+
+            if (msg.status === "complete" && msg.attestation) {
               attestation = {
                 message: msg.message,
                 attestation: msg.attestation,
@@ -930,11 +958,7 @@ export default function Bridge() {
         console.log("API fetch failed, will poll for attestation:", apiErr);
       }
 
-      // Set chains - if destChain unknown, use first available as placeholder
-      if (!destChain) {
-        const allChains = CCTP_TESTNET_CHAINS.filter(c => c.domain !== manualClaimSourceChain.domain);
-        destChain = allChains[0];
-      }
+      if (!destChain) throw new Error("Could not resolve destination chain from burn transaction");
 
       // Update UI like resume system does - IMMEDIATELY
       setSourceChain(manualClaimSourceChain);
@@ -997,8 +1021,25 @@ export default function Bridge() {
         
         if (abortRef.current) return;
 
+        if (
+          typeof fetchedAttestationResult.destinationDomain === "number" &&
+          fetchedAttestationResult.destinationDomain !== decodedDestinationDomain
+        ) {
+          updateTransferStatus(txHash, {
+            status: "attesting",
+            error: "Attestation destination does not match burn transaction",
+          });
+          setTransfer(prev => ({ ...prev, step: "error", error: "Attestation destination does not match burn transaction" }));
+          toast({
+            title: "Destination mismatch",
+            description: "Attestation destination does not match burn transaction",
+            variant: "destructive",
+          });
+          return;
+        }
+
         const resolvedDestChain = resolveDestinationChain(
-          fetchedAttestationResult.destinationDomain,
+          decodedDestinationDomain,
           destChain,
         );
 

@@ -37,7 +37,11 @@ async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
   worker: (item: T) => Promise<R>,
+  signal?: AbortSignal,
 ): Promise<R[]> {
+  if (signal?.aborted) {
+    throw new DOMException("Aborted", "AbortError");
+  }
   if (items.length === 0) return [];
 
   const normalizedConcurrency = Number.isFinite(concurrency)
@@ -51,6 +55,9 @@ async function mapWithConcurrency<T, R>(
     { length: Math.min(normalizedConcurrency, items.length) },
     async () => {
       while (true) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
         const currentIndex = nextIndex;
         nextIndex += 1;
         if (currentIndex >= items.length) {
@@ -164,12 +171,19 @@ async function quoteWithRetry<T>(
   fn: () => Promise<T>,
   maxRetries = 2,
   baseDelayMs = 80,
+  signal?: AbortSignal,
 ): Promise<T> {
   let lastTransientError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
     try {
       return await fn();
     } catch (err) {
+      if (signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
       const transient = isTransientError(err);
       if (!transient) {
         throw err;
@@ -180,7 +194,18 @@ async function quoteWithRetry<T>(
         break;
       }
 
-      await new Promise((resolve) => setTimeout(resolve, baseDelayMs * (attempt + 1)));
+      await new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(undefined);
+        }, baseDelayMs * (attempt + 1));
+        const onAbort = () => {
+          clearTimeout(timeoutId);
+          signal?.removeEventListener("abort", onAbort);
+          reject(new DOMException("Aborted", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
     }
   }
   throw lastTransientError;
@@ -226,7 +251,8 @@ export async function getV2Quote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedToken: Token
+  wrappedToken: Token,
+  signal?: AbortSignal,
 ): Promise<QuoteResult | null> {
   try {
     const router = new Contract(routerAddress, V2_ROUTER_ABI, provider);
@@ -251,9 +277,9 @@ export async function getV2Quote(
       !hasAdjacentDuplicateAddresses(hopPath);
 
     const [directResult, hopResult] = await Promise.allSettled([
-      quoteWithRetry(() => router.getAmountsOut(amountIn, directPath)),
+      quoteWithRetry(() => router.getAmountsOut(amountIn, directPath), 2, 80, signal),
       shouldProbeHopPath
-        ? quoteWithRetry(() => router.getAmountsOut(amountIn, hopPath))
+        ? quoteWithRetry(() => router.getAmountsOut(amountIn, hopPath), 2, 80, signal)
         : Promise.resolve(null),
     ]);
 
@@ -279,7 +305,7 @@ export async function getV2Quote(
     let bestPriceImpact: number | undefined;
     if (bestOutputAmount && bestPath.length > 0) {
       try {
-        const spotAmounts = await quoteWithRetry(() => router.getAmountsOut(testIn, bestPath));
+        const spotAmounts = await quoteWithRetry(() => router.getAmountsOut(testIn, bestPath), 2, 80, signal);
         const probeImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], bestOutputAmount);
         bestPriceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
       } catch {
@@ -321,7 +347,8 @@ export async function getV3Quote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedToken: Token
+  wrappedToken: Token,
+  signal?: AbortSignal,
 ): Promise<QuoteResult | null> {
   try {
     const wrappedTokenAddress = wrappedToken.address;
@@ -366,7 +393,10 @@ export async function getV3Quote(
             amountIn,
             fee,
             sqrtPriceLimitX96: 0n,
-          })
+          }),
+          2,
+          80,
+          signal,
         );
         return {
           fee,
@@ -376,7 +406,7 @@ export async function getV3Quote(
       } catch {
         return null;
       }
-    });
+    }, signal);
 
     const canUseMultiHop =
       fromERC20.toLowerCase() !== wrappedTokenAddress.toLowerCase() &&
@@ -398,7 +428,7 @@ export async function getV3Quote(
       V3_QUOTE_CONCURRENCY,
       async ({ fee1, fee2, path }) => {
       try {
-        const actualResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(path, amountIn));
+        const actualResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(path, amountIn), 2, 80, signal);
         return {
           fee1,
           fee2,
@@ -410,6 +440,7 @@ export async function getV3Quote(
         return null;
       }
       },
+      signal,
     );
 
     // Find best single-hop
@@ -451,7 +482,7 @@ export async function getV3Quote(
     let priceImpact: number | undefined;
     try {
       if (useMultiHop && bestMultiHop) {
-        const spotResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(bestMultiHop.path, testIn));
+        const spotResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(bestMultiHop.path, testIn), 2, 80, signal);
         const probeImpact = calcV3Impact(spotResult[0], bestMultiHop.outputAmount);
         priceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
       } else if (bestSingle) {
@@ -462,7 +493,10 @@ export async function getV3Quote(
             amountIn: testIn,
             fee: bestSingle.fee,
             sqrtPriceLimitX96: 0n,
-          })
+          }),
+          2,
+          80,
+          signal,
         );
         const probeImpact = calcV3Impact(spotResult[0], bestSingle.outputAmount);
         priceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
@@ -534,12 +568,13 @@ export async function getSmartRouteQuote(
   amountIn: bigint,
   wrappedToken: Token,
   v2Enabled: boolean,
-  v3Enabled: boolean
+  v3Enabled: boolean,
+  signal?: AbortSignal,
 ): Promise<SmartRoutingResult | null> {
   try {
     const quotes = await Promise.allSettled([
-      v2Enabled ? getV2Quote(provider, v2RouterAddress, fromToken, toToken, amountIn, wrappedToken) : Promise.resolve(null),
-      v3Enabled ? getV3Quote(provider, v3QuoterAddress, fromToken, toToken, amountIn, wrappedToken) : Promise.resolve(null),
+      v2Enabled ? getV2Quote(provider, v2RouterAddress, fromToken, toToken, amountIn, wrappedToken, signal) : Promise.resolve(null),
+      v3Enabled ? getV3Quote(provider, v3QuoterAddress, fromToken, toToken, amountIn, wrappedToken, signal) : Promise.resolve(null),
     ]);
     
     const v2Quote = quotes[0].status === "fulfilled" ? quotes[0].value : null;
@@ -661,7 +696,8 @@ export async function getRWAQuote(
   vaultAddress: string,
   fromToken: Token,
   toToken: Token,
-  amountIn: bigint
+  amountIn: bigint,
+  signal?: AbortSignal,
 ): Promise<RWAQuoteResult | null> {
   try {
     const vault = new Contract(vaultAddress, RWA_VAULT_ABI, provider);
@@ -692,7 +728,7 @@ export async function getRWAQuote(
 
     if (isBuy) {
       // quoteBuy(pairId, usdcIn) returns (synthOut, fee, netUsdc, price, isStale)
-      const result = await quoteWithRetry(() => vault.quoteBuy(pairId, amountIn));
+      const result = await quoteWithRetry(() => vault.quoteBuy(pairId, amountIn), 2, 80, signal);
       const synthOut = result[0];
       if (synthOut <= 0n) {
         return null;
@@ -726,7 +762,7 @@ export async function getRWAQuote(
       };
     } else {
       // Redeem: quoteRedeem(pairId, synthAmount) returns (usdcOut, fee, grossUsdc, price, isStale, reserveOk)
-      const result = await quoteWithRetry(() => vault.quoteRedeem(pairId, amountIn));
+      const result = await quoteWithRetry(() => vault.quoteRedeem(pairId, amountIn), 2, 80, signal);
       const usdcOut = result[0];
       if (usdcOut <= 0n) {
         return null;

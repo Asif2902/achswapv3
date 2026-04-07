@@ -540,7 +540,7 @@ export function MigrateV2ToV3() {
       };
 
       const initialState = await readMigrationState();
-      const allowZeroMinFallback = priceWarningConfirmed || (!initialState.poolExists && zeroMinConfirmed);
+      const allowZeroMinFallback = !initialState.poolExists && zeroMinConfirmed;
       const strictAttemptBps = Array.from(
         new Set([
           adaptiveSlippageBps,
@@ -905,7 +905,9 @@ export function MigrateV2ToV3() {
                               </div>
                             </div>
                             <button
-                              onClick={() => setPriceWarningConfirmed(true)}
+                              onClick={() => {
+                                setConfirmModalType("price");
+                              }}
                               className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
                               style={{
                                 background: "rgba(245,158,11,0.12)",
@@ -913,7 +915,7 @@ export function MigrateV2ToV3() {
                                 color: "#fde68a",
                               }}
                             >
-                              I understand, proceed anyway
+                              Review price warning risks
                             </button>
                           </div>
                         </>

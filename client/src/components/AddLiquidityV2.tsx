@@ -42,6 +42,7 @@ export function AddLiquidityV2() {
 
   const maxAmountAWeiRef = useRef<bigint | null>(null);
   const maxAmountBWeiRef = useRef<bigint | null>(null);
+  const pairCheckRequestIdRef = useRef(0);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -169,9 +170,26 @@ export function AddLiquidityV2() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+
     const checkPairExists = async () => {
+      const requestId = ++pairCheckRequestIdRef.current;
+      const applyIfCurrent = (fn: () => void) => {
+        if (!cancelled && pairCheckRequestIdRef.current === requestId) {
+          fn();
+        }
+      };
+
+      applyIfCurrent(() => setIsLoadingPair(true));
+
       if (!tokenA || !tokenB || !window.ethereum) {
-        setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return;
+        applyIfCurrent(() => {
+          setPairExists(false);
+          setReserveA(0n);
+          setReserveB(0n);
+          setIsLoadingPair(false);
+        });
+        return;
       }
 
       const wrappedAddress = chainId
@@ -186,39 +204,82 @@ export function AddLiquidityV2() {
       };
 
       if (normalizeForPairComparison(tokenA.address) === normalizeForPairComparison(tokenB.address)) {
-        setPairExists(false); setReserveA(0n); setReserveB(0n); return;
+        applyIfCurrent(() => {
+          setPairExists(false);
+          setReserveA(0n);
+          setReserveB(0n);
+          setIsLoadingPair(false);
+        });
+        return;
       }
 
-      setIsLoadingPair(true);
       try {
-        if (!contracts) { setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return; }
+        if (!contracts) {
+          applyIfCurrent(() => {
+            setPairExists(false);
+            setReserveA(0n);
+            setReserveB(0n);
+            setIsLoadingPair(false);
+          });
+          return;
+        }
         const provider = new BrowserProvider(window.ethereum);
         const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
-        if (!wrappedAddress) { setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return; }
+        if (!wrappedAddress) {
+          applyIfCurrent(() => {
+            setPairExists(false);
+            setReserveA(0n);
+            setReserveB(0n);
+            setIsLoadingPair(false);
+          });
+          return;
+        }
         const isTokenANative = tokenA.address === ZERO_ADDRESS;
         const isTokenBNative = tokenB.address === ZERO_ADDRESS;
         const tokenAAddress = isTokenANative ? wrappedAddress : tokenA.address;
         const tokenBAddress = isTokenBNative ? wrappedAddress : tokenB.address;
         const pairAddress = await factory.getPair(tokenAAddress, tokenBAddress);
+        if (cancelled || pairCheckRequestIdRef.current !== requestId) return;
         if (pairAddress === "0x0000000000000000000000000000000000000000") {
-          setPairExists(false); setReserveA(0n); setReserveB(0n);
+          applyIfCurrent(() => {
+            setPairExists(false);
+            setReserveA(0n);
+            setReserveB(0n);
+          });
         } else {
-          setPairExists(true);
+          applyIfCurrent(() => setPairExists(true));
           const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
           const [reserve0, reserve1] = await pairContract.getReserves();
           const token0Address = await pairContract.token0();
+          if (cancelled || pairCheckRequestIdRef.current !== requestId) return;
           if (tokenAAddress.toLowerCase() === token0Address.toLowerCase()) {
-            setReserveA(reserve0); setReserveB(reserve1);
+            applyIfCurrent(() => {
+              setReserveA(reserve0);
+              setReserveB(reserve1);
+            });
           } else {
-            setReserveA(reserve1); setReserveB(reserve0);
+            applyIfCurrent(() => {
+              setReserveA(reserve1);
+              setReserveB(reserve0);
+            });
           }
         }
       } catch (error) {
         console.error('Failed to check pair:', error);
-        setPairExists(false); setReserveA(0n); setReserveB(0n);
-      } finally { setIsLoadingPair(false); }
+        applyIfCurrent(() => {
+          setPairExists(false);
+          setReserveA(0n);
+          setReserveB(0n);
+        });
+      } finally {
+        applyIfCurrent(() => setIsLoadingPair(false));
+      }
     };
     checkPairExists();
+    return () => {
+      cancelled = true;
+      pairCheckRequestIdRef.current += 1;
+    };
   }, [tokenA, tokenB, tokens, address, chainId, contracts]);
 
   useEffect(() => {

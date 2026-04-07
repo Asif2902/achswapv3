@@ -861,6 +861,8 @@ export function AddLiquidityV3Advanced() {
                 if (!tokenBCanDeposit) return;
                 const { displayAmount, amountWei } = getSafeMaxInput(balanceB, tokenB);
                 setAmountB(displayAmount);
+                setAmountBIsAuto(false);
+                setAutoCalcAmounts(null);
                 maxAmountBWeiRef.current = amountWei;
               }}>
                 Balance: <span style={{ color: "rgba(255,255,255,0.65)", fontWeight: 600 }}>{formatBalance(balanceB, tokenB.decimals)}</span>
@@ -883,6 +885,8 @@ export function AddLiquidityV3Advanced() {
                 <button className="v3a-max-btn" onClick={() => {
                   const { displayAmount, amountWei } = getSafeMaxInput(balanceB, tokenB);
                   setAmountB(displayAmount);
+                  setAmountBIsAuto(false);
+                  setAutoCalcAmounts(null);
                   maxAmountBWeiRef.current = amountWei;
                 }}>MAX</button>
               )}

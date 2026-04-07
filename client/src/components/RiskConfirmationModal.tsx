@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 
 type RiskTone = "danger" | "warning";
@@ -35,6 +35,14 @@ export function RiskConfirmationModal({
   const [checked, setChecked] = useState(false);
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  const checkboxRef = useRef<HTMLInputElement | null>(null);
+  const previousActiveElementRef = useRef<HTMLElement | null>(null);
+  const idsRef = useRef({
+    title: `risk-modal-title-${Math.random().toString(36).slice(2, 10)}`,
+    description: `risk-modal-description-${Math.random().toString(36).slice(2, 10)}`,
+    checkbox: `risk-confirm-check-${Math.random().toString(36).slice(2, 10)}`,
+  });
 
   useEffect(() => {
     if (!open) {
@@ -43,6 +51,73 @@ export function RiskConfirmationModal({
       setSubmitting(false);
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    previousActiveElementRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    const timer = window.setTimeout(() => {
+      checkboxRef.current?.focus();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+      previousActiveElementRef.current?.focus();
+    };
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onOpenChange(false);
+        return;
+      }
+
+      if (event.key !== "Tab") {
+        return;
+      }
+
+      const container = modalRef.current;
+      if (!container) return;
+
+      const focusableElements = Array.from(
+        container.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+
+      if (focusableElements.length === 0) {
+        return;
+      }
+
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+
+      if (event.shiftKey) {
+        if (!active || active === first || !container.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+        return;
+      }
+
+      if (!active || active === last || !container.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, onOpenChange]);
 
   const isValidPhrase = text.trim().toUpperCase() === confirmPhrase.toUpperCase();
   const canConfirm = checked && isValidPhrase && !submitting;
@@ -87,13 +162,21 @@ export function RiskConfirmationModal({
           }
         }}
       >
-        <div className="rcm-modal" style={{ border: `1px solid ${palette.border}` }}>
+        <div
+          ref={modalRef}
+          className="rcm-modal"
+          style={{ border: `1px solid ${palette.border}` }}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={idsRef.current.title}
+          aria-describedby={idsRef.current.description}
+        >
           <div className="rcm-icon">
             <AlertTriangle style={{ width: 42, height: 42, color: palette.icon }} />
           </div>
 
-          <div className="rcm-title">{title}</div>
-          <div className="rcm-desc">{description}</div>
+          <div id={idsRef.current.title} className="rcm-title">{title}</div>
+          <div id={idsRef.current.description} className="rcm-desc">{description}</div>
 
           <div className="rcm-warn-box" style={{ background: palette.warnBg, border: `1px solid ${palette.warnBorder}` }}>
             <AlertTriangle style={{ width: 16, height: 16, color: palette.icon, flexShrink: 0 }} />
@@ -103,11 +186,12 @@ export function RiskConfirmationModal({
           <div className="rcm-check">
             <input
               type="checkbox"
-              id="risk-confirm-check"
+              id={idsRef.current.checkbox}
+              ref={checkboxRef}
               checked={checked}
               onChange={(e) => setChecked(e.target.checked)}
             />
-            <label htmlFor="risk-confirm-check">{checkboxLabel}</label>
+            <label htmlFor={idsRef.current.checkbox}>{checkboxLabel}</label>
           </div>
 
           <div className="rcm-input-wrap">

@@ -55,6 +55,10 @@ function fmtBal(raw: string): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
+function isValidStoredTokenAddress(value: unknown): value is string {
+  return typeof value === "string" && /^0x[a-fA-F0-9]{40}$/.test(value);
+}
+
 export default function Swap() {
   const HIGH_IMPACT_THRESHOLD = 15;
   const QUOTE_DEBOUNCE_MS = 120;
@@ -167,8 +171,24 @@ export default function Swap() {
       const key = `favoriteTokens:${chainId}`;
       const stored = localStorage.getItem(key);
       if (stored) {
-        const parsed = JSON.parse(stored);
-        setFavoriteTokens(Array.isArray(parsed) ? parsed : []);
+        const parsed: unknown = JSON.parse(stored);
+        if (!Array.isArray(parsed)) {
+          setFavoriteTokens([]);
+          return;
+        }
+
+        const dedupe = new Set<string>();
+        const valid = parsed.filter((item): item is Token => {
+          if (!item || typeof item !== "object") return false;
+          const candidate = item as Partial<Token>;
+          if (!isValidStoredTokenAddress(candidate.address)) return false;
+          if (candidate.chainId !== chainId) return false;
+          const key = candidate.address.toLowerCase();
+          if (dedupe.has(key)) return false;
+          dedupe.add(key);
+          return true;
+        });
+        setFavoriteTokens(valid);
       } else {
         setFavoriteTokens([]);
       }
@@ -179,13 +199,18 @@ export default function Swap() {
 
   const toggleFavoriteToken = (token: Token) => {
     if (!chainId) return;
+    if (!isValidStoredTokenAddress(token.address) || token.chainId !== chainId) return;
     setFavoriteTokens(prev => {
-      const exists = prev.find(t => t.address.toLowerCase() === token.address.toLowerCase());
+      const normalizedPrev = prev.filter((item): item is Token => {
+        if (!item || typeof item !== "object") return false;
+        return isValidStoredTokenAddress(item.address) && item.chainId === chainId;
+      });
+      const exists = normalizedPrev.find(t => t.address.toLowerCase() === token.address.toLowerCase());
       let updated: Token[];
       if (exists) {
-        updated = prev.filter(t => t.address.toLowerCase() !== token.address.toLowerCase());
+        updated = normalizedPrev.filter(t => t.address.toLowerCase() !== token.address.toLowerCase());
       } else {
-        updated = [...prev, token];
+        updated = [...normalizedPrev, token];
       }
       const key = `favoriteTokens:${chainId}`;
       localStorage.setItem(key, JSON.stringify(updated));
@@ -453,7 +478,7 @@ export default function Swap() {
         const provider = createAlchemyProvider(chainId);
         if (signal.aborted) return;
         const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
-        const rwaResult = await getRWAQuote(provider, contracts.rwa.vault, fromToken, toToken, amountIn);
+        const rwaResult = await getRWAQuote(provider, contracts.rwa.vault, fromToken, toToken, amountIn, signal);
         if (signal.aborted) return;
         if (!rwaResult) {
           setToAmount(""); setPriceImpact(null); setRouteHops([]); setRwaQuoteResult(null); setToAmountBelowThreshold(false);
@@ -498,19 +523,20 @@ export default function Swap() {
       const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
       if (!v2Enabled && !v3Enabled) {
         toast({ title: "No protocols enabled", description: "Enable at least one in settings", variant: "destructive" });
-        setToAmount(""); setPriceImpact(null); setRouteHops([]); return;
+        setToAmount(""); setPriceImpact(null); setRouteHops([]); setSmartRoutingResult(null); return;
       }
       if (signal.aborted) return;
       const cached = getCachedQuote(fromToken.address, toToken.address, fromAmount + (quoteRefreshNonceRef.current ? `#${quoteRefreshNonceRef.current}` : ""), v2Enabled, v3Enabled);
       let result: SmartRoutingResult | null;
       if (cached) { result = cached; }
       else {
-        result = await getSmartRouteQuote(provider, contracts.v2.router, contracts.v3.quoter02, fromToken, toToken, amountIn, wrappedTokenData, v2Enabled, v3Enabled);
+        result = await getSmartRouteQuote(provider, contracts.v2.router, contracts.v3.quoter02, fromToken, toToken, amountIn, wrappedTokenData, v2Enabled, v3Enabled, signal);
         if (signal.aborted) return;
         if (result) setCachedQuote(fromToken.address, toToken.address, fromAmount + (quoteRefreshNonceRef.current ? `#${quoteRefreshNonceRef.current}` : ""), v2Enabled, v3Enabled, result);
       }
-      if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); setToAmountBelowThreshold(false); return; }
+      if (!result?.bestQuote) { setToAmount(""); setPriceImpact(null); setRouteHops([]); setToAmountBelowThreshold(false); setSmartRoutingResult(null); return; }
       setSmartRoutingResult(result);
+      setRwaQuoteResult(null);
       const displayDecimals = Math.min(4, toToken.decimals);
       const threshold = 10 ** -displayDecimals;
       const rawOutput = parseFloat(formatUnits(result.bestQuote.outputAmount, toToken.decimals));
@@ -1071,9 +1097,26 @@ export default function Swap() {
   const impactColor = priceImpact === null ? "" : priceImpact >= HIGH_IMPACT_THRESHOLD ? "#f87171" : priceImpact > 5 ? "#fb923c" : priceImpact > 2 ? "#fbbf24" : "#4ade80";
   const toAmountNum = parseFloat(toAmount);
   const toAmountDisplay = toAmountBelowThreshold && toAmount ? `<${toAmount}` : toAmount;
+  let currentInputAmount: bigint | null = null;
+  try {
+    if (fromToken && fromAmount && parseFloat(fromAmount) > 0) {
+      currentInputAmount =
+        maxAmountWeiRef.current !== null
+          ? maxAmountWeiRef.current
+          : parseAmount(fromAmount, fromToken.decimals);
+    }
+  } catch {
+    currentInputAmount = null;
+  }
+  const hasCurrentSmartQuote = Boolean(
+    smartRoutingResult?.bestQuote &&
+    currentInputAmount !== null &&
+    smartRoutingResult.inputAmount === currentInputAmount &&
+    Date.now() - (smartRoutingResult.timestamp || 0) <= 30000,
+  );
   const hasValidRwaQuote = !isRWAPair || (!!rwaQuoteResult && !rwaQuoteResult.isStale && (rwaQuoteResult.isBuy || rwaQuoteResult.reserveOk));
-  const hasSmartQuote = isRWAPair || isWrapPair || isUnwrapPair || !!smartRoutingResult?.bestQuote;
-  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping && hasValidRwaQuote && hasSmartQuote);
+  const hasSmartQuote = isRWAPair || isWrapPair || isUnwrapPair || hasCurrentSmartQuote;
+  const canSwap = !!(isConnected && fromToken && toToken && fromAmount && parseFloat(fromAmount) > 0 && !isSwapping && !isLoadingQuote && hasValidRwaQuote && hasSmartQuote);
   const protocolLabel = isRWAPair ? "RWA" : smartRoutingResult?.bestQuote?.protocol;
 
   // ── Render ─────────────────────────────────────────────────────────────────
