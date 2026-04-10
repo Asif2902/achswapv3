@@ -188,53 +188,53 @@ type AnalyticsData = {
 const protocolChartConfig = {
   total: {
     label: "Total Volume",
-    color: "hsl(var(--chart-1))",
+    color: "#06b6d4",
   },
   v2: {
     label: "V2",
-    color: "hsl(var(--chart-2))",
+    color: "#2563eb",
   },
   v3: {
     label: "V3",
-    color: "hsl(var(--chart-3))",
+    color: "#f97316",
   },
   rwa: {
     label: "RWA Volume",
-    color: "hsl(var(--chart-4))",
+    color: "#a855f7",
   },
   fees: {
     label: "Fees",
-    color: "hsl(var(--chart-5))",
+    color: "#facc15",
   },
   rwaFees: {
     label: "RWA Fees",
-    color: "hsl(var(--destructive))",
+    color: "#ef4444",
   },
 } satisfies ChartConfig;
 
 const compositionChartConfig = {
   v2: {
     label: "V2",
-    color: "hsl(var(--chart-2))",
+    color: "#2563eb",
   },
   v3: {
     label: "V3",
-    color: "hsl(var(--chart-3))",
+    color: "#f97316",
   },
   rwa: {
     label: "RWA",
-    color: "hsl(var(--chart-4))",
+    color: "#a855f7",
   },
 } satisfies ChartConfig;
 
 const rwaPairsChartConfig = {
   volume: {
     label: "Volume",
-    color: "hsl(var(--chart-1))",
+    color: "#06b6d4",
   },
   reserve: {
     label: "Reserve",
-    color: "hsl(var(--chart-3))",
+    color: "#22c55e",
   },
 } satisfies ChartConfig;
 
@@ -853,7 +853,7 @@ export default function Pools() {
             <StatTile
               title="Total TVL"
               value={formatUsd(parseNum(protocol.totalTvlUsd))}
-              subValue={`V2 ${formatUsd(parseNum(protocol.v2TvlUsd))} · V3 ${formatUsd(parseNum(protocol.v3TvlUsd))}`}
+              subValue={`V2 ${formatUsd(parseNum(protocol.v2TvlUsd))} · V3 ${formatUsd(parseNum(protocol.v3TvlUsd))} · RWA ${formatUsd(parseNum(protocol.rwaTvlUsd))}`}
               icon={<DollarSign className="h-4 w-4" />}
               tone="good"
             />

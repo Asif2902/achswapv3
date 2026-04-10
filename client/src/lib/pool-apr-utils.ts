@@ -223,15 +223,10 @@ export async function getPoolStats(
   const tvlUSD = parseFloat(pool.tvlUsd);
   const activeTVL = getActiveTVLUSD(pool, debug);
 
-  // Calculate APR
-  // When TVL data is unavailable (0), estimate from volume using fee tier
-  const feeTierNum = typeof pool.feeTier === 'string' ? parseInt(pool.feeTier) : pool.feeTier;
-  const feeTier = feeTierNum / 1_000_000; // e.g., 3000 -> 0.003
-  const estimatedTVLFromVolume = volume7dUSD * 30 * feeTier; // Monthly volume proxy for TVL
-
-  // Use actual TVL if available, otherwise estimate from volume
-  const useTVL = tvlUSD >= 1 ? tvlUSD : estimatedTVLFromVolume;
-  const useActiveTVL = activeTVL >= 1 ? activeTVL : estimatedTVLFromVolume;
+  // Calculate APR from observed fees and indexed TVL only.
+  // Do not synthesize TVL from fee tier/volume proxies, as that can produce misleading APR.
+  const useTVL = tvlUSD;
+  const useActiveTVL = activeTVL >= 1 ? activeTVL : tvlUSD;
 
   const aprConservative = useTVL >= 1
     ? (avgDailyFees / useTVL) * 365 * 100
