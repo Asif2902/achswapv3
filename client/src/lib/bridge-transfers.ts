@@ -27,6 +27,10 @@ export interface PendingBridgeTransfer {
 
 const STORAGE_KEY = "achswap_bridge_pending_transfers";
 
+function canonicalTransferId(id: string): string {
+  return id.trim().toLowerCase();
+}
+
 export function getPendingTransfers(): PendingBridgeTransfer[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -50,11 +54,17 @@ export function getPendingTransfers(): PendingBridgeTransfer[] {
 
 export function savePendingTransfer(transfer: PendingBridgeTransfer): void {
   const existing = getPendingTransfers();
-  const idx = existing.findIndex(t => t.id === transfer.id);
+  const normalizedId = canonicalTransferId(transfer.id);
+  const idx = existing.findIndex(t => canonicalTransferId(t.id) === normalizedId);
+  const normalizedTransfer: PendingBridgeTransfer = {
+    ...transfer,
+    id: normalizedId,
+    burnTxHash: canonicalTransferId(transfer.burnTxHash),
+  };
   if (idx >= 0) {
-    existing[idx] = transfer;
+    existing[idx] = normalizedTransfer;
   } else {
-    existing.unshift(transfer); // newest first
+    existing.unshift(normalizedTransfer); // newest first
   }
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
@@ -70,9 +80,18 @@ export function updateTransferStatus(
   updates: Partial<PendingBridgeTransfer>
 ): void {
   const existing = getPendingTransfers();
-  const idx = existing.findIndex(t => t.id === id);
+  const normalizedId = canonicalTransferId(id);
+  const idx = existing.findIndex(t => canonicalTransferId(t.id) === normalizedId);
   if (idx >= 0) {
-    existing[idx] = { ...existing[idx], ...updates };
+    existing[idx] = {
+      ...existing[idx],
+      ...updates,
+      id: existing[idx].id,
+      burnTxHash:
+        updates.burnTxHash !== undefined
+          ? canonicalTransferId(updates.burnTxHash)
+          : existing[idx].burnTxHash,
+    };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
     } catch (e) {
@@ -84,7 +103,8 @@ export function updateTransferStatus(
 
 export function removeTransfer(id: string): void {
   const existing = getPendingTransfers();
-  const filtered = existing.filter(t => t.id !== id);
+  const normalizedId = canonicalTransferId(id);
+  const filtered = existing.filter(t => canonicalTransferId(t.id) !== normalizedId);
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
   } catch (e) {

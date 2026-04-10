@@ -110,6 +110,42 @@ function subU256(a: bigint, b: bigint): bigint {
   return (a - b) & MASK256;
 }
 
+// Retry helper for flaky RPC calls
+async function rpcWithRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs = 500): Promise<T> {
+  let lastError: Error | unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries - 1) {
+        const delay = baseDelayMs * Math.pow(2, attempt);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
+function createLimiter(maxConcurrent: number) {
+  let active = 0;
+  const queue: (() => void)[] = [];
+
+  return async function run<T>(fn: () => Promise<T>): Promise<T> {
+    if (active >= maxConcurrent) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active++;
+    try {
+      return await fn();
+    } finally {
+      active--;
+      const next = queue.shift();
+      if (next) next();
+    }
+  };
+}
+
 function calculateFeeGrowthInside(
   feeGrowthGlobal: bigint,
   feeGrowthOutsideLower: bigint,
@@ -213,7 +249,7 @@ export function RemoveLiquidityV3() {
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const knownTokenList = await fetchTokensWithCommunity(chainId);
 
-      const position = await positionManager.positions(tokenId);
+      const position = await rpcWithRetry(() => positionManager.positions(tokenId));
 
       const token0Address: string = position[2];
       const token1Address: string = position[3];
@@ -243,18 +279,18 @@ export function RemoveLiquidityV3() {
             ? [token0Address, token1Address]
             : [token1Address, token0Address];
 
-        const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+        const poolAddress = await rpcWithRetry(() => factory.getPool(tokenA, tokenB, fee));
 
         if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
           const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
 
           const [slot0, feeGrowthGlobal0X128, feeGrowthGlobal1X128, tickLowerData, tickUpperData] =
             await Promise.all([
-              pool.slot0(),
-              pool.feeGrowthGlobal0X128(),
-              pool.feeGrowthGlobal1X128(),
-              pool.ticks(tickLower),
-              pool.ticks(tickUpper),
+              rpcWithRetry(() => pool.slot0()),
+              rpcWithRetry(() => pool.feeGrowthGlobal0X128()),
+              rpcWithRetry(() => pool.feeGrowthGlobal1X128()),
+              rpcWithRetry(() => pool.ticks(tickLower)),
+              rpcWithRetry(() => pool.ticks(tickUpper)),
             ]);
 
           let currentSqrtPriceX96: bigint = slot0[0];
@@ -329,7 +365,6 @@ export function RemoveLiquidityV3() {
   const loadPositions = async () => {
     if (!address || !contracts || !chainId) return;
 
-    // Show cached data instantly (if available) while refreshing in background
     const cached = readPositionCache(chainId, address);
     if (cached && cached.length > 0 && positions.length === 0) {
       setPositions(cached);
@@ -345,9 +380,9 @@ export function RemoveLiquidityV3() {
       );
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
       const knownTokenList = await fetchTokensWithCommunity(chainId);
+      const limit = createLimiter(10);
 
-      // Step 1: Get NFT balance
-      const balance = await positionManager.balanceOf(address);
+      const balance = await rpcWithRetry(() => positionManager.balanceOf(address));
       const count = Number(balance);
 
       if (count === 0) {
@@ -360,171 +395,170 @@ export function RemoveLiquidityV3() {
         return;
       }
 
-      // Step 2: Fetch tokenIds in bounded batches
-      const tokenIds: bigint[] = [];
-      const tokenIdBatchSize = 40;
-      for (let start = 0; start < count; start += tokenIdBatchSize) {
-        const end = Math.min(start + tokenIdBatchSize, count);
-        const indices = Array.from({ length: end - start }, (_, i) => start + i);
-        const idChunk = await Promise.all(indices.map((i) => positionManager.tokenOfOwnerByIndex(address, i)));
-        tokenIds.push(...idChunk);
-      }
+      // Phase 1: Fetch ALL tokenIds with bounded concurrency
+      const indices = Array.from({ length: count }, (_, i) => i);
+      const tokenIds = await Promise.all(
+        indices.map((i) => limit(() => rpcWithRetry(() => positionManager.tokenOfOwnerByIndex(address, i))))
+      );
 
-      // Step 3: Fetch raw position structs in bounded batches
-      const rawPositions: any[] = [];
-      const positionBatchSize = 30;
-      for (let start = 0; start < tokenIds.length; start += positionBatchSize) {
-        const chunk = tokenIds.slice(start, start + positionBatchSize);
-        const posChunk = await Promise.all(chunk.map((id) => positionManager.positions(id)));
-        rawPositions.push(...posChunk);
-      }
+      // Phase 2: Fetch ALL raw position structs with bounded concurrency
+      const rawPositions = await Promise.all(
+        tokenIds.map((id: bigint) => limit(() => rpcWithRetry(() => positionManager.positions(id))))
+      );
 
-      // Step 4: Fetch token metadata + pool state in smaller concurrent batches
-      const userPositions: (V3Position | null)[] = [];
-      const detailsBatchSize = 10;
-      for (let start = 0; start < rawPositions.length; start += detailsBatchSize) {
-        const rawChunk = rawPositions.slice(start, start + detailsBatchSize);
-        const chunkResults = await Promise.all(
-          rawChunk.map(async (position, idx): Promise<V3Position | null> => {
-            const absoluteIdx = start + idx;
-            try {
-              const tokenId = tokenIds[absoluteIdx];
-              const token0Address: string = position[2];
-              const token1Address: string = position[3];
-              const fee = Number(position[4]);
-              const tickLower = Number(position[5]);
-              const tickUpper = Number(position[6]);
-              const liquidity: bigint = position[7];
-              const feeGrowthInside0LastX128: bigint = position[8];
-              const feeGrowthInside1LastX128: bigint = position[9];
-              const tokensOwed0: bigint = position[10];
-              const tokensOwed1: bigint = position[11];
+      // Phase 3: Fetch ALL position details with bounded concurrency
+      const fetchPosition = async (absoluteIdx: number): Promise<V3Position | null> => {
+        const position = rawPositions[absoluteIdx];
+        const tokenId = tokenIds[absoluteIdx];
+        const token0Address: string = position[2];
+        const token1Address: string = position[3];
+        const fee = Number(position[4]);
+        const tickLower = Number(position[5]);
+        const tickUpper = Number(position[6]);
+        const liquidity: bigint = position[7];
+        const feeGrowthInside0LastX128: bigint = position[8];
+        const feeGrowthInside1LastX128: bigint = position[9];
+        const tokensOwed0: bigint = position[10];
+        const tokensOwed1: bigint = position[11];
 
-              const [info0, info1] = await Promise.all([
-                safeTokenInfo(token0Address, provider, knownTokenList),
-                safeTokenInfo(token1Address, provider, knownTokenList),
-              ]);
+        const [info0, info1] = await Promise.all([
+          safeTokenInfo(token0Address, provider, knownTokenList),
+          safeTokenInfo(token1Address, provider, knownTokenList),
+        ]);
 
-              let amount0 = 0n;
-              let amount1 = 0n;
-              let unclaimedFees0 = tokensOwed0;
-              let unclaimedFees1 = tokensOwed1;
-              let currentTick: number | undefined = undefined;
+        let amount0 = 0n;
+        let amount1 = 0n;
+        let unclaimedFees0 = tokensOwed0;
+        let unclaimedFees1 = tokensOwed1;
+        let currentTick: number | undefined = undefined;
 
-              try {
-                const [tokenA, tokenB] =
-                  token0Address.toLowerCase() < token1Address.toLowerCase()
-                    ? [token0Address, token1Address]
-                    : [token1Address, token0Address];
+        try {
+          const [tokenA, tokenB] =
+            token0Address.toLowerCase() < token1Address.toLowerCase()
+              ? [token0Address, token1Address]
+              : [token1Address, token0Address];
 
-                const poolAddress = await factory.getPool(tokenA, tokenB, fee);
+          const poolAddress = await rpcWithRetry(() => factory.getPool(tokenA, tokenB, fee));
 
-                if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
-                  const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
+          if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
+            const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
 
-                  const [
-                    slot0,
-                    feeGrowthGlobal0X128,
-                    feeGrowthGlobal1X128,
-                    tickLowerData,
-                    tickUpperData,
-                  ] = await Promise.all([
-                    pool.slot0(),
-                    pool.feeGrowthGlobal0X128(),
-                    pool.feeGrowthGlobal1X128(),
-                    pool.ticks(tickLower),
-                    pool.ticks(tickUpper),
-                  ]);
+            const [
+              slot0,
+              feeGrowthGlobal0X128,
+              feeGrowthGlobal1X128,
+              tickLowerData,
+              tickUpperData,
+            ] = await Promise.all([
+              rpcWithRetry(() => pool.slot0()),
+              rpcWithRetry(() => pool.feeGrowthGlobal0X128()),
+              rpcWithRetry(() => pool.feeGrowthGlobal1X128()),
+              rpcWithRetry(() => pool.ticks(tickLower)),
+              rpcWithRetry(() => pool.ticks(tickUpper)),
+            ]);
 
-                  let currentSqrtPriceX96: bigint = slot0[0];
-                  currentTick = Number(slot0[1]);
-                  if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
+            let currentSqrtPriceX96: bigint = slot0[0];
+            currentTick = Number(slot0[1]);
+            if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
 
-                  const feeGrowthOutsideLower0: bigint = tickLowerData[2];
-                  const feeGrowthOutsideLower1: bigint = tickLowerData[3];
-                  const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
-                  const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
+            const feeGrowthOutsideLower0: bigint = tickLowerData[2];
+            const feeGrowthOutsideLower1: bigint = tickLowerData[3];
+            const feeGrowthOutsideUpper0: bigint = tickUpperData[2];
+            const feeGrowthOutsideUpper1: bigint = tickUpperData[3];
 
-                  if (liquidity > 0n) {
-                    const feeGrowthInside0 = calculateFeeGrowthInside(
-                      feeGrowthGlobal0X128,
-                      feeGrowthOutsideLower0,
-                      feeGrowthOutsideUpper0,
-                      currentTick,
-                      tickLower,
-                      tickUpper,
-                    );
-                    const feeGrowthInside1 = calculateFeeGrowthInside(
-                      feeGrowthGlobal1X128,
-                      feeGrowthOutsideLower1,
-                      feeGrowthOutsideUpper1,
-                      currentTick,
-                      tickLower,
-                      tickUpper,
-                    );
-                    unclaimedFees0 = calculateUnclaimedFees(
-                      liquidity,
-                      feeGrowthInside0,
-                      feeGrowthInside0LastX128,
-                      tokensOwed0,
-                    );
-                    unclaimedFees1 = calculateUnclaimedFees(
-                      liquidity,
-                      feeGrowthInside1,
-                      feeGrowthInside1LastX128,
-                      tokensOwed1,
-                    );
-                  }
-
-                  const tokenAmounts = getTokensFromLiquidity(
-                    liquidity,
-                    currentSqrtPriceX96,
-                    tickLower,
-                    tickUpper,
-                  );
-
-                  if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
-                    amount0 = tokenAmounts.amount1;
-                    amount1 = tokenAmounts.amount0;
-                  } else {
-                    amount0 = tokenAmounts.amount0;
-                    amount1 = tokenAmounts.amount1;
-                  }
-                }
-              } catch (poolError) {
-                console.error("Error fetching pool data:", poolError);
-              }
-
-              return {
-                tokenId,
-                token0Address,
-                token0Symbol: info0.symbol,
-                token0Decimals: info0.decimals,
-                token1Address,
-                token1Symbol: info1.symbol,
-                token1Decimals: info1.decimals,
-                fee,
-                liquidity,
+            if (liquidity > 0n) {
+              const feeGrowthInside0 = calculateFeeGrowthInside(
+                feeGrowthGlobal0X128,
+                feeGrowthOutsideLower0,
+                feeGrowthOutsideUpper0,
+                currentTick,
                 tickLower,
                 tickUpper,
-                tokensOwed0,
-                tokensOwed1,
-                unclaimedFees0,
-                unclaimedFees1,
-                amount0,
-                amount1,
+              );
+              const feeGrowthInside1 = calculateFeeGrowthInside(
+                feeGrowthGlobal1X128,
+                feeGrowthOutsideLower1,
+                feeGrowthOutsideUpper1,
                 currentTick,
-              };
-            } catch (error) {
-              console.error(`Error loading position ${absoluteIdx}:`, error);
-              return null;
+                tickLower,
+                tickUpper,
+              );
+              unclaimedFees0 = calculateUnclaimedFees(
+                liquidity,
+                feeGrowthInside0,
+                feeGrowthInside0LastX128,
+                tokensOwed0,
+              );
+              unclaimedFees1 = calculateUnclaimedFees(
+                liquidity,
+                feeGrowthInside1,
+                feeGrowthInside1LastX128,
+                tokensOwed1,
+              );
             }
-          })
+
+            const tokenAmounts = getTokensFromLiquidity(
+              liquidity,
+              currentSqrtPriceX96,
+              tickLower,
+              tickUpper,
+            );
+
+            if (token0Address.toLowerCase() === tokenB.toLowerCase()) {
+              amount0 = tokenAmounts.amount1;
+              amount1 = tokenAmounts.amount0;
+            } else {
+              amount0 = tokenAmounts.amount0;
+              amount1 = tokenAmounts.amount1;
+            }
+          }
+        } catch (poolError) {
+          console.error(`Error fetching pool data for position ${tokenId}:`, poolError);
+        }
+
+        return {
+          tokenId,
+          token0Address,
+          token0Symbol: info0.symbol,
+          token0Decimals: info0.decimals,
+          token1Address,
+          token1Symbol: info1.symbol,
+          token1Decimals: info1.decimals,
+          fee,
+          liquidity,
+          tickLower,
+          tickUpper,
+          tokensOwed0,
+          tokensOwed1,
+          unclaimedFees0,
+          unclaimedFees1,
+          amount0,
+          amount1,
+          currentTick,
+        };
+      };
+
+      const userPositions = await Promise.all(
+        Array.from({ length: rawPositions.length }, (_, i) => i).map((idx) => limit(() => fetchPosition(idx)))
+      );
+
+      // Auto-retry incomplete positions (currentTick undefined + liquidity > 0)
+      const incompleteIndices = userPositions
+        .map((p: V3Position | null, i: number) => (p && p.currentTick === undefined && p.liquidity > 0n ? i : -1))
+        .filter((i: number) => i !== -1);
+
+      let finalPositions = [...userPositions];
+      if (incompleteIndices.length > 0) {
+        console.log(`Retrying ${incompleteIndices.length} incomplete positions...`);
+        const retryResults = await Promise.all(
+          incompleteIndices.map((idx: number) => limit(() => fetchPosition(idx)))
         );
-        userPositions.push(...chunkResults);
+        for (let i = 0; i < incompleteIndices.length; i++) {
+          finalPositions[incompleteIndices[i]] = retryResults[i];
+        }
       }
 
-      const validPositions = userPositions.filter((p): p is V3Position => p !== null);
+      const validPositions = finalPositions.filter((p): p is V3Position => p !== null);
       setPositions(validPositions);
       writePositionCache(chainId, address, validPositions);
 
@@ -682,7 +716,9 @@ export function RemoveLiquidityV3() {
         readProvider,
       );
       const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, readProvider);
-      const latestPositionRaw = await readPositionManager.positions(selectedPosition.tokenId);
+      const latestPositionRaw = await rpcWithRetry(() =>
+        readPositionManager.positions(selectedPosition.tokenId)
+      );
       const latestToken0Address: string = latestPositionRaw[2];
       const latestToken1Address: string = latestPositionRaw[3];
       const latestFee = Number(latestPositionRaw[4]);
@@ -698,13 +734,13 @@ export function RemoveLiquidityV3() {
         latestToken0Address.toLowerCase() < latestToken1Address.toLowerCase()
           ? [latestToken0Address, latestToken1Address]
           : [latestToken1Address, latestToken0Address];
-      const poolAddress = await factory.getPool(tokenA, tokenB, latestFee);
+      const poolAddress = await rpcWithRetry(() => factory.getPool(tokenA, tokenB, latestFee));
       if (!poolAddress || poolAddress === "0x0000000000000000000000000000000000000000") {
         throw new Error("Pool not found for position");
       }
 
       const pool = new Contract(poolAddress, V3_POOL_ABI, readProvider);
-      const slot0 = await pool.slot0();
+      const slot0 = await rpcWithRetry(() => pool.slot0());
       let currentSqrtPriceX96: bigint = slot0[0];
       if (currentSqrtPriceX96 === 0n) currentSqrtPriceX96 = 2n ** 96n;
 
@@ -722,6 +758,14 @@ export function RemoveLiquidityV3() {
         : tokenAmounts.amount1;
 
       const liquidityToRemove = latestLiquidity * BigInt(percentage[0]) / 100n;
+      if (liquidityToRemove === 0n) {
+        toast({
+          title: "Zero liquidity selected",
+          description: "Increase the remove percentage above 0% before confirming",
+          variant: "destructive",
+        });
+        return;
+      }
       const isFullRemove = percentage[0] === 100;
       const expectedAmount0Out = (latestAmount0 * BigInt(percentage[0])) / 100n;
       const expectedAmount1Out = (latestAmount1 * BigInt(percentage[0])) / 100n;
@@ -1240,7 +1284,7 @@ export function RemoveLiquidityV3() {
 
                     <Button
                       onClick={(e) => { e.stopPropagation(); handleRemove(); }}
-                      disabled={isRemoving || position.liquidity === 0n}
+                      disabled={isRemoving || position.liquidity === 0n || percentage[0] === 0}
                       variant="destructive"
                       className="w-full h-11 text-sm font-semibold disabled:opacity-40"
                     >

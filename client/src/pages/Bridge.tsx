@@ -27,6 +27,11 @@ import {
   type PendingBridgeTransfer,
 } from "@/lib/bridge-transfers";
 
+const TOKEN_MESSENGER_V2_INTERFACE = new Interface([
+  "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)",
+  "event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)",
+]);
+
 // ── Transfer status steps ────────────────────────────────────────────────────
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "complete" | "error";
 
@@ -36,6 +41,28 @@ interface TransferState {
   mintTxHash: string | null;
   attestation: { message: string; attestation: string } | null;
   error: string | null;
+}
+
+interface AttestationPollResult {
+  message: string;
+  attestation: string;
+  destinationDomain?: number;
+}
+
+function resolveDestinationChain(
+  destinationDomain: unknown,
+  fallbackChain: CCTPChain | null | undefined,
+): CCTPChain | undefined {
+  if (typeof destinationDomain === "number") {
+    const byDomain = getChainByDomain(destinationDomain);
+    if (byDomain) return byDomain;
+  }
+
+  if (fallbackChain) {
+    return fallbackChain;
+  }
+
+  return undefined;
 }
 
 const INITIAL_STATE: TransferState = {
@@ -514,14 +541,39 @@ export default function Bridge() {
         });
 
         toast({ title: "Resuming transfer...", description: "Polling for attestation" });
-        const attestation = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
+        const attestationResult = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
 
         if (abortRef.current) return;
-        updateTransferStatus(pendingTx.id, { status: "ready_to_mint", attestation });
-        setTransfer(prev => ({ ...prev, step: "minting", attestation }));
+
+        const resolvedDst = resolveDestinationChain(
+          attestationResult.destinationDomain,
+          dstChain,
+        );
+
+        if (!resolvedDst) {
+          throw new Error("Could not resolve destination chain from attestation");
+        }
+
+        updateTransferStatus(pendingTx.id, {
+          status: "ready_to_mint",
+          attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
+          destDomain: resolvedDst.domain,
+          destChainId: resolvedDst.chainId,
+        });
+        setDestChain(resolvedDst);
+        setTransfer(prev => ({
+          ...prev,
+          step: "minting",
+          attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
+        }));
 
         // Proceed to mint
-        await executeMint(dstChain, attestation, pendingTx.id, pendingTx.amount);
+        await executeMint(
+          resolvedDst,
+          { message: attestationResult.message, attestation: attestationResult.attestation },
+          pendingTx.id,
+          pendingTx.amount,
+        );
 
       } else if (pendingTx.status === "ready_to_mint" && pendingTx.attestation) {
         // Resume from minting step
@@ -663,8 +715,13 @@ export default function Bridge() {
 
   // ── Manual claim: fetch attestation and mint from burn tx hash ──────────────────
   const handleManualClaim = async () => {
-    if (!manualClaimTxHash || !window.ethereum || !address) {
+    const txHash = manualClaimTxHash.trim().toLowerCase();
+    if (!txHash || !window.ethereum || !address) {
       toast({ title: "Missing required fields", variant: "destructive" });
+      return;
+    }
+    if (!/^0x[a-f0-9]{64}$/.test(txHash)) {
+      toast({ title: "Invalid transaction hash format", variant: "destructive" });
       return;
     }
 
@@ -675,42 +732,140 @@ export default function Bridge() {
       }
 
       // Validate and fetch tx info BEFORE closing modal
-      const provider = new JsonRpcProvider(manualClaimSourceChain.rpcUrls[0]);
+      const provider = await getWorkingProvider(manualClaimSourceChain);
       
       // Get transaction to verify sender
-      const tx = await provider.getTransaction(manualClaimTxHash);
+      const tx = await provider.getTransaction(txHash);
       if (!tx) {
         throw new Error("Transaction not found on the selected chain. Make sure you selected the correct source chain.");
       }
       
       // Check if the transaction was made by the connected wallet
-      const txSender = tx.from.toLowerCase();
+      const txSender = (tx.from || "").toLowerCase();
       if (txSender !== address.toLowerCase()) {
         throw new Error(`Transaction was not made by your connected wallet. Please use the wallet that made the burn transaction.`);
       }
 
-      // Get receipt for amount
-      const receipt = await provider.getTransactionReceipt(manualClaimTxHash);
-      let amount = "0";
-      
-      // Try to get amount from transaction input data first (depositForBurn function)
-      if (tx.data && tx.data.length > 10) {
-        try {
-          // depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)
-          // Function selector (4 bytes) + encoded params
-          const funcSig = tx.data.slice(0, 10);
-          if (funcSig === "0x1b3e3db4") { // depositForBurn
-            const amountArg = tx.data.slice(10, 74); // 64 bytes for uint256
-            if (amountArg && amountArg.length === 64) {
-              const amountWei = BigInt('0x' + amountArg);
-              if (amountWei > 0n) {
-                amount = (Number(amountWei) / 1000000).toString();
-              }
-            }
+      const expectedDepositMethod = TOKEN_MESSENGER_V2_INTERFACE.getFunction("depositForBurn")
+        ?.selector
+        ?.toLowerCase();
+      if (!expectedDepositMethod || !tx.data || tx.data.slice(0, 10).toLowerCase() !== expectedDepositMethod) {
+        throw new Error("Transaction is not a CCTP depositForBurn transaction");
+      }
+
+      const expectedTokenMessenger = manualClaimSourceChain.tokenMessengerV2.toLowerCase();
+      if (!tx.to || tx.to.toLowerCase() !== expectedTokenMessenger) {
+        throw new Error("Transaction was not sent to the chain's TokenMessengerV2 contract");
+      }
+
+      // Get receipt for amount and success validation
+      const receipt = await provider.getTransactionReceipt(txHash);
+      if (!receipt || receipt.status !== 1) {
+        throw new Error("Burn transaction failed on-chain");
+      }
+
+      let decodedDepositForBurn:
+        | {
+            amount: bigint;
+            destinationDomain: number;
+            mintRecipient: string;
           }
-        } catch (e) {
-          console.log("Could not parse amount from tx data:", e);
-        }
+        | null = null;
+      try {
+        const parsedTx = TOKEN_MESSENGER_V2_INTERFACE.parseTransaction({ data: tx.data, value: tx.value ?? 0n });
+          if (parsedTx && parsedTx.name === "depositForBurn") {
+            decodedDepositForBurn = {
+              amount: parsedTx.args[0] as bigint,
+              destinationDomain: Number(parsedTx.args[1]),
+              mintRecipient: String(parsedTx.args[2]),
+            };
+          }
+      } catch (err) {
+        console.error("Failed to decode depositForBurn transaction", {
+          txHash,
+          dataPrefix: tx.data?.slice(0, 10),
+          error: err,
+        });
+        decodedDepositForBurn = null;
+      }
+
+      if (!decodedDepositForBurn || decodedDepositForBurn.amount <= 0n) {
+        throw new Error("Unable to decode burn transaction amount");
+      }
+
+      const depositForBurnEvent = TOKEN_MESSENGER_V2_INTERFACE.getEvent("DepositForBurn");
+      if (!depositForBurnEvent) {
+        throw new Error("DepositForBurn event definition unavailable");
+      }
+      const depositForBurnTopic = depositForBurnEvent.topicHash;
+      const burnEvent = receipt.logs.find((log) => {
+        if (log.address.toLowerCase() !== expectedTokenMessenger) return false;
+        if (!log.topics || log.topics.length === 0) return false;
+        return log.topics[0].toLowerCase() === depositForBurnTopic.toLowerCase();
+      });
+
+      if (!burnEvent) {
+        throw new Error("No TokenMessengerV2 DepositForBurn event found for this transaction");
+      }
+
+      let parsedBurnEvent:
+        | {
+            amount: bigint;
+            depositor: string;
+            destinationDomain: number;
+            mintRecipient: string;
+          }
+        | null = null;
+      try {
+        const parsed = TOKEN_MESSENGER_V2_INTERFACE.parseLog({
+          topics: burnEvent.topics,
+          data: burnEvent.data,
+        });
+          if (parsed && parsed.name === "DepositForBurn") {
+            parsedBurnEvent = {
+              amount: parsed.args.amount as bigint,
+              depositor: String(parsed.args.depositor),
+              destinationDomain: Number(parsed.args.destinationDomain),
+              mintRecipient: String(parsed.args.mintRecipient),
+            };
+          }
+      } catch (err) {
+        console.error("Failed to parse DepositForBurn event", {
+          txHash,
+          eventAddress: burnEvent.address,
+          error: err,
+        });
+        parsedBurnEvent = null;
+      }
+
+      if (!parsedBurnEvent) {
+        throw new Error("Failed to parse DepositForBurn event");
+      }
+
+      if (parsedBurnEvent.depositor.toLowerCase() !== address.toLowerCase()) {
+        throw new Error("Burn event depositor does not match connected wallet");
+      }
+      if (parsedBurnEvent.amount !== decodedDepositForBurn.amount) {
+        throw new Error("Burn event amount does not match transaction input");
+      }
+      if (parsedBurnEvent.destinationDomain !== decodedDepositForBurn.destinationDomain) {
+        throw new Error("Burn event destination domain does not match transaction input");
+      }
+
+      const expectedMintRecipient = zeroPadValue(address, 32).toLowerCase();
+      if (decodedDepositForBurn.mintRecipient.toLowerCase() !== expectedMintRecipient) {
+        throw new Error("Burn transaction mint recipient does not match connected wallet");
+      }
+      if (parsedBurnEvent.mintRecipient.toLowerCase() !== expectedMintRecipient) {
+        throw new Error("Burn event mint recipient does not match connected wallet");
+      }
+
+      let amount = "0";
+
+      try {
+        amount = (Number(decodedDepositForBurn.amount) / 1000000).toString();
+      } catch {
+        amount = "0";
       }
       
       // If still 0, try parsing logs for USDC Transfer (Transfer single from ERC1155 or Transfer from ERC20)
@@ -736,8 +891,6 @@ export default function Bridge() {
         }
       }
       
-      console.log("Final amount:", amount, "receipt:", !!receipt, "logs:", receipt?.logs?.length);
-
       // Close modal and notification NOW that validation passed
       setManualClaimOpen(false);
       setNotifOpen(false);
@@ -745,13 +898,19 @@ export default function Bridge() {
       setManualClaimSourceChain(null);
       setManualClaimStatus("idle");
 
-      // Try to get destination from API
-      let destChain: CCTPChain | undefined;
+      // Use burn transaction destination as source of truth
+      const decodedDestinationDomain = Number(decodedDepositForBurn.destinationDomain);
+      const decodedDestinationChain = getChainByDomain(decodedDestinationDomain);
+      if (!decodedDestinationChain) {
+        throw new Error("Burn transaction destination chain is not supported");
+      }
+
+      let destChain: CCTPChain | undefined = decodedDestinationChain;
       let attestation: { message: string; attestation: string } | undefined;
 
       try {
         // Fetch attestation
-        const url = `${CCTP_ATTESTATION_API}/v2/messages/${manualClaimSourceChain.domain}?transactionHash=${manualClaimTxHash}`;
+        const url = `${CCTP_ATTESTATION_API}/v2/messages/${manualClaimSourceChain.domain}?transactionHash=${txHash}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 10000);
         
@@ -768,8 +927,18 @@ export default function Bridge() {
           
           if (data?.messages?.[0]) {
             const msg = data.messages[0];
-            destChain = getChainByDomain(msg.destinationDomain);
-            if (destChain && msg.status === "complete" && msg.attestation) {
+            const apiDestinationDomain =
+              typeof msg.destinationDomain === "number"
+                ? msg.destinationDomain
+                : Number(msg.destinationDomain);
+            if (
+              Number.isFinite(apiDestinationDomain) &&
+              Number(apiDestinationDomain) !== decodedDestinationDomain
+            ) {
+              throw new Error("Attestation destination does not match burn transaction");
+            }
+
+            if (msg.status === "complete" && msg.attestation) {
               attestation = {
                 message: msg.message,
                 attestation: msg.attestation,
@@ -789,32 +958,28 @@ export default function Bridge() {
         console.log("API fetch failed, will poll for attestation:", apiErr);
       }
 
-      // Set chains - if destChain unknown, use first available as placeholder
-      if (!destChain) {
-        const allChains = CCTP_TESTNET_CHAINS.filter(c => c.domain !== manualClaimSourceChain.domain);
-        destChain = allChains[0];
-      }
+      if (!destChain) throw new Error("Could not resolve destination chain from burn transaction");
 
       // Update UI like resume system does - IMMEDIATELY
       setSourceChain(manualClaimSourceChain);
       setDestChain(destChain);
       setAmount(amount);
-      currentTransferIdRef.current = manualClaimTxHash;
+      currentTransferIdRef.current = txHash;
       abortRef.current = false;
 
       if (attestation) {
         // Has attestation - go to minting
         setTransfer({
           step: "minting",
-          burnTxHash: manualClaimTxHash,
+          burnTxHash: txHash,
           mintTxHash: null,
           attestation: attestation,
           error: null,
         });
 
         savePendingTransfer({
-          id: manualClaimTxHash,
-          burnTxHash: manualClaimTxHash,
+          id: txHash,
+          burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
           sourceChainId: manualClaimSourceChain.chainId,
           destDomain: destChain.domain,
@@ -826,20 +991,20 @@ export default function Bridge() {
           attestation,
         });
 
-        await executeMint(destChain, attestation, manualClaimTxHash, amount);
+        await executeMint(destChain, attestation, txHash, amount);
       } else {
         // No attestation yet - go to attesting and poll
         setTransfer({
           step: "attesting",
-          burnTxHash: manualClaimTxHash,
+          burnTxHash: txHash,
           mintTxHash: null,
           attestation: null,
           error: null,
         });
 
         savePendingTransfer({
-          id: manualClaimTxHash,
-          burnTxHash: manualClaimTxHash,
+          id: txHash,
+          burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
           sourceChainId: manualClaimSourceChain.chainId,
           destDomain: destChain.domain,
@@ -852,22 +1017,87 @@ export default function Bridge() {
 
         toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
         
-        const fetchedAttestation = await pollForAttestation(manualClaimSourceChain.domain, manualClaimTxHash);
+        const fetchedAttestationResult = await pollForAttestation(manualClaimSourceChain.domain, txHash);
         
         if (abortRef.current) return;
+
+        if (
+          typeof fetchedAttestationResult.destinationDomain === "number" &&
+          fetchedAttestationResult.destinationDomain !== decodedDestinationDomain
+        ) {
+          updateTransferStatus(txHash, {
+            status: "attesting",
+            error: "Attestation destination does not match burn transaction",
+          });
+          setTransfer(prev => ({ ...prev, step: "error", error: "Attestation destination does not match burn transaction" }));
+          toast({
+            title: "Destination mismatch",
+            description: "Attestation destination does not match burn transaction",
+            variant: "destructive",
+          });
+          return;
+        }
+
+        const resolvedDestChain = resolveDestinationChain(
+          decodedDestinationDomain,
+          destChain,
+        );
+
+      if (!resolvedDestChain) {
+        updateTransferStatus(txHash, {
+            status: "attesting",
+            error: "Attestation did not provide a valid destination chain",
+          });
+          setTransfer(prev => ({ ...prev, step: "error", error: "Attestation did not provide a valid destination chain" }));
+
+          toast({
+            title: "Destination unresolved",
+            description: "Attestation did not provide a valid destination chain",
+            variant: "destructive",
+          });
+          return;
+        }
         
-        updateTransferStatus(manualClaimTxHash, { status: "ready_to_mint", attestation: fetchedAttestation });
+        updateTransferStatus(txHash, {
+          status: "ready_to_mint",
+          attestation: {
+            message: fetchedAttestationResult.message,
+            attestation: fetchedAttestationResult.attestation,
+          },
+          destDomain: resolvedDestChain.domain,
+          destChainId: resolvedDestChain.chainId,
+        });
         
-        // Use the destination chain we already determined
-        setDestChain(destChain);
+        // Use destination resolved from attestation when available
+        setDestChain(resolvedDestChain);
         
-        setTransfer(prev => ({ ...prev, step: "minting", attestation: fetchedAttestation }));
+        setTransfer(prev => ({
+          ...prev,
+          step: "minting",
+          attestation: {
+            message: fetchedAttestationResult.message,
+            attestation: fetchedAttestationResult.attestation,
+          },
+        }));
         
-        await executeMint(destChain, fetchedAttestation, manualClaimTxHash, "0");
+        await executeMint(
+          resolvedDestChain,
+          {
+            message: fetchedAttestationResult.message,
+            attestation: fetchedAttestationResult.attestation,
+          },
+          txHash,
+          amount,
+        );
       }
 
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
+      updateTransferStatus(txHash, {
+        status: "attesting",
+        error: msg,
+      });
+      setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({ title: "Claim Failed", description: msg, variant: "destructive" });
     } finally {
       setManualClaimLoading(false);
@@ -1014,14 +1244,39 @@ export default function Bridge() {
 
       // ── Step 3: Poll for attestation ────────────────────────────────────
       toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
-      const attestation = await pollForAttestation(sourceChain.domain, burnTxHash);
+      const attestationResult = await pollForAttestation(sourceChain.domain, burnTxHash);
 
       if (abortRef.current) return;
-      updateTransferStatus(transferId, { status: "ready_to_mint", attestation });
-      setTransfer(prev => ({ ...prev, step: "minting", attestation }));
+
+      const resolvedDestChain = resolveDestinationChain(
+        attestationResult.destinationDomain,
+        destChain,
+      );
+
+      if (!resolvedDestChain) {
+        throw new Error("Could not resolve destination chain from attestation");
+      }
+
+      updateTransferStatus(transferId, {
+        status: "ready_to_mint",
+        attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
+        destDomain: resolvedDestChain.domain,
+        destChainId: resolvedDestChain.chainId,
+      });
+      setDestChain(resolvedDestChain);
+      setTransfer(prev => ({
+        ...prev,
+        step: "minting",
+        attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
+      }));
 
       // ── Step 4: Mint USDC on destination ────────────────────────────────
-      await executeMint(destChain, attestation, transferId, amount);
+      await executeMint(
+        resolvedDestChain,
+        { message: attestationResult.message, attestation: attestationResult.attestation },
+        transferId,
+        amount,
+      );
 
     } catch (err: any) {
       console.error("Bridge error:", err);
@@ -1050,7 +1305,7 @@ export default function Bridge() {
   async function pollForAttestation(
     srcDomain: number,
     txHash: string
-  ): Promise<{ message: string; attestation: string }> {
+  ): Promise<AttestationPollResult> {
     const url = `${CCTP_ATTESTATION_API}/v2/messages/${srcDomain}?transactionHash=${txHash}`;
     const maxAttempts = 120; // ~10 minutes at 5s intervals
     const FETCH_TIMEOUT_MS = 10_000; // 10 seconds per request
@@ -1073,6 +1328,10 @@ export default function Bridge() {
             return {
               message: data.messages[0].message,
               attestation: data.messages[0].attestation,
+              destinationDomain:
+                typeof data.messages[0].destinationDomain === "number"
+                  ? data.messages[0].destinationDomain
+                  : undefined,
             };
           }
         }
@@ -1085,6 +1344,7 @@ export default function Bridge() {
 
   // ── Derived ────────────────────────────────────────────────────────────────
   const parsedAmount = amount ? parseFloat(amount) : 0;
+  const normalizedManualClaimTxHash = manualClaimTxHash.trim().toLowerCase();
   let insufficientBalance = false;
   if (parsedAmount > 0 && sourceBalanceRaw !== null && amount) {
     try {
@@ -1831,15 +2091,16 @@ export default function Bridge() {
                     type="text"
                     value={manualClaimTxHash}
                     onChange={(e) => {
-                      setManualClaimTxHash(e.target.value);
-                      setManualClaimTxHashValid(/^0x[a-fA-F0-9]{64}$/.test(e.target.value));
+                      const normalized = e.target.value.trim().toLowerCase();
+                      setManualClaimTxHash(normalized);
+                      setManualClaimTxHashValid(/^0x[a-f0-9]{64}$/.test(normalized));
                     }}
                     placeholder="0x..."
                     className={`w-full px-3 py-2.5 rounded-xl text-sm text-white bg-white/5 border focus:outline-none placeholder:text-white/20 ${
-                      manualClaimTxHash && !manualClaimTxHashValid ? "border-red-500 focus:border-red-500" : "border-white/10 focus:border-indigo-500/50"
+                      normalizedManualClaimTxHash && !manualClaimTxHashValid ? "border-red-500 focus:border-red-500" : "border-white/10 focus:border-indigo-500/50"
                     }`}
                   />
-                  {manualClaimTxHash && !manualClaimTxHashValid && (
+                  {normalizedManualClaimTxHash && !manualClaimTxHashValid && (
                     <p className="text-[10px] text-red-400 mt-1">Invalid transaction hash format</p>
                   )}
                 </div>
@@ -1847,14 +2108,14 @@ export default function Bridge() {
                 {/* Submit */}
                 <button
                   onClick={handleManualClaim}
-                  disabled={!manualClaimTxHash || !manualClaimTxHashValid || !manualClaimSourceChain || manualClaimLoading || !address}
+                  disabled={!normalizedManualClaimTxHash || !manualClaimTxHashValid || !manualClaimSourceChain || manualClaimLoading || !address}
                   className="w-full py-3 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2"
                   style={{
-                    background: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address
+                    background: normalizedManualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address
                       ? "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)"
                       : "rgba(99,102,241,0.3)",
-                    color: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
-                    cursor: manualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "pointer" : "not-allowed",
+                    color: normalizedManualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "white" : "rgba(255,255,255,0.3)",
+                    cursor: normalizedManualClaimTxHash && manualClaimTxHashValid && manualClaimSourceChain && !manualClaimLoading && address ? "pointer" : "not-allowed",
                   }}
                 >
                   {manualClaimLoading ? (

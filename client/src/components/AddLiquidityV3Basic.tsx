@@ -78,6 +78,23 @@ export function AddLiquidityV3Basic() {
   const maxAmountAWeiRef = useRef<bigint | null>(null);
   const maxAmountBWeiRef = useRef<bigint | null>(null);
 
+  const getSafeMaxInput = useCallback((balanceWei: bigint, token: Token) => {
+    let safeWei = balanceWei;
+    if (isCanonicalUSDC(token) || isNativeToken(token.address)) {
+      safeWei = (balanceWei * 99n) / 100n;
+    }
+
+    const displayRaw = getMaxAmount(safeWei, token.decimals, token.symbol);
+    const displayAmount = displayRaw.toLowerCase().includes("e")
+      ? formatUnits(safeWei, token.decimals)
+      : displayRaw;
+
+    return {
+      displayAmount,
+      amountWei: parseAmount(displayAmount, token.decimals),
+    };
+  }, []);
+
   const [poolAddress, setPoolAddress]         = useState<string | null>(null);
   const [poolExists, setPoolExists]           = useState(false);
   const [isCheckingPool, setIsCheckingPool]   = useState(false);
@@ -165,7 +182,7 @@ export function AddLiquidityV3Basic() {
     if (tokens.length === 0) return;
     if (!tokenA) { const u = getUSDC(chainId); if (u) setTokenA(u); }
     if (!tokenB) { const a = tokens.find(t => t.symbol === "ACHS"); if (a) setTokenB(a); }
-  }, [tokens, tokenA, tokenB]);
+  }, [tokens, tokenA, tokenB, chainId]);
 
   // ── Import token ───────────────────────────────────────────────────────────
   const handleImportToken = async (addr: string): Promise<Token | null> => {
@@ -528,7 +545,11 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder="0.00" value={amountA}
-              onChange={e => { setAmountA(e.target.value); maxAmountAWeiRef.current = null; }}
+              onChange={e => {
+                setAmountA(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               className="v3b-input" style={{ flex: 1, minWidth: 0 }}
             />
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
@@ -537,13 +558,9 @@ export function AddLiquidityV3Basic() {
               </button>
               {isConnected && tokenA && balanceA !== null && (
                 <button className="v3b-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceA, tokenA.decimals, tokenA.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceA, tokenA);
                   setAmountA(displayAmount);
-                  let maxWei = balanceA;
-                  if (isCanonicalUSDC(tokenA) || isNativeToken(tokenA.address)) {
-                    maxWei = (balanceA * 99n) / 100n;
-                  }
-                  maxAmountAWeiRef.current = maxWei;
+                  maxAmountAWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -584,7 +601,11 @@ export function AddLiquidityV3Basic() {
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <input
               type="number" placeholder={poolExists && currentPrice ? "Auto-calculated" : "0.00"} value={amountB}
-              onChange={e => { setAmountB(e.target.value); maxAmountBWeiRef.current = null; }}
+              onChange={e => {
+                setAmountB(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               disabled={poolExists && !!currentPrice}
               className="v3b-input" style={{ flex: 1, minWidth: 0, opacity: poolExists && currentPrice ? 0.7 : 1 }}
             />
@@ -594,13 +615,9 @@ export function AddLiquidityV3Basic() {
               </button>
               {isConnected && tokenB && balanceB !== null && !(poolExists && currentPrice) && (
                 <button className="v3b-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceB, tokenB.decimals, tokenB.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceB, tokenB);
                   setAmountB(displayAmount);
-                  let maxWei = balanceB;
-                  if (isCanonicalUSDC(tokenB) || isNativeToken(tokenB.address)) {
-                    maxWei = (balanceB * 99n) / 100n;
-                  }
-                  maxAmountBWeiRef.current = maxWei;
+                  maxAmountBWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -823,8 +840,18 @@ export function AddLiquidityV3Basic() {
         )}
       </div>
 
-      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => { setTokenA(t); setShowTokenASelector(false); }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
-      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => { setTokenB(t); setShowTokenBSelector(false); }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} />
+      <TokenSelector open={showTokenASelector} onClose={() => setShowTokenASelector(false)} onSelect={t => {
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+        setTokenA(t);
+        setShowTokenASelector(false);
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} showBalances />
+      <TokenSelector open={showTokenBSelector} onClose={() => setShowTokenBSelector(false)} onSelect={t => {
+        maxAmountAWeiRef.current = null;
+        maxAmountBWeiRef.current = null;
+        setTokenB(t);
+        setShowTokenBSelector(false);
+      }} tokens={tokens.filter(t => !isRWAToken(t))} onImport={handleImportToken} showBalances />
     </>
   );
 }

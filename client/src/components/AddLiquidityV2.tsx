@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Plus, ExternalLink, RefreshCw, Info, Droplets, AlertTriangle, AlertOctagon } from "lucide-react";
@@ -7,7 +7,7 @@ import { useAccount, useBalance, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider, formatUnits, parseUnits } from "ethers";
-import { defaultTokens, getTokensByChainId, isRWAToken, isCanonicalUSDC, getWUSDC } from "@/data/tokens";
+import { defaultTokens, getTokensByChainId, isRWAToken, isCanonicalUSDC, getWrappedAddress } from "@/data/tokens";
 import { formatAmount, parseAmount, calculateRatio, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
@@ -22,6 +22,8 @@ const ERC20_ABI = [
   "function allowance(address owner, address spender) view returns (uint256)",
 ];
 
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
 export function AddLiquidityV2() {
   const [tokenA, setTokenA] = useState<Token | null>(null);
   const [tokenB, setTokenB] = useState<Token | null>(null);
@@ -30,6 +32,8 @@ export function AddLiquidityV2() {
   const [showTokenASelector, setShowTokenASelector] = useState(false);
   const [showTokenBSelector, setShowTokenBSelector] = useState(false);
   const [tokens, setTokens] = useState<Token[]>([]);
+  const [recentTokens, setRecentTokens] = useState<Token[]>([]);
+  const [favoriteTokens, setFavoriteTokens] = useState<Token[]>([]);
   const [isAdding, setIsAdding] = useState(false);
   const [pairExists, setPairExists] = useState(false);
   const [reserveA, setReserveA] = useState<bigint>(0n);
@@ -38,6 +42,7 @@ export function AddLiquidityV2() {
 
   const maxAmountAWeiRef = useRef<bigint | null>(null);
   const maxAmountBWeiRef = useRef<bigint | null>(null);
+  const pairCheckRequestIdRef = useRef(0);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
@@ -68,53 +73,214 @@ export function AddLiquidityV2() {
     setPairExists(false);
     setReserveA(0n);
     setReserveB(0n);
+    maxAmountAWeiRef.current = null;
+    maxAmountBWeiRef.current = null;
   }, [chainId]);
+
+  useEffect(() => {
+    if (!chainId) {
+      setRecentTokens([]);
+      setFavoriteTokens([]);
+      return;
+    }
+
+    try {
+      const recentKey = `recentTokens:${chainId}`;
+      const storedRecent = localStorage.getItem(recentKey);
+      if (!storedRecent) {
+        setRecentTokens([]);
+      } else {
+        const parsedRecent: unknown = JSON.parse(storedRecent);
+        const validRecent = Array.isArray(parsedRecent)
+          ? parsedRecent.filter((item): item is Token => {
+              if (!item || typeof item !== "object") return false;
+              const candidate = item as Partial<Token>;
+              return typeof candidate.address === "string" && candidate.address.trim() !== "";
+            })
+          : [];
+        setRecentTokens(validRecent);
+      }
+    } catch {
+      setRecentTokens([]);
+    }
+
+    try {
+      const favoriteKey = `favoriteTokens:${chainId}`;
+      const storedFavorites = localStorage.getItem(favoriteKey);
+      if (!storedFavorites) {
+        setFavoriteTokens([]);
+      } else {
+        const parsedFavorites: unknown = JSON.parse(storedFavorites);
+        const validFavorites = Array.isArray(parsedFavorites)
+          ? parsedFavorites.filter((item): item is Token => {
+              if (!item || typeof item !== "object") return false;
+              const candidate = item as Partial<Token>;
+              return typeof candidate.address === "string" && candidate.address.trim() !== "";
+            })
+          : [];
+        setFavoriteTokens(validFavorites);
+      }
+    } catch {
+      setFavoriteTokens([]);
+    }
+  }, [chainId]);
+
+  const addRecentToken = (token: Token) => {
+    if (!chainId) return;
+    setRecentTokens((prev) => {
+      const filtered = prev.filter((item) => item.address.toLowerCase() !== token.address.toLowerCase());
+      const updated = [token, ...filtered].slice(0, 5);
+      localStorage.setItem(`recentTokens:${chainId}`, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const toggleFavoriteToken = (token: Token) => {
+    if (!chainId) return;
+    setFavoriteTokens((prev) => {
+      const exists = prev.some((item) => item.address.toLowerCase() === token.address.toLowerCase());
+      const updated = exists
+        ? prev.filter((item) => item.address.toLowerCase() !== token.address.toLowerCase())
+        : [...prev, token];
+      localStorage.setItem(`favoriteTokens:${chainId}`, JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const getSafeMaxInput = (balanceWei: bigint, token: Token, isNative: boolean) => {
+    let safeWei = balanceWei;
+    if (isNative && !isCanonicalUSDC(token)) {
+      safeWei = (balanceWei * 99n) / 100n;
+    }
+
+    const displayAmountRaw = getMaxAmount(safeWei, token.decimals, token.symbol);
+    const displayAmount = displayAmountRaw.toLowerCase().includes("e")
+      ? formatUnits(safeWei, token.decimals)
+      : displayAmountRaw;
+
+    const parsedDisplayWei = parseAmount(displayAmount, token.decimals);
+    return {
+      displayAmount,
+      amountWei: parsedDisplayWei,
+    };
+  };
 
   const openExplorer = (txHash: string) => {
     if (contracts) window.open(`${contracts.explorer}${txHash}`, "_blank");
   };
 
   useEffect(() => {
+    let cancelled = false;
+
     const checkPairExists = async () => {
+      const requestId = ++pairCheckRequestIdRef.current;
+      const applyIfCurrent = (fn: () => void) => {
+        if (!cancelled && pairCheckRequestIdRef.current === requestId) {
+          fn();
+        }
+      };
+
+      applyIfCurrent(() => setIsLoadingPair(true));
+
       if (!tokenA || !tokenB || !window.ethereum) {
-        setPairExists(false); setReserveA(0n); setReserveB(0n); return;
+        applyIfCurrent(() => {
+          setPairExists(false);
+          setReserveA(0n);
+          setReserveB(0n);
+          setIsLoadingPair(false);
+        });
+        return;
       }
-      if (tokenA.address.toLowerCase() === tokenB.address.toLowerCase()) {
-        setPairExists(false); setReserveA(0n); setReserveB(0n); return;
+
+      const wrappedAddress = chainId
+        ? getWrappedAddress(chainId, ZERO_ADDRESS)?.toLowerCase() ?? null
+        : null;
+      const normalizeForPairComparison = (tokenAddress: string) => {
+        const lower = tokenAddress.toLowerCase();
+        if (lower === ZERO_ADDRESS && wrappedAddress) {
+          return wrappedAddress;
+        }
+        return lower;
+      };
+
+      if (normalizeForPairComparison(tokenA.address) === normalizeForPairComparison(tokenB.address)) {
+        applyIfCurrent(() => {
+          setPairExists(false);
+          setReserveA(0n);
+          setReserveB(0n);
+          setIsLoadingPair(false);
+        });
+        return;
       }
-      setIsLoadingPair(true);
+
       try {
-        if (!contracts) return;
+        if (!contracts) {
+          applyIfCurrent(() => {
+            setPairExists(false);
+            setReserveA(0n);
+            setReserveB(0n);
+            setIsLoadingPair(false);
+          });
+          return;
+        }
         const provider = new BrowserProvider(window.ethereum);
         const factory = new Contract(contracts.v2.factory, FACTORY_ABI, provider);
-        const wrappedToken = getWUSDC(chainId);
-        const wrappedAddress = wrappedToken?.address;
-        if (!wrappedAddress) { setPairExists(false); setReserveA(0n); setReserveB(0n); setIsLoadingPair(false); return; }
-        const isTokenANative = tokenA.address === "0x0000000000000000000000000000000000000000";
-        const isTokenBNative = tokenB.address === "0x0000000000000000000000000000000000000000";
+        if (!wrappedAddress) {
+          applyIfCurrent(() => {
+            setPairExists(false);
+            setReserveA(0n);
+            setReserveB(0n);
+            setIsLoadingPair(false);
+          });
+          return;
+        }
+        const isTokenANative = tokenA.address === ZERO_ADDRESS;
+        const isTokenBNative = tokenB.address === ZERO_ADDRESS;
         const tokenAAddress = isTokenANative ? wrappedAddress : tokenA.address;
         const tokenBAddress = isTokenBNative ? wrappedAddress : tokenB.address;
         const pairAddress = await factory.getPair(tokenAAddress, tokenBAddress);
+        if (cancelled || pairCheckRequestIdRef.current !== requestId) return;
         if (pairAddress === "0x0000000000000000000000000000000000000000") {
-          setPairExists(false); setReserveA(0n); setReserveB(0n);
+          applyIfCurrent(() => {
+            setPairExists(false);
+            setReserveA(0n);
+            setReserveB(0n);
+          });
         } else {
-          setPairExists(true);
+          applyIfCurrent(() => setPairExists(true));
           const pairContract = new Contract(pairAddress, PAIR_ABI, provider);
           const [reserve0, reserve1] = await pairContract.getReserves();
           const token0Address = await pairContract.token0();
+          if (cancelled || pairCheckRequestIdRef.current !== requestId) return;
           if (tokenAAddress.toLowerCase() === token0Address.toLowerCase()) {
-            setReserveA(reserve0); setReserveB(reserve1);
+            applyIfCurrent(() => {
+              setReserveA(reserve0);
+              setReserveB(reserve1);
+            });
           } else {
-            setReserveA(reserve1); setReserveB(reserve0);
+            applyIfCurrent(() => {
+              setReserveA(reserve1);
+              setReserveB(reserve0);
+            });
           }
         }
       } catch (error) {
         console.error('Failed to check pair:', error);
-        setPairExists(false); setReserveA(0n); setReserveB(0n);
-      } finally { setIsLoadingPair(false); }
+        applyIfCurrent(() => {
+          setPairExists(false);
+          setReserveA(0n);
+          setReserveB(0n);
+        });
+      } finally {
+        applyIfCurrent(() => setIsLoadingPair(false));
+      }
     };
     checkPairExists();
-  }, [tokenA, tokenB, tokens, address]);
+    return () => {
+      cancelled = true;
+      pairCheckRequestIdRef.current += 1;
+    };
+  }, [tokenA, tokenB, tokens, address, chainId, contracts]);
 
   useEffect(() => {
     if (!pairExists || !tokenA || !tokenB || !amountA || parseFloat(amountA) <= 0) return;
@@ -224,8 +390,8 @@ export function AddLiquidityV2() {
     }
   };
 
-  const isTokenANative = tokenA?.address === "0x0000000000000000000000000000000000000000";
-  const isTokenBNative = tokenB?.address === "0x0000000000000000000000000000000000000000";
+  const isTokenANative = tokenA?.address === ZERO_ADDRESS;
+  const isTokenBNative = tokenB?.address === ZERO_ADDRESS;
 
   const { data: balanceA, refetch: refetchBalanceA } = useBalance({
     address: address as `0x${string}` | undefined,
@@ -239,9 +405,31 @@ export function AddLiquidityV2() {
   const balanceAFormatted = balanceA ? formatAmount(balanceA.value, balanceA.decimals) : "0.00";
   const balanceBFormatted = balanceB ? formatAmount(balanceB.value, balanceB.decimals) : "0.00";
 
+  const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
+  const wrapped = chainId ? getWrappedAddress(chainId, ZERO_ADDRESS) : null;
+  const getERC20AddressForCompare = (token: Token) =>
+    token.address.toLowerCase() === ZERO_ADDRESS && wrapped
+      ? wrapped
+      : token.address;
+  const sameTokenSelected = !!(
+    tokenA &&
+    tokenB &&
+    getERC20AddressForCompare(tokenA).toLowerCase() ===
+      getERC20AddressForCompare(tokenB).toLowerCase()
+  );
+
   const poolHasLiquidity = pairExists && reserveA > 0n && reserveB > 0n;
-  const isNewPool = !pairExists;
+  const isNewPool = !pairExists && !sameTokenSelected;
   const isEmptyPool = pairExists && (reserveA === 0n || reserveB === 0n);
+  const filteredTokens = useMemo(() => tokens.filter((t) => !isRWAToken(t)), [tokens]);
+  const filteredRecentTokens = useMemo(
+    () => recentTokens.filter((t) => !isRWAToken(t)),
+    [recentTokens],
+  );
+  const filteredFavoriteTokens = useMemo(
+    () => favoriteTokens.filter((t) => !isRWAToken(t)),
+    [favoriteTokens],
+  );
 
   const handleAddLiquidity = async () => {
     if (!tokenA || !tokenB || !amountA || !amountB || parseFloat(amountA) <= 0 || parseFloat(amountB) <= 0) return;
@@ -261,10 +449,10 @@ export function AddLiquidityV2() {
       const amountAMin = (!pairExists || reserveA === 0n || reserveB === 0n) ? 0n : amountADesired * 95n / 100n;
       const amountBMin = (!pairExists || reserveA === 0n || reserveB === 0n) ? 0n : amountBDesired * 95n / 100n;
       const deadline = Math.floor(Date.now() / 1000) + 60 * 20;
-      const wrappedToken = getWUSDC(chainId);
-      if (!wrappedToken?.address) throw new Error("wUSDC token not found");
-      const tokenAAddress = isTokenANative ? wrappedToken.address : tokenA.address;
-      const tokenBAddress = isTokenBNative ? wrappedToken.address : tokenB.address;
+      const wrappedAddress = chainId ? getWrappedAddress(chainId, ZERO_ADDRESS) : null;
+      if (!wrappedAddress) throw new Error("Wrapped native token not found");
+      const tokenAAddress = isTokenANative ? wrappedAddress : tokenA.address;
+      const tokenBAddress = isTokenBNative ? wrappedAddress : tokenB.address;
       toast({ title: "Adding liquidity", description: `Adding ${amountA} ${tokenA.symbol} and ${amountB} ${tokenB.symbol}` });
       let tx;
       if (isTokenANative || isTokenBNative) {
@@ -319,14 +507,13 @@ export function AddLiquidityV2() {
 
   const poolStatusConfig = isLoadingPair
     ? { label: "Checking", color: "rgba(255,255,255,0.1)", text: "rgba(255,255,255,0.4)", dot: "#6b7280" }
+    : sameTokenSelected
+    ? { label: "Invalid Pair", color: "rgba(251,191,36,0.12)", text: "#fbbf24", dot: "#fbbf24" }
     : poolHasLiquidity
     ? { label: "Active Pool", color: "rgba(34,197,94,0.12)", text: "#4ade80", dot: "#22c55e" }
     : isEmptyPool
     ? { label: "Empty Pool", color: "rgba(245,158,11,0.12)", text: "#fbbf24", dot: "#f59e0b" }
     : { label: "New Pool", color: "rgba(99,102,241,0.12)", text: "#818cf8", dot: "#6366f1" };
-
-  const hasRwaToken = isRWAToken(tokenA) || isRWAToken(tokenB);
-  const sameTokenSelected = !!(tokenA && tokenB && tokenA.address.toLowerCase() === tokenB.address.toLowerCase());
   const canSubmit = tokenA && tokenB && !sameTokenSelected && amountA && amountB && parseFloat(amountA) > 0 && parseFloat(amountB) > 0 && !isAdding && !hasRwaToken;
 
   return (
@@ -516,7 +703,11 @@ export function AddLiquidityV2() {
               type="number"
               placeholder="0.00"
               value={amountA}
-              onChange={e => setAmountA(e.target.value)}
+              onChange={e => {
+                setAmountA(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               className="alv2-input"
               style={{ flex: 1, minWidth: 0 }}
             />
@@ -537,13 +728,9 @@ export function AddLiquidityV2() {
               </button>
               {isConnected && tokenA && balanceA && (
                 <button className="alv2-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceA.value, balanceA.decimals, tokenA.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceA.value, tokenA, isTokenANative);
                   setAmountA(displayAmount);
-                  let maxWei = balanceA.value;
-                  if (isCanonicalUSDC(tokenA)) {
-                    maxWei = (balanceA.value * 99n) / 100n;
-                  }
-                  maxAmountAWeiRef.current = maxWei;
+                  maxAmountAWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -574,7 +761,12 @@ export function AddLiquidityV2() {
               type="number"
               placeholder={poolHasLiquidity ? "Auto-calculated" : "0.00"}
               value={amountB}
-              onChange={e => poolHasLiquidity ? null : setAmountB(e.target.value)}
+              onChange={e => {
+                if (poolHasLiquidity) return;
+                setAmountB(e.target.value);
+                maxAmountAWeiRef.current = null;
+                maxAmountBWeiRef.current = null;
+              }}
               disabled={poolHasLiquidity}
               className="alv2-input"
               style={{ flex: 1, minWidth: 0, opacity: poolHasLiquidity ? 0.7 : 1 }}
@@ -596,13 +788,9 @@ export function AddLiquidityV2() {
               </button>
               {isConnected && tokenB && balanceB && !poolHasLiquidity && (
                 <button className="alv2-max-btn" onClick={() => {
-                  const displayAmount = getMaxAmount(balanceB.value, balanceB.decimals, tokenB.symbol);
+                  const { displayAmount, amountWei } = getSafeMaxInput(balanceB.value, tokenB, isTokenBNative);
                   setAmountB(displayAmount);
-                  let maxWei = balanceB.value;
-                  if (isCanonicalUSDC(tokenB)) {
-                    maxWei = (balanceB.value * 99n) / 100n;
-                  }
-                  maxAmountBWeiRef.current = maxWei;
+                  maxAmountBWeiRef.current = amountWei;
                 }}>MAX</button>
               )}
             </div>
@@ -784,16 +972,36 @@ export function AddLiquidityV2() {
       <TokenSelector
         open={showTokenASelector}
         onClose={() => setShowTokenASelector(false)}
-        onSelect={token => { setTokenA(token); setShowTokenASelector(false); }}
-        tokens={tokens.filter(t => !isRWAToken(t))}
+        onSelect={token => {
+          maxAmountAWeiRef.current = null;
+          maxAmountBWeiRef.current = null;
+          addRecentToken(token);
+          setTokenA(token);
+          setShowTokenASelector(false);
+        }}
+        tokens={filteredTokens}
         onImport={handleImportToken}
+        recentTokens={filteredRecentTokens}
+        favoriteTokens={filteredFavoriteTokens}
+        onToggleFavorite={toggleFavoriteToken}
+        showBalances
       />
       <TokenSelector
         open={showTokenBSelector}
         onClose={() => setShowTokenBSelector(false)}
-        onSelect={token => { setTokenB(token); setShowTokenBSelector(false); }}
-        tokens={tokens.filter(t => !isRWAToken(t))}
+        onSelect={token => {
+          maxAmountAWeiRef.current = null;
+          maxAmountBWeiRef.current = null;
+          addRecentToken(token);
+          setTokenB(token);
+          setShowTokenBSelector(false);
+        }}
+        tokens={filteredTokens}
         onImport={handleImportToken}
+        recentTokens={filteredRecentTokens}
+        favoriteTokens={filteredFavoriteTokens}
+        onToggleFavorite={toggleFavoriteToken}
+        showBalances
       />
     </>
   );

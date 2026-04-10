@@ -288,7 +288,7 @@ export function isRWASwapPair(from: Token | null, to: Token | null): boolean {
   if (!from || !to) return false;
   const fromIsRWA = isRWAToken(from);
   const toIsRWA = isRWAToken(to);
-  const fromIsUSDC = isCanonicalUSDC(from) || isCanonicalWUSDC(from);
-  const toIsUSDC = isCanonicalUSDC(to) || isCanonicalWUSDC(to);
+  const fromIsUSDC = isCanonicalUSDC(from);
+  const toIsUSDC = isCanonicalUSDC(to);
   return (fromIsRWA && toIsUSDC) || (fromIsUSDC && toIsRWA);
 }

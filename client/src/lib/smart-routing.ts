@@ -1,9 +1,10 @@
 import { Contract, type Provider } from "ethers";
 import { Token } from "@shared/schema";
-import { parseAmount } from "./decimal-utils";
 import { QUOTER_V2_ABI, V3_FEE_TIERS } from "./abis/v3";
 import { RWA_VAULT_ABI } from "./abis/rwa";
 import type { RouteHop } from "@/components/PathVisualizer";
+import { isCanonicalUSDC } from "@/data/tokens";
+import { encodePath } from "./v3-utils";
 
 // V2 Router ABI
 const V2_ROUTER_ABI = [
@@ -12,6 +13,203 @@ const V2_ROUTER_ABI = [
 
 // Native token address (zero address)
 const NATIVE_TOKEN_ADDRESS = "0x0000000000000000000000000000000000000000";
+const V3_QUOTE_CONCURRENCY = 6;
+
+function getProbeAmount(amountIn: bigint): bigint {
+  if (amountIn <= 0n) return 1n;
+
+  const candidate = amountIn / 1000n; // 0.1%
+  const minProbe = amountIn / 10_000n; // 0.01%
+  const maxProbe = amountIn / 10n; // 10%
+
+  const lowerBound = minProbe > 0n ? minProbe : 1n;
+  const upperBound = maxProbe > 0n ? maxProbe : amountIn;
+
+  let probe = candidate;
+  if (probe < lowerBound) probe = lowerBound;
+  if (probe > upperBound) probe = upperBound;
+  if (probe > amountIn) probe = amountIn;
+
+  return probe > 0n ? probe : 1n;
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>,
+  signal?: AbortSignal,
+): Promise<R[]> {
+  if (signal?.aborted) {
+    throw new DOMException("Aborted", "AbortError");
+  }
+  if (items.length === 0) return [];
+
+  const normalizedConcurrency = Number.isFinite(concurrency)
+    ? Math.max(1, Math.floor(concurrency))
+    : 1;
+
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  const runners = Array.from(
+    { length: Math.min(normalizedConcurrency, items.length) },
+    async () => {
+      while (true) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+        if (currentIndex >= items.length) {
+          return;
+        }
+        results[currentIndex] = await worker(items[currentIndex]);
+      }
+    },
+  );
+
+  await Promise.all(runners);
+  return results;
+}
+
+function hasAdjacentDuplicateAddresses(path: string[]): boolean {
+  for (let i = 0; i < path.length - 1; i++) {
+    if (path[i].toLowerCase() === path[i + 1].toLowerCase()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isSameAssetPath(path: string[]): boolean {
+  if (path.length < 2) return false;
+  return path[0].toLowerCase() === path[path.length - 1].toLowerCase();
+}
+
+function isTransientError(error: unknown): boolean {
+  if (!error) return false;
+
+  const maybeError = error as {
+    code?: unknown;
+    message?: unknown;
+    reason?: unknown;
+    shortMessage?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+    error?: { code?: unknown; message?: unknown; status?: unknown };
+    info?: { error?: { message?: unknown } };
+  };
+
+  const rawCode = maybeError.code ?? maybeError.error?.code;
+  const code = typeof rawCode === "string" ? rawCode.toUpperCase() : "";
+
+  const statusRaw =
+    maybeError.status ??
+    maybeError.statusCode ??
+    maybeError.response?.status ??
+    maybeError.error?.status;
+  const status = typeof statusRaw === "number" ? statusRaw : Number.NaN;
+
+  const message = [
+    maybeError.message,
+    maybeError.reason,
+    maybeError.shortMessage,
+    maybeError.error?.message,
+    maybeError.info?.error?.message,
+  ]
+    .map((part) => (typeof part === "string" ? part.toLowerCase() : ""))
+    .join(" ");
+
+  if (
+    message.includes("execution reverted") ||
+    message.includes("revert") ||
+    message.includes("pool-missing") ||
+    message.includes("unsupported-fee") ||
+    code === "CALL_EXCEPTION"
+  ) {
+    return false;
+  }
+
+  if ([408, 429, 500, 502, 503, 504].includes(status)) {
+    return true;
+  }
+
+  if (
+    code === "ETIMEDOUT" ||
+    code === "ECONNRESET" ||
+    code === "ECONNABORTED" ||
+    code === "EAI_AGAIN" ||
+    code === "ENOTFOUND" ||
+    code === "SERVER_ERROR" ||
+    code === "TIMEOUT" ||
+    code === "UND_ERR_CONNECT_TIMEOUT" ||
+    code === "UND_ERR_HEADERS_TIMEOUT" ||
+    code === "UND_ERR_BODY_TIMEOUT"
+  ) {
+    return true;
+  }
+
+  return (
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("rate limit") ||
+    message.includes("too many requests") ||
+    message.includes("service unavailable") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("failed to fetch") ||
+    message.includes("network") ||
+    message.includes("connection reset") ||
+    message.includes("socket hang up") ||
+    message.includes("503") ||
+    message.includes("429") ||
+    message.includes("408")
+  );
+}
+
+async function quoteWithRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = 2,
+  baseDelayMs = 80,
+  signal?: AbortSignal,
+): Promise<T> {
+  let lastTransientError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    try {
+      return await fn();
+    } catch (err) {
+      if (signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      const transient = isTransientError(err);
+      if (!transient) {
+        throw err;
+      }
+
+      lastTransientError = err;
+      if (attempt === maxRetries) {
+        break;
+      }
+
+      await new Promise((resolve, reject) => {
+        const timeoutId = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(undefined);
+        }, baseDelayMs * (attempt + 1));
+        const onAbort = () => {
+          clearTimeout(timeoutId);
+          signal?.removeEventListener("abort", onAbort);
+          reject(new DOMException("Aborted", "AbortError"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+  }
+  throw lastTransientError;
+}
 
 /**
  * Check if token is native (zero address)
@@ -53,23 +251,17 @@ export async function getV2Quote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedTokenAddress: string
+  wrappedToken: Token,
+  signal?: AbortSignal,
 ): Promise<QuoteResult | null> {
   try {
     const router = new Contract(routerAddress, V2_ROUTER_ABI, provider);
+    const wrappedTokenAddress = wrappedToken.address;
 
     const directPath = buildV2Path(fromToken, toToken, wrappedTokenAddress);
     const hopPath = buildV2PathWithHop(fromToken, toToken, wrappedTokenAddress);
 
-    const MIN = 10_000n;
-    const MAX = 10_000_000_000n;
-    const testIn = amountIn > 0n
-      ? (() => {
-          const probeCandidate = amountIn / 1000n;
-          const bounded = probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
-          return bounded > amountIn ? amountIn : bounded;
-        })()
-      : MIN;
+    const testIn = getProbeAmount(amountIn);
 
     const calcV2Impact = (spotOut: bigint, outputAmount: bigint): number => {
       if (spotOut === 0n) return Number.NaN;
@@ -78,49 +270,47 @@ export async function getV2Quote(
       return Number((num * 10000n) / (spotOut * amountIn)) / 100;
     };
 
+    const isSameAssetDirectPath = isSameAssetPath(directPath);
+    const shouldProbeHopPath =
+      !isSameAssetDirectPath &&
+      hopPath.length !== directPath.length &&
+      !hasAdjacentDuplicateAddresses(hopPath);
+
     const [directResult, hopResult] = await Promise.allSettled([
-      (async () => {
-        const amounts = await router.getAmountsOut(amountIn, directPath);
-        const outputAmount = amounts[amounts.length - 1];
-        if (outputAmount === 0n) throw new Error("zero output");
-        let priceImpact: number | undefined;
-        try {
-          const spotAmounts = await router.getAmountsOut(testIn, directPath);
-          priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
-        } catch { /* probe failed — impact unavailable */ }
-        return { outputAmount, path: directPath, priceImpact };
-      })(),
-      hopPath.length !== directPath.length
-        ? (async () => {
-            const amounts = await router.getAmountsOut(amountIn, hopPath);
-            const outputAmount = amounts[amounts.length - 1];
-            if (outputAmount === 0n) throw new Error("zero output");
-            let priceImpact: number | undefined;
-            try {
-              const spotAmounts = await router.getAmountsOut(testIn, hopPath);
-              priceImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], outputAmount);
-            } catch { /* probe failed — impact unavailable */ }
-            return { outputAmount, path: hopPath, priceImpact };
-          })()
+      quoteWithRetry(() => router.getAmountsOut(amountIn, directPath), 2, 80, signal),
+      shouldProbeHopPath
+        ? quoteWithRetry(() => router.getAmountsOut(amountIn, hopPath), 2, 80, signal)
         : Promise.resolve(null),
     ]);
 
-    const direct = directResult.status === "fulfilled" ? directResult.value : null;
-    const hop = hopResult.status === "fulfilled" ? hopResult.value : null;
-
     let bestOutputAmount: bigint | null = null;
     let bestPath: string[] = [];
-    let bestPriceImpact: number | undefined;
 
-    if (direct && (!bestOutputAmount || direct.outputAmount > bestOutputAmount)) {
-      bestOutputAmount = direct.outputAmount;
-      bestPath = direct.path;
-      bestPriceImpact = direct.priceImpact;
+    if (directResult.status === "fulfilled" && directResult.value) {
+      const outputAmount = directResult.value[directResult.value.length - 1];
+      if (outputAmount > 0n) {
+        bestOutputAmount = outputAmount;
+        bestPath = directPath;
+      }
     }
-    if (hop && (!bestOutputAmount || hop.outputAmount > bestOutputAmount)) {
-      bestOutputAmount = hop.outputAmount;
-      bestPath = hop.path;
-      bestPriceImpact = hop.priceImpact;
+
+    if (hopResult.status === "fulfilled" && hopResult.value) {
+      const outputAmount = hopResult.value[hopResult.value.length - 1];
+      if (outputAmount > 0n && (!bestOutputAmount || outputAmount > bestOutputAmount)) {
+        bestOutputAmount = outputAmount;
+        bestPath = hopPath;
+      }
+    }
+
+    let bestPriceImpact: number | undefined;
+    if (bestOutputAmount && bestPath.length > 0) {
+      try {
+        const spotAmounts = await quoteWithRetry(() => router.getAmountsOut(testIn, bestPath), 2, 80, signal);
+        const probeImpact = calcV2Impact(spotAmounts[spotAmounts.length - 1], bestOutputAmount);
+        bestPriceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
+      } catch {
+        // probe failed — impact unavailable
+      }
     }
 
     if (!bestOutputAmount || bestPath.length === 0) return null;
@@ -128,8 +318,8 @@ export async function getV2Quote(
     const route: RouteHop[] = [];
     for (let i = 0; i < bestPath.length - 1; i++) {
       route.push({
-        tokenIn: i === 0 ? fromToken : getTokenForAddress(bestPath[i], fromToken, toToken, wrappedTokenAddress),
-        tokenOut: i === bestPath.length - 2 ? toToken : getTokenForAddress(bestPath[i + 1], fromToken, toToken, wrappedTokenAddress),
+        tokenIn: i === 0 ? fromToken : getTokenForAddress(bestPath[i], fromToken, toToken, wrappedToken),
+        tokenOut: i === bestPath.length - 2 ? toToken : getTokenForAddress(bestPath[i + 1], fromToken, toToken, wrappedToken),
         protocol: "V2",
       });
     }
@@ -157,9 +347,11 @@ export async function getV3Quote(
   fromToken: Token,
   toToken: Token,
   amountIn: bigint,
-  wrappedTokenAddress: string
+  wrappedToken: Token,
+  signal?: AbortSignal,
 ): Promise<QuoteResult | null> {
   try {
+    const wrappedTokenAddress = wrappedToken.address;
     if (!wrappedTokenAddress) {
       console.warn("Wrapped token address required for V3 quotes");
       return null;
@@ -170,7 +362,6 @@ export async function getV3Quote(
     }
 
     const quoter = new Contract(quoterAddress, QUOTER_V2_ABI, provider);
-    const { encodePath } = await import("./v3-utils");
 
     const feeTiers = [
       V3_FEE_TIERS.LOWEST,
@@ -183,14 +374,7 @@ export async function getV3Quote(
     const fromERC20 = getERC20Address(fromToken.address, wrappedTokenAddress);
     const toERC20 = getERC20Address(toToken.address, wrappedTokenAddress);
 
-    const MIN = 10_000n;
-    const MAX = 10_000_000_000n;
-    const testIn = amountIn > 0n
-      ? (() => {
-          const probeCandidate = amountIn / 1000n;
-          return probeCandidate < MIN ? MIN : probeCandidate > MAX ? MAX : probeCandidate;
-        })()
-      : MIN;
+    const testIn = getProbeAmount(amountIn);
 
     const calcV3Impact = (spotOut: bigint, outputAmount: bigint): number => {
       if (spotOut === 0n) return Number.NaN;
@@ -199,77 +383,76 @@ export async function getV3Quote(
       return Number((num * 10000n) / (spotOut * amountIn)) / 100;
     };
 
-    // ── Single-hop: all 5 fee tiers in parallel ────────────────────────────────
-    const singleHopPromises = feeTiers.map(async (fee) => {
+    // ── Single-hop: capped concurrency across fee tiers ────────────────────────
+    const singleHopResults = await mapWithConcurrency(feeTiers, V3_QUOTE_CONCURRENCY, async (fee) => {
       try {
-        const actualResult = await quoter.quoteExactInputSingle.staticCall({
-          tokenIn: fromERC20,
-          tokenOut: toERC20,
-          amountIn,
-          fee,
-          sqrtPriceLimitX96: 0n,
-        });
-        const outputAmount = actualResult[0];
-        const gasEstimate = actualResult[3];
-
-        let priceImpact: number | undefined;
-        try {
-          const spotResult = await quoter.quoteExactInputSingle.staticCall({
+        const actualResult = await quoteWithRetry(() =>
+          quoter.quoteExactInputSingle.staticCall({
             tokenIn: fromERC20,
             tokenOut: toERC20,
-            amountIn: testIn,
+            amountIn,
             fee,
             sqrtPriceLimitX96: 0n,
-          });
-          priceImpact = calcV3Impact(spotResult[0], outputAmount);
-        } catch { /* probe failed — impact unavailable */ }
-
-        return { fee, outputAmount, gasEstimate, priceImpact, isMultiHop: false };
+          }),
+          2,
+          80,
+          signal,
+        );
+        return {
+          fee,
+          outputAmount: actualResult[0] as bigint,
+          gasEstimate: actualResult[3] as bigint,
+        };
       } catch {
         return null;
       }
-    });
+    }, signal);
+
+    const canUseMultiHop =
+      fromERC20.toLowerCase() !== wrappedTokenAddress.toLowerCase() &&
+      toERC20.toLowerCase() !== wrappedTokenAddress.toLowerCase();
 
     // ── Multi-hop: all 25 (fee1 × fee2) combos in parallel ────────────────────
-    const multiHopPromises = feeTiers.flatMap((fee1) =>
-      feeTiers.map(async (fee2) => {
-        try {
-          const path = encodePath([fromERC20, wrappedTokenAddress, toERC20], [fee1, fee2]);
-          const actualResult = await quoter.quoteExactInput.staticCall(path, amountIn);
-          const outputAmount = actualResult[0];
-          const gasEstimate = actualResult[3];
+    const multiHopCandidates = canUseMultiHop
+      ? feeTiers.flatMap((fee1) =>
+          feeTiers.map((fee2) => ({
+            fee1,
+            fee2,
+            path: encodePath([fromERC20, wrappedTokenAddress, toERC20], [fee1, fee2]),
+          }))
+        )
+      : [];
 
-          let priceImpact: number | undefined;
-          try {
-            const spotResult = await quoter.quoteExactInput.staticCall(path, testIn);
-            priceImpact = calcV3Impact(spotResult[0], outputAmount);
-          } catch { /* probe failed — impact unavailable */ }
-
-          return { fee1, fee2, path, outputAmount, gasEstimate, priceImpact };
-        } catch {
-          return null;
-        }
-      })
+    const multiHopResults = await mapWithConcurrency(
+      multiHopCandidates,
+      V3_QUOTE_CONCURRENCY,
+      async ({ fee1, fee2, path }) => {
+      try {
+        const actualResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(path, amountIn), 2, 80, signal);
+        return {
+          fee1,
+          fee2,
+          path,
+          outputAmount: actualResult[0] as bigint,
+          gasEstimate: actualResult[3] as bigint,
+        };
+      } catch {
+        return null;
+      }
+      },
+      signal,
     );
 
-    // Run both in parallel
-    const [singleHopResults, multiHopResults] = await Promise.all([
-      Promise.all(singleHopPromises),
-      Promise.all(multiHopPromises),
-    ]);
-
     // Find best single-hop
-    let best: {
+    let bestSingle: {
       outputAmount: bigint;
       gasEstimate: bigint;
-      priceImpact: number | undefined;
       fee: number;
-      isMultiHop: false;
     } | null = null;
 
     for (const r of singleHopResults) {
-      if (r && (!best || r.outputAmount > best.outputAmount)) {
-        best = { ...r, isMultiHop: false };
+      if (r && r.outputAmount > 0n && (!bestSingle || r.outputAmount > bestSingle.outputAmount)) {
+        bestSingle = r;
       }
     }
 
@@ -277,35 +460,72 @@ export async function getV3Quote(
     let bestMultiHop: {
       outputAmount: bigint;
       gasEstimate: bigint;
-      priceImpact: number | undefined;
       fee1: number;
       fee2: number;
       path: string;
     } | null = null;
 
     for (const r of multiHopResults) {
-      if (r && (!bestMultiHop || r.outputAmount > bestMultiHop.outputAmount)) {
+      if (r && r.outputAmount > 0n && (!bestMultiHop || r.outputAmount > bestMultiHop.outputAmount)) {
         bestMultiHop = r;
       }
     }
 
-    // Choose overall best (single-hop vs multi-hop)
-    if (best && bestMultiHop && bestMultiHop.outputAmount > best.outputAmount) {
-      const wrappedToken = getTokenForAddress(wrappedTokenAddress, fromToken, toToken, wrappedTokenAddress);
+    if (!bestSingle && !bestMultiHop) {
+      return null;
+    }
+
+    const useMultiHop = !!(
+      bestMultiHop && (!bestSingle || bestMultiHop.outputAmount > bestSingle.outputAmount)
+    );
+
+    let priceImpact: number | undefined;
+    try {
+      if (useMultiHop && bestMultiHop) {
+        const spotResult = await quoteWithRetry(() => quoter.quoteExactInput.staticCall(bestMultiHop.path, testIn), 2, 80, signal);
+        const probeImpact = calcV3Impact(spotResult[0], bestMultiHop.outputAmount);
+        priceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
+      } else if (bestSingle) {
+        const spotResult = await quoteWithRetry(() =>
+          quoter.quoteExactInputSingle.staticCall({
+            tokenIn: fromERC20,
+            tokenOut: toERC20,
+            amountIn: testIn,
+            fee: bestSingle.fee,
+            sqrtPriceLimitX96: 0n,
+          }),
+          2,
+          80,
+          signal,
+        );
+        const probeImpact = calcV3Impact(spotResult[0], bestSingle.outputAmount);
+        priceImpact = Number.isFinite(probeImpact) ? probeImpact : undefined;
+      }
+    } catch {
+      // probe failed — impact unavailable
+    }
+
+    if (useMultiHop && bestMultiHop) {
+      const wrappedIntermediateToken = getTokenForAddress(
+        wrappedTokenAddress,
+        fromToken,
+        toToken,
+        wrappedToken,
+      );
       return {
         protocol: "V3",
         outputAmount: bestMultiHop.outputAmount,
         gasEstimate: bestMultiHop.gasEstimate,
-        priceImpact: bestMultiHop.priceImpact,
+        priceImpact,
         route: [
           {
             tokenIn: fromToken,
-            tokenOut: wrappedToken,
+            tokenOut: wrappedIntermediateToken,
             protocol: "V3",
             fee: bestMultiHop.fee1,
           },
           {
-            tokenIn: wrappedToken,
+            tokenIn: wrappedIntermediateToken,
             tokenOut: toToken,
             protocol: "V3",
             fee: bestMultiHop.fee2,
@@ -314,17 +534,17 @@ export async function getV3Quote(
       };
     }
 
-    if (best) {
+    if (bestSingle) {
       return {
         protocol: "V3",
-        outputAmount: best.outputAmount,
-        gasEstimate: best.gasEstimate,
-        priceImpact: best.priceImpact,
+        outputAmount: bestSingle.outputAmount,
+        gasEstimate: bestSingle.gasEstimate,
+        priceImpact,
         route: [{
           tokenIn: fromToken,
           tokenOut: toToken,
           protocol: "V3",
-          fee: best.fee,
+          fee: bestSingle.fee,
         }],
       };
     }
@@ -348,13 +568,13 @@ export async function getSmartRouteQuote(
   amountIn: bigint,
   wrappedToken: Token,
   v2Enabled: boolean,
-  v3Enabled: boolean
+  v3Enabled: boolean,
+  signal?: AbortSignal,
 ): Promise<SmartRoutingResult | null> {
   try {
-    const wrappedTokenAddress = wrappedToken.address;
     const quotes = await Promise.allSettled([
-      v2Enabled ? getV2Quote(provider, v2RouterAddress, fromToken, toToken, amountIn, wrappedTokenAddress) : Promise.resolve(null),
-      v3Enabled ? getV3Quote(provider, v3QuoterAddress, fromToken, toToken, amountIn, wrappedTokenAddress) : Promise.resolve(null),
+      v2Enabled ? getV2Quote(provider, v2RouterAddress, fromToken, toToken, amountIn, wrappedToken, signal) : Promise.resolve(null),
+      v3Enabled ? getV3Quote(provider, v3QuoterAddress, fromToken, toToken, amountIn, wrappedToken, signal) : Promise.resolve(null),
     ]);
     
     const v2Quote = quotes[0].status === "fulfilled" ? quotes[0].value : null;
@@ -444,26 +664,19 @@ function getTokenForAddress(
   address: string,
   fromToken: Token,
   toToken: Token,
-  wrappedTokenAddress: string
+  wrappedToken: Token,
 ): Token {
   if (address.toLowerCase() === fromToken.address.toLowerCase()) return fromToken;
   if (address.toLowerCase() === toToken.address.toLowerCase()) return toToken;
-  
-  return {
-    address: wrappedTokenAddress,
-    symbol: "wUSDC",
-    name: "Wrapped USDC",
-    decimals: 18,
-    logoURI: "/img/logos/wusdc.png",
-    verified: true,
-    chainId: fromToken.chainId,
-  };
+
+  return wrappedToken;
 }
 
 // ── RWA Vault Routing ─────────────────────────────────────────────────────────
 
 export interface RWAQuoteResult {
   protocol: "RWA";
+  inputAmount: bigint;
   outputAmount: bigint;
   route: RouteHop[];
   priceImpact: number;
@@ -483,7 +696,8 @@ export async function getRWAQuote(
   vaultAddress: string,
   fromToken: Token,
   toToken: Token,
-  amountIn: bigint
+  amountIn: bigint,
+  signal?: AbortSignal,
 ): Promise<RWAQuoteResult | null> {
   try {
     const vault = new Contract(vaultAddress, RWA_VAULT_ABI, provider);
@@ -493,6 +707,16 @@ export async function getRWAQuote(
       console.warn("Invalid RWA quote direction:", fromToken.symbol, "->", toToken.symbol);
       return null;
     }
+    const settlementToken = fromIsRWA ? toToken : fromToken;
+    if (!isCanonicalUSDC(settlementToken)) {
+      console.warn(
+        "Invalid RWA settlement token:",
+        settlementToken.symbol,
+        settlementToken.address,
+      );
+      return null;
+    }
+
     const isBuy = !fromToken.rwa && !!toToken.rwa; // USDC→RWA
     const rwaToken = isBuy ? toToken : fromToken;
     const pairId = rwaToken.rwaPairId;
@@ -504,19 +728,24 @@ export async function getRWAQuote(
 
     if (isBuy) {
       // quoteBuy(pairId, usdcIn) returns (synthOut, fee, netUsdc, price, isStale)
-      const result = await vault.quoteBuy(pairId, amountIn);
+      const result = await quoteWithRetry(() => vault.quoteBuy(pairId, amountIn), 2, 80, signal);
       const synthOut = result[0];
+      if (synthOut <= 0n) {
+        return null;
+      }
       const fee = result[1];
+      const netUsdc = result[2];
       const price = result[3];
       const isStale = result[4];
 
-      const netUsdc = amountIn - fee;
       // Price impact is 0 for vault swaps (no slippage from pool depth, only fee)
       // But we show fee impact for transparency
-      const priceImpact = amountIn > 0n ? Number((fee * 10000n) / amountIn) / 100 : 0;
+      const grossUsdc = netUsdc + fee;
+      const priceImpact = netUsdc > 0n ? Number((fee * 10000n) / grossUsdc) / 100 : 0;
 
       return {
         protocol: "RWA",
+        inputAmount: amountIn,
         outputAmount: synthOut,
         route: [{
           tokenIn: fromToken,
@@ -533,17 +762,22 @@ export async function getRWAQuote(
       };
     } else {
       // Redeem: quoteRedeem(pairId, synthAmount) returns (usdcOut, fee, grossUsdc, price, isStale, reserveOk)
-      const result = await vault.quoteRedeem(pairId, amountIn);
+      const result = await quoteWithRetry(() => vault.quoteRedeem(pairId, amountIn), 2, 80, signal);
       const usdcOut = result[0];
+      if (usdcOut <= 0n) {
+        return null;
+      }
       const fee = result[1];
+      const grossUsdc = result[2];
       const price = result[3];
       const isStale = result[4];
       const reserveOk = result[5];
 
-      const priceImpact = usdcOut > 0n ? Number((fee * 10000n) / (usdcOut + fee)) / 100 : 0;
+      const priceImpact = grossUsdc > 0n ? Number((fee * 10000n) / grossUsdc) / 100 : 0;
 
       return {
         protocol: "RWA",
+        inputAmount: amountIn,
         outputAmount: usdcOut,
         route: [{
           tokenIn: fromToken,

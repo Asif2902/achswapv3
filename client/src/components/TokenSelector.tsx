@@ -1,10 +1,41 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from "react";
-import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2, BarChart3 } from "lucide-react";
+import { useState, useMemo, useEffect, useRef, useCallback, startTransition } from "react";
+import { Search, CheckCircle2, AlertCircle, X, Sparkles, Users, Trash2, BarChart3, Star, Clock } from "lucide-react";
 import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
 import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
+
+const MAX_RENDER_ITEMS_PER_SECTION = 80;
+const INITIAL_RENDER_ITEMS_PER_SECTION = 8;
+const MAX_RENDER_COMMUNITY_ITEMS = 30;
+const BALANCE_QUERY_BATCH_SIZE = 12;
+const communityTokenCache = new Map<number, CommunityToken[]>();
+const communityTokenInFlight = new Map<number, Promise<CommunityToken[]>>();
+
+function loadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
+  const cached = communityTokenCache.get(chainId);
+  if (cached) {
+    return Promise.resolve(cached);
+  }
+
+  const inFlight = communityTokenInFlight.get(chainId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = fetchCommunityTokens(chainId)
+    .then((rows) => {
+      communityTokenCache.set(chainId, rows);
+      return rows;
+    })
+    .finally(() => {
+      communityTokenInFlight.delete(chainId);
+    });
+
+  communityTokenInFlight.set(chainId, request);
+  return request;
+}
 
 interface TokenSelectorProps {
   open: boolean;
@@ -13,11 +44,15 @@ interface TokenSelectorProps {
   tokens: Token[];
   onImport?: (address: string) => Promise<Token | null>;
   onDelete?: (address: string) => void;
-  rwaOnly?: boolean; // When true, only show RWA tokens
+  rwaOnly?: boolean;
+  recentTokens?: Token[];
+  favoriteTokens?: Token[];
+  onToggleFavorite?: (token: Token) => void;
+  showBalances?: boolean;
 }
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete, rwaOnly }: TokenSelectorProps) {
+export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDelete, rwaOnly, recentTokens = [], favoriteTokens = [], onToggleFavorite, showBalances = true }: TokenSelectorProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState("");
@@ -27,6 +62,10 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [loadingCommunity, setLoadingCommunity] = useState(false);
   const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(new Set());
   const [resetHoldingKey, setResetHoldingKey] = useState(0);
+  const [balancesReady, setBalancesReady] = useState(false);
+  const [initialRenderMode, setInitialRenderMode] = useState(true);
+  const [balanceBatchIndex, setBalanceBatchIndex] = useState(0);
+  const communityFetchStartedRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const { address: userAddress } = useAccount();
   const chainId = useChainId();
@@ -42,31 +81,106 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
   // Animate in/out
   useEffect(() => {
+    let balanceTimer: number | null = null;
+    let cancelled = false;
+
     if (open) {
+      communityFetchStartedRef.current = false;
       setMounted(true);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
+      setBalancesReady(false);
+      setInitialRenderMode(true);
+      setBalanceBatchIndex(0);
+      window.setTimeout(() => {
+        if (!cancelled) {
+          setInitialRenderMode(false);
+        }
+      }, 280);
+      balanceTimer = window.setTimeout(() => {
+        if (!cancelled) {
+          setBalancesReady(true);
+        }
+      }, 120);
+
       const isDesktop = window.matchMedia("(pointer: fine)").matches;
       if (isDesktop) {
         setTimeout(() => inputRef.current?.focus(), 120);
       }
+
       // Fetch community tokens
-      if (chainId) {
-        setLoadingCommunity(true);
-        fetchCommunityTokens(chainId)
-          .then(setCommunityTokens)
-          .finally(() => setLoadingCommunity(false));
+      if (chainId && !rwaOnly) {
+        // Keep open interaction lightweight; hydrate community after panel is visible
+        setCommunityTokens([]);
+        setLoadingCommunity(false);
+      } else if (rwaOnly) {
+        setCommunityTokens([]);
+        setLoadingCommunity(false);
       }
     } else {
       setVisible(false);
+      communityFetchStartedRef.current = false;
+      setBalanceBatchIndex(0);
       setResetHoldingKey(k => k + 1);
       const t = setTimeout(() => {
         setMounted(false);
         setSearchQuery("");
         setImportError("");
       }, 300);
-      return () => clearTimeout(t);
+      return () => {
+        cancelled = true;
+        if (balanceTimer !== null) {
+          window.clearTimeout(balanceTimer);
+        }
+        clearTimeout(t);
+      };
     }
-  }, [open, chainId]);
+
+    return () => {
+      cancelled = true;
+      if (balanceTimer !== null) {
+        window.clearTimeout(balanceTimer);
+      }
+    };
+  }, [open, chainId, rwaOnly]);
+
+  useEffect(() => {
+    if (!open || !visible) return;
+    if (!chainId || rwaOnly) return;
+    if (communityTokens.length > 0) return;
+    if (communityFetchStartedRef.current) return;
+
+    communityFetchStartedRef.current = true;
+
+    let loadTimer: number | null = null;
+    let cancelled = false;
+
+    loadTimer = window.setTimeout(() => {
+      if (cancelled) return;
+
+      setLoadingCommunity(true);
+      loadCommunityTokens(chainId)
+        .then((rows) => {
+          if (!cancelled) {
+            startTransition(() => {
+              setCommunityTokens(rows);
+            });
+
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setLoadingCommunity(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      if (loadTimer !== null) {
+        window.clearTimeout(loadTimer);
+      }
+    };
+  }, [open, visible, chainId, rwaOnly, communityTokens.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -81,13 +195,39 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     [tokens]
   );
   const filteredCommunityTokens = useMemo(() => {
+    if (rwaOnly) return [];
     if (!communityTokens.length) return [];
     const q = searchQuery.toLowerCase().trim();
     return communityTokens
       .filter(t => !regularAddresses.has(t.address.toLowerCase()))
       .filter(t => !hiddenCommunity.has(t.address.toLowerCase()))
       .filter(t => !q || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q) || t.address.toLowerCase().includes(q));
-  }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity]);
+  }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity, rwaOnly]);
+
+  const favoriteAddressSet = useMemo(
+    () => new Set(favoriteTokens.map((token) => token.address.toLowerCase())),
+    [favoriteTokens],
+  );
+
+  const normalizedQuery = searchQuery.toLowerCase().trim();
+  const matchesSearch = useCallback(
+    (token: Pick<Token, "symbol" | "name" | "address">) =>
+      !normalizedQuery ||
+      token.symbol.toLowerCase().includes(normalizedQuery) ||
+      token.name.toLowerCase().includes(normalizedQuery) ||
+      token.address.toLowerCase().includes(normalizedQuery),
+    [normalizedQuery],
+  );
+
+  const rwaPredicate = useCallback(
+    (token: Pick<Token, "rwa">) => (rwaOnly ? !!token.rwa : true),
+    [rwaOnly],
+  );
+
+  const tokenPassesActiveFilters = useCallback(
+    (token: Token) => matchesSearch(token) && rwaPredicate(token),
+    [matchesSearch, rwaPredicate],
+  );
 
   const handleDeleteCommunity = (address: string) => {
     const lower = address.toLowerCase();
@@ -99,36 +239,79 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     });
   };
 
-  const { filteredVerified, filteredImported, filteredRWA } = useMemo(() => {
-    const q = searchQuery.toLowerCase().trim();
-    const matches = (t: Token) =>
-      !q ||
-      t.symbol.toLowerCase().includes(q) ||
-      t.name.toLowerCase().includes(q) ||
-      t.address.toLowerCase().includes(q);
+  const {
+    filteredFavorites,
+    filteredRecent,
+    filteredCommunity,
+    filteredVerified,
+    filteredImported,
+    filteredRWA,
+  } = useMemo(() => {
+    const visibleRecents = recentTokens
+      .filter((t) => tokenPassesActiveFilters(t))
+      .filter((t) => !favoriteAddressSet.has(t.address.toLowerCase()))
+      .filter((t) => (t as { community?: boolean }).community !== true);
+
+    const favorites = favoriteTokens
+      .filter((t) => tokenPassesActiveFilters(t))
+      .sort((a, b) => a.symbol.localeCompare(b.symbol))
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
+
+    const recents = visibleRecents
+      .sort((a, b) => a.symbol.localeCompare(b.symbol))
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
+
+    const community = filteredCommunityTokens
+      .filter((t) => tokenPassesActiveFilters(t))
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_COMMUNITY_ITEMS);
 
     // When rwaOnly mode, only show RWA tokens
     if (rwaOnly) {
+      const rwa = tokens
+        .filter((t) => t.verified && t.rwa && matchesSearch(t))
+        .sort((a, b) => {
+          const catA = a.rwaCategory || "";
+          const catB = b.rwaCategory || "";
+          if (catA !== catB) return catA.localeCompare(catB);
+          return a.symbol.localeCompare(b.symbol);
+        })
+        .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
+
       return {
-        filteredVerified: tokens.filter((t) => t.verified && t.rwa && matches(t)),
+        filteredFavorites: favorites,
+        filteredRecent: recents,
+        filteredCommunity: community,
+        filteredVerified: [] as Token[],
         filteredImported: [] as Token[],
-        filteredRWA: [] as Token[],
+        filteredRWA: rwa,
       };
     }
 
-    const verified = tokens.filter((t) => t.verified && !t.rwa && matches(t));
-    const imported = tokens.filter((t) => !t.verified && matches(t));
+    const verified = tokens
+      .filter((t) => t.verified && !t.rwa && matchesSearch(t))
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
+    const imported = tokens
+      .filter((t) => !t.verified && matchesSearch(t))
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
     // RWA tokens sorted by category then symbol
     const rwa = tokens
-      .filter((t) => t.verified && t.rwa && matches(t))
+      .filter((t) => t.verified && t.rwa && matchesSearch(t))
       .sort((a, b) => {
         const catA = a.rwaCategory || "";
         const catB = b.rwaCategory || "";
         if (catA !== catB) return catA.localeCompare(catB);
         return a.symbol.localeCompare(b.symbol);
-      });
-    return { filteredVerified: verified, filteredImported: imported, filteredRWA: rwa };
-  }, [tokens, searchQuery, rwaOnly]);
+      })
+      .slice(0, initialRenderMode ? INITIAL_RENDER_ITEMS_PER_SECTION : MAX_RENDER_ITEMS_PER_SECTION);
+    return {
+      filteredFavorites: favorites,
+      filteredRecent: recents,
+      filteredCommunity: community,
+      filteredVerified: verified,
+      filteredImported: imported,
+        filteredRWA: rwa,
+      };
+  }, [tokens, favoriteTokens, recentTokens, filteredCommunityTokens, rwaOnly, matchesSearch, tokenPassesActiveFilters, initialRenderMode, favoriteAddressSet]);
 
   const isValidAddress = Boolean(searchQuery.trim() && isAddress(searchQuery.trim()));
   const tokenExists =
@@ -143,8 +326,19 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     try {
       const token = await onImport(searchQuery.trim());
       if (token) {
-        onSelect(token);
+        if (!tokenPassesActiveFilters(token)) {
+          const filterMessage = rwaOnly
+            ? "Imported token is not eligible in RWA-only mode"
+            : "Imported token does not match the active search/filter";
+          setImportError(filterMessage);
+          return;
+        }
         setSearchQuery("");
+        setImportError("");
+        onClose();
+        requestAnimationFrame(() => {
+          onSelect(token);
+        });
       }
     } catch (err: any) {
       setImportError(err.message || "Failed to import token");
@@ -154,14 +348,59 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   };
 
   const handleSelect = (token: Token) => {
-    onSelect(token);
+    onClose();
     setSearchQuery("");
     setImportError("");
+    requestAnimationFrame(() => {
+      onSelect(token);
+    });
   };
+
+  useEffect(() => {
+    if (!open || !showBalances || !balancesReady) return;
+
+    const tokenRowsCount =
+      filteredFavorites.length +
+      filteredRecent.length +
+      filteredVerified.length +
+      filteredRWA.length +
+      filteredImported.length +
+      filteredCommunity.length;
+
+    const maxBatch = Math.max(0, Math.ceil(tokenRowsCount / BALANCE_QUERY_BATCH_SIZE) - 1);
+    if (balanceBatchIndex >= maxBatch) return;
+
+    const timer = window.setTimeout(() => {
+      setBalanceBatchIndex((prev) => Math.min(prev + 1, maxBatch));
+    }, 120);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    open,
+    showBalances,
+    balancesReady,
+    balanceBatchIndex,
+    filteredFavorites.length,
+    filteredRecent.length,
+    filteredVerified.length,
+    filteredRWA.length,
+    filteredImported.length,
+    filteredCommunity.length,
+  ]);
 
   if (!mounted) return null;
 
   const totalCount = tokens.length + filteredCommunityTokens.length;
+  const showRowBalances = showBalances && balancesReady;
+  const showCommunityBalances = showRowBalances;
+  const hasRecentSection = filteredRecent.length > 0;
+
+  let absoluteRowIndex = 0;
+  const shouldShowBalanceForCurrentRow = (enabled: boolean) => {
+    const allow = enabled && absoluteRowIndex < (balanceBatchIndex + 1) * BALANCE_QUERY_BATCH_SIZE;
+    absoluteRowIndex += 1;
+    return allow;
+  };
 
   return (
     <>
@@ -323,6 +562,54 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             className="flex-1 overflow-y-auto overscroll-contain px-3 py-2"
             style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
           >
+            {/* ── Favorites section ── */}
+            {filteredFavorites.length > 0 && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px 4px", marginBottom: 2 }}>
+                  <Star style={{ width: 11, height: 11, color: "#facc15", fill: "#facc15" }} />
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Favorites
+                  </span>
+                </div>
+                {filteredFavorites.map((token, i) => (
+                  <TokenRow
+                    key={token.address}
+                    token={token}
+                    userAddress={userAddress}
+                    index={i}
+                    onClick={() => handleSelect(token)}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
+                    isFavorite
+                    onToggleFavorite={() => onToggleFavorite?.(token)}
+                  />
+                ))}
+              </>
+            )}
+
+            {/* ── Recent tokens section ── */}
+            {hasRecentSection && (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px 4px", marginBottom: 2 }}>
+                  <Clock style={{ width: 11, height: 11, color: "#818cf8" }} />
+                  <span style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.3)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Recent
+                  </span>
+                </div>
+                {filteredRecent.map((token, i) => (
+                  <TokenRow
+                    key={token.address}
+                    token={token}
+                    userAddress={userAddress}
+                    index={i}
+                    onClick={() => handleSelect(token)}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
+                    isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
+                    onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
+                  />
+                ))}
+              </>
+            )}
+
             {/* ── Verified tokens ── */}
             {filteredVerified.length > 0 && (
               <>
@@ -339,6 +626,9 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
+                    isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
+                    onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
               </>
@@ -360,7 +650,10 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
                     showRwaBadge
+                    isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
+                    onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
               </>
@@ -382,15 +675,18 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                     userAddress={userAddress}
                     index={i}
                     onClick={() => handleSelect(token)}
+                    showBalance={shouldShowBalanceForCurrentRow(showRowBalances)}
                     onDelete={onDelete}
                     resetHolding={resetHoldingKey}
+                    isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
+                    onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                   />
                 ))}
               </>
             )}
 
             {/* ── Community Made section ── */}
-            {(filteredCommunityTokens.length > 0 || loadingCommunity) && (
+            {(filteredCommunity.length > 0 || loadingCommunity) && (
               <>
                 <div style={{ padding: "10px 12px 4px", display: "flex", alignItems: "center", gap: 8 }}>
                   <Users style={{ width: 11, height: 11, color: "#a78bfa" }} />
@@ -399,21 +695,24 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
                   </span>
                 </div>
 
-                {loadingCommunity && filteredCommunityTokens.length === 0 ? (
+                {loadingCommunity && filteredCommunity.length === 0 ? (
                   <div style={{ padding: "16px 12px", display: "flex", alignItems: "center", gap: 8 }}>
                     <div style={{ width: 14, height: 14, border: "2px solid rgba(139,92,246,0.2)", borderTopColor: "#a78bfa", borderRadius: "50%", animation: "spin 1s linear infinite" }} />
                     <span style={{ fontSize: 12, color: "rgba(255,255,255,0.2)" }}>Loading community tokens…</span>
                   </div>
                 ) : (
-                  filteredCommunityTokens.map((token, i) => (
+                  filteredCommunity.map((token, i) => (
                     <CommunityTokenRow
                       key={token.address}
                       token={token}
                       userAddress={userAddress}
                       index={i}
                       onClick={() => handleSelect(token)}
+                      showBalance={shouldShowBalanceForCurrentRow(showCommunityBalances)}
                       onDelete={handleDeleteCommunity}
                       resetHolding={resetHoldingKey}
+                      isFavorite={favoriteAddressSet.has(token.address.toLowerCase())}
+                      onToggleFavorite={onToggleFavorite ? () => onToggleFavorite(token) : undefined}
                     />
                   ))
                 )}
@@ -421,7 +720,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             )}
 
             {/* Empty state */}
-            {filteredVerified.length === 0 && filteredImported.length === 0 && filteredRWA.length === 0 && filteredCommunityTokens.length === 0 && !showImportButton && !loadingCommunity && (
+            {filteredFavorites.length === 0 && !hasRecentSection && filteredVerified.length === 0 && filteredImported.length === 0 && filteredRWA.length === 0 && filteredCommunity.length === 0 && !showImportButton && !loadingCommunity && (
               <div className="flex flex-col items-center justify-center py-16 gap-3">
                 <div className="w-12 h-12 rounded-2xl flex items-center justify-center" style={{ background: "rgba(255,255,255,0.04)" }}>
                   <Search className="w-5 h-5 text-white/20" />
@@ -593,27 +892,34 @@ function TokenRow({
   userAddress,
   index,
   onClick,
+  showBalance,
   onDelete,
   resetHolding,
   showRwaBadge,
+  isFavorite,
+  onToggleFavorite,
 }: {
   token: Token;
   userAddress?: string;
   index: number;
   onClick: () => void;
+  showBalance?: boolean;
   onDelete?: (address: string) => void;
   resetHolding?: number;
   showRwaBadge?: boolean;
+  isFavorite?: boolean;
+  onToggleFavorite?: () => void;
 }) {
   const isNativeToken = token.address === "0x0000000000000000000000000000000000000000";
+  const shouldQueryBalance = Boolean(showBalance && userAddress);
   const { data: balance } = useBalance({
-    address: userAddress as `0x${string}` | undefined,
-    ...(isNativeToken ? {} : { token: token.address as `0x${string}` }),
+    address: shouldQueryBalance ? (userAddress as `0x${string}`) : undefined,
+    ...(isNativeToken || !shouldQueryBalance ? {} : { token: token.address as `0x${string}` }),
   });
 
   let displayBalance = "";
   try {
-    if (balance && userAddress) {
+    if (balance && userAddress && showBalance) {
       const formatted = formatAmount(balance.value, balance.decimals);
       const num = parseFloat(formatted);
       displayBalance =
@@ -633,13 +939,20 @@ function TokenRow({
       isUnverified={!!(onDelete && !token.verified)} 
       onDelete={() => onDelete?.(token.address)}
     >
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         data-testid={`button-select-token-${token.symbol}`}
         onClick={onClick}
         onPointerDown={() => setPressed(true)}
         onPointerUp={() => setPressed(false)}
         onPointerLeave={() => setPressed(false)}
         onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onClick();
+            return;
+          }
           if ((e.key === "Delete" || e.key === "Backspace") && onDelete && !token.verified) {
             e.preventDefault();
             onDelete(token.address);
@@ -661,7 +974,7 @@ function TokenRow({
             transition: "opacity 0.12s, transform 0.12s",
           }}
         />
-        <div className="flex items-center gap-3 min-w-0 pl-1.5">
+        <div className="flex items-center gap-3 min-w-0 flex-1 pl-1.5">
           <div className="relative flex-shrink-0">
             <div className="w-9 h-9 rounded-full overflow-hidden" style={{ boxShadow: "0 0 0 1px rgba(255,255,255,0.08)" }}>
               <img
@@ -712,14 +1025,31 @@ function TokenRow({
             </p>
           </div>
         </div>
-        {userAddress && displayBalance && (
-          <div className="flex-shrink-0 ml-2 text-right">
-            <p className="text-xs font-mono font-medium tabular-nums" data-testid={`text-balance-${token.symbol}`} style={{ color: "rgba(255,255,255,0.7)" }}>
+        <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+          {!!(showBalance && userAddress && displayBalance) && (
+            <p className="text-xs font-mono font-medium tabular-nums text-right" data-testid={`text-balance-${token.symbol}`} style={{ color: "rgba(255,255,255,0.7)" }}>
               {displayBalance}
             </p>
-          </div>
-        )}
-      </button>
+          )}
+          {onToggleFavorite && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+              aria-label={isFavorite ? "Unfavorite token" : "Favorite token"}
+              aria-pressed={!!isFavorite}
+              className="flex-shrink-0 p-1 rounded-full hover:bg-white/10 transition-colors"
+            >
+              <Star
+                className="w-4 h-4"
+                style={{
+                  color: isFavorite ? "#facc15" : "rgba(255,255,255,0.25)",
+                  fill: isFavorite ? "#facc15" : "none",
+                }}
+              />
+            </button>
+          )}
+        </div>
+      </div>
     </HoldToRevealRow>
   );
 }
@@ -731,24 +1061,31 @@ function CommunityTokenRow({
   userAddress,
   index,
   onClick,
+  showBalance,
   onDelete,
   resetHolding,
+  isFavorite,
+  onToggleFavorite,
 }: {
   token: CommunityToken;
   userAddress?: string;
   index: number;
   onClick: () => void;
+  showBalance?: boolean;
   onDelete?: (address: string) => void;
   resetHolding?: number;
+  isFavorite?: boolean;
+  onToggleFavorite?: () => void;
 }) {
+  const shouldQueryBalance = Boolean(showBalance && userAddress);
   const { data: balance } = useBalance({
-    address: userAddress as `0x${string}` | undefined,
-    token: token.address as `0x${string}`,
+    address: shouldQueryBalance ? (userAddress as `0x${string}`) : undefined,
+    ...(shouldQueryBalance ? { token: token.address as `0x${string}` } : {}),
   });
 
   let displayBalance = "";
   try {
-    if (balance && userAddress) {
+    if (balance && userAddress && showBalance) {
       const formatted = formatAmount(balance.value, balance.decimals);
       const num = parseFloat(formatted);
       displayBalance = num > 0 ? (num < 0.0001 ? "<0.0001" : num >= 1000 ? num.toLocaleString(undefined, { maximumFractionDigits: 2 }) : formatted) : "";
@@ -763,12 +1100,19 @@ function CommunityTokenRow({
       isUnverified={!!onDelete} 
       onDelete={() => onDelete?.(token.address)}
     >
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         onClick={onClick}
         onPointerDown={() => setPressed(true)}
         onPointerUp={() => setPressed(false)}
         onPointerLeave={() => setPressed(false)}
         onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onClick();
+            return;
+          }
           if ((e.key === "Delete" || e.key === "Backspace") && onDelete) {
             e.preventDefault();
             onDelete(token.address);
@@ -790,7 +1134,7 @@ function CommunityTokenRow({
             transition: "opacity 0.12s, transform 0.12s",
           }}
         />
-        <div className="flex items-center gap-3 min-w-0 pl-1.5">
+        <div className="flex items-center gap-3 min-w-0 flex-1 pl-1.5">
           <div className="relative flex-shrink-0">
             <div className="w-9 h-9 rounded-full overflow-hidden" style={{ boxShadow: "0 0 0 1.5px rgba(139,92,246,0.3)" }}>
               <img
@@ -827,15 +1171,31 @@ function CommunityTokenRow({
             <p className="text-[11px] truncate mt-0.5" style={{ color: "rgba(255,255,255,0.35)" }}>{token.name}</p>
           </div>
         </div>
-        {userAddress && displayBalance && (
-          <div className="flex-shrink-0 ml-2 text-right">
-            <p className="text-xs font-mono font-medium tabular-nums" style={{ color: "rgba(255,255,255,0.7)" }}>
+        <div className="flex items-center gap-1 flex-shrink-0 ml-2">
+          {showBalance && userAddress && displayBalance && (
+            <p className="text-xs font-mono font-medium tabular-nums text-right" style={{ color: "rgba(255,255,255,0.7)" }}>
               {displayBalance}
             </p>
-          </div>
-        )}
-      </button>
+          )}
+          {onToggleFavorite && (
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+              aria-label={isFavorite ? "Unfavorite token" : "Favorite token"}
+              aria-pressed={!!isFavorite}
+              className="flex-shrink-0 p-1 rounded-full hover:bg-white/10 transition-colors"
+            >
+              <Star
+                className="w-4 h-4"
+                style={{
+                  color: isFavorite ? "#facc15" : "rgba(255,255,255,0.25)",
+                  fill: isFavorite ? "#facc15" : "none",
+                }}
+              />
+            </button>
+          )}
+        </div>
+      </div>
     </HoldToRevealRow>
   );
 }
-

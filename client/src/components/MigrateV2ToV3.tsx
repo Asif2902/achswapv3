@@ -1,16 +1,19 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { RiskConfirmationModal } from "@/components/RiskConfirmationModal";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
 import { Contract, BrowserProvider } from "ethers";
-import { getTokensByChainId } from "@/data/tokens";
+import { fetchTokensWithCommunity, getTokensByChainId, getUnwrappedAddress } from "@/data/tokens";
 import { formatAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
+import { createAlchemyProvider } from "@/lib/config";
+import { discoverV2PositionsFromExplorer, explorerApiBaseFromTxUrl } from "@/lib/v2-position-discovery";
 import { V3_MIGRATOR_ABI, V3_FACTORY_ABI, V3_POOL_ABI, V3_FEE_TIERS, FEE_TIER_LABELS } from "@/lib/abis/v3";
-import { priceToSqrtPriceX96, sqrtPriceX96ToPrice, getPriceFromAmounts, getFullRangeTicks } from "@/lib/v3-utils";
+import { sqrtPriceX96ToPrice, getPriceFromAmounts, getFullRangeTicks } from "@/lib/v3-utils";
 import {
   ArrowDown,
   AlertCircle,
@@ -39,23 +42,79 @@ const V2_PAIR_ABI = [
   "function allowance(address owner, address spender) external view returns (uint256)",
 ];
 
-const V2_FACTORY_ABI = [
-  "function getPair(address tokenA, address tokenB) external view returns (address pair)",
-  "function allPairsLength() external view returns (uint256)",
-  "function allPairs(uint256) external view returns (address pair)",
-];
-
-const ERC20_ABI = [
-  "function name() view returns (string)",
-  "function symbol() view returns (string)",
-  "function decimals() view returns (uint8)",
-];
-
 const MIGRATION_SLIPPAGE_BPS = 100n; // 1%
+const MIGRATION_SLIPPAGE_BPS_RETRY = 300n; // 3% fallback for volatile pools
+const MIGRATION_SLIPPAGE_BPS_RETRY_WIDE = 700n; // 7% final strict retry before optional zero-min
+const MIGRATION_SLIPPAGE_BPS_RETRY_MAX = 1500n; // 15% final strict retry to avoid immediate zero-min fallback
+const MIN_SQRT_RATIO = 4295128739n;
+const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
+
+function getDisplaySymbol(symbol: string): string {
+  return symbol.toLowerCase() === "wusdc" ? "USDC" : symbol;
+}
+
+function formatPrice(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  if (value === 0) return "0";
+  if (Math.abs(value) < 0.000001) return value.toExponential(4);
+  return value.toFixed(6);
+}
+
+function bigintSqrt(value: bigint): bigint {
+  if (value < 0n) throw new Error("Cannot sqrt negative bigint");
+  if (value < 2n) return value;
+
+  let x0 = value;
+  let x1 = (x0 + 1n) >> 1n;
+
+  while (x1 < x0) {
+    x0 = x1;
+    x1 = (x1 + value / x1) >> 1n;
+  }
+
+  return x0;
+}
+
+function sqrtPriceX96FromV2Reserves(reserve0: bigint, reserve1: bigint): bigint {
+  if (reserve0 <= 0n || reserve1 <= 0n) {
+    throw new Error("Invalid V2 reserves for pool initialization");
+  }
+
+  const ratioX192 = (reserve1 << 192n) / reserve0;
+  const sqrtPrice = bigintSqrt(ratioX192);
+  if (sqrtPrice < MIN_SQRT_RATIO) return MIN_SQRT_RATIO;
+  if (sqrtPrice > MAX_SQRT_RATIO) return MAX_SQRT_RATIO;
+  return sqrtPrice;
+}
 
 function applySlippageMin(amount: bigint, bps: bigint = MIGRATION_SLIPPAGE_BPS): bigint {
   if (amount <= 0n) return 0n;
   return (amount * (10_000n - bps)) / 10_000n;
+}
+
+function computeAdaptiveSlippageBps(priceDiffPercent: number | null): bigint {
+  if (!priceDiffPercent || !Number.isFinite(priceDiffPercent) || priceDiffPercent <= 0 || priceDiffPercent >= 99.9) {
+    return MIGRATION_SLIPPAGE_BPS;
+  }
+
+  const scaledPercentBps = Math.round(priceDiffPercent * 100); // % -> bps
+  const withSafety = Math.max(Number(MIGRATION_SLIPPAGE_BPS), scaledPercentBps + 10); // +0.10%
+  const bounded = Math.min(withSafety, Number(MIGRATION_SLIPPAGE_BPS_RETRY_MAX));
+  return BigInt(bounded);
+}
+
+function isPriceSlippageCheckError(error: unknown): boolean {
+  if (!error) return false;
+
+  const message = typeof error === "object" && error !== null && "message" in error
+    ? String((error as { message?: unknown }).message ?? "")
+    : String(error);
+
+  const reason = typeof error === "object" && error !== null && "reason" in error
+    ? String((error as { reason?: unknown }).reason ?? "")
+    : "";
+
+  return message.includes("Price slippage check") || reason.includes("Price slippage check");
 }
 
 interface V2Position {
@@ -97,43 +156,122 @@ export function MigrateV2ToV3() {
   const [v3PoolInfo, setV3PoolInfo] = useState<V3PoolInfo | null>(null);
   const [isCheckingPool, setIsCheckingPool] = useState(false);
   const [priceWarningConfirmed, setPriceWarningConfirmed] = useState(false);
+  const [zeroMinConfirmed, setZeroMinConfirmed] = useState(false);
+  const [confirmModalType, setConfirmModalType] = useState<"price" | "zero-min" | null>(null);
+  const [tokens, setTokens] = useState<Token[]>([]);
 
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { toast } = useToast();
 
   const contracts = chainId ? getContractsForChain(chainId) : null;
-  const tokens = chainId ? getTokensByChainId(chainId) : [];
+
+  useEffect(() => {
+    if (!chainId) {
+      setTokens([]);
+      return;
+    }
+
+    let cancelled = false;
+    const loadTokens = async () => {
+      try {
+        const chainTokens = await fetchTokensWithCommunity(chainId);
+
+        const importedKey = `importedTokens:${chainId}`;
+        let importedTokens: Token[] = [];
+        try {
+          const raw = localStorage.getItem(importedKey);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            importedTokens = Array.isArray(parsed) ? parsed : [];
+          }
+        } catch {
+          importedTokens = [];
+        }
+
+        const deduped = new Map<string, Token>();
+        for (const token of [...chainTokens, ...importedTokens]) {
+          deduped.set(token.address.toLowerCase(), token);
+        }
+
+        if (!cancelled) {
+          setTokens(Array.from(deduped.values()));
+        }
+      } catch {
+        if (!cancelled) {
+          setTokens(getTokensByChainId(chainId));
+        }
+      }
+    };
+
+    loadTokens();
+    return () => {
+      cancelled = true;
+    };
+  }, [chainId]);
+
+  const getDisplayTokenMeta = useCallback((token: Token) => {
+    const fallbackLogo = token.logoURI || "/img/logos/unknown-token.png";
+    if (!chainId) {
+      return {
+        symbol: getDisplaySymbol(token.symbol),
+        logoURI: fallbackLogo,
+      };
+    }
+
+    const unwrappedAddress = getUnwrappedAddress(chainId, token.address);
+    if (unwrappedAddress) {
+      const unwrappedToken = tokens.find(
+        (t) => t.address.toLowerCase() === unwrappedAddress.toLowerCase(),
+      );
+      if (unwrappedToken) {
+        return {
+          symbol: getDisplaySymbol(unwrappedToken.symbol),
+          logoURI: unwrappedToken.logoURI || fallbackLogo,
+        };
+      }
+    }
+
+    return {
+      symbol: getDisplaySymbol(token.symbol),
+      logoURI: fallbackLogo,
+    };
+  }, [chainId, tokens]);
 
   // ── Check migrator ──────────────────────────────────────────────────────────
   useEffect(() => {
     const checkMigrator = async () => {
-      if (!contracts || !window.ethereum) return;
+      if (!contracts || !chainId) return;
       try {
-        const provider = new BrowserProvider(window.ethereum);
+        const provider = createAlchemyProvider(chainId);
         const code = await provider.getCode(contracts.v3.migrator);
         setMigratorExists(code !== "0x" && code !== "0x0");
       } catch { setMigratorExists(false); }
     };
     checkMigrator();
-  }, [contracts]);
+  }, [contracts, chainId]);
 
   // ── Check V3 pool ───────────────────────────────────────────────────────────
   useEffect(() => {
+    let cancelled = false;
+
     const checkV3Pool = async () => {
-      if (!selectedPosition || !contracts || !window.ethereum) { setV3PoolInfo(null); return; }
+      if (!selectedPosition || !contracts || !chainId) { setV3PoolInfo(null); return; }
       setIsCheckingPool(true);
+      setV3PoolInfo(null);
       try {
-        const provider = new BrowserProvider(window.ethereum);
+        const provider = createAlchemyProvider(chainId);
         const factory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, provider);
         const poolAddress = await factory.getPool(
           selectedPosition.token0.address,
           selectedPosition.token1.address,
           selectedFee,
         );
+        if (cancelled) return;
         if (poolAddress && poolAddress !== "0x0000000000000000000000000000000000000000") {
           const pool = new Contract(poolAddress, V3_POOL_ABI, provider);
           const slot0 = await pool.slot0();
+          if (cancelled) return;
           const sqrtPriceX96 = slot0[0];
           const tick = Number(slot0[1]);
           if (sqrtPriceX96 === 0n) {
@@ -147,12 +285,23 @@ export function MigrateV2ToV3() {
         }
       } catch (error) {
         console.error("Error checking V3 pool:", error);
+        if (cancelled) return;
         setV3PoolInfo({ exists: false, address: null, currentPrice: null, currentTick: null, sqrtPriceX96: null });
-      } finally { setIsCheckingPool(false); }
+      } finally {
+        if (!cancelled) {
+          setIsCheckingPool(false);
+        }
+      }
     };
+
     checkV3Pool();
     setPriceWarningConfirmed(false);
-  }, [selectedPosition, selectedFee, contracts]);
+    setZeroMinConfirmed(false);
+    setConfirmModalType(null);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPosition, selectedFee, contracts, chainId]);
 
   const getV2Price = (): number | null => {
     if (!selectedPosition) return null;
@@ -167,112 +316,99 @@ export function MigrateV2ToV3() {
   };
 
   const priceDiff = getPriceDifference();
-  const showPriceWarning = priceDiff && priceDiff.diff > 2 && !priceWarningConfirmed;
+  const isExtremePriceDiff = Boolean(priceDiff && priceDiff.diff > 15);
+  const showPriceWarning = Boolean(v3PoolInfo?.exists && priceDiff && priceDiff.diff > 2 && !priceWarningConfirmed);
+  const showZeroMinWarning = Boolean(v3PoolInfo && !v3PoolInfo.exists && !zeroMinConfirmed);
+  const adaptiveSlippageBps = computeAdaptiveSlippageBps(priceDiff?.diff ?? null);
 
   // ── Load V2 positions ───────────────────────────────────────────────────────
-  const loadPositions = async () => {
-    if (!address || !contracts || !window.ethereum) return;
+  const loadPositions = useCallback(async () => {
+    if (!address || !contracts || !chainId) return;
     setIsLoading(true);
     try {
-      const provider = new BrowserProvider(window.ethereum);
-      const factory = new Contract(contracts.v2.factory, V2_FACTORY_ABI, provider);
-      const pairsLength = await factory.allPairsLength();
-      const userPositions: V2Position[] = [];
-      const maxPairs = Number(pairsLength);
-      const batchSize = 25;
+      const provider = createAlchemyProvider(chainId);
+      const explorerApiBase = explorerApiBaseFromTxUrl(contracts.explorer);
+      if (!explorerApiBase) throw new Error("Could not derive explorer API base URL");
 
-      for (let start = 0; start < maxPairs; start += batchSize) {
-        const end = Math.min(start + batchSize, maxPairs);
-        const indices = Array.from({ length: end - start }, (_, i) => start + i);
+      const discovered = await discoverV2PositionsFromExplorer({
+        ownerAddress: address,
+        factoryAddress: contracts.v2.factory,
+        provider,
+        knownTokens: tokens,
+        apiBaseUrl: explorerApiBase,
+        maxConcurrent: 10,
+      });
 
-        let pairAddresses: string[] = [];
-        try {
-          pairAddresses = await Promise.all(indices.map((i) => factory.allPairs(i)));
-        } catch {
-          for (const i of indices) {
-            try {
-              pairAddresses.push(await factory.allPairs(i));
-            } catch {
-              continue;
-            }
-          }
-        }
+      const userPositions: V2Position[] = discovered.map((pos) => {
+        const token0Known = tokens.find((t) => t.address.toLowerCase() === pos.token0Address.toLowerCase());
+        const token1Known = tokens.find((t) => t.address.toLowerCase() === pos.token1Address.toLowerCase());
 
-        const batchPositions = await Promise.all(
-          pairAddresses.map(async (pairAddress): Promise<V2Position | null> => {
-            try {
-              const pairContract = new Contract(pairAddress, V2_PAIR_ABI, provider);
-              const [lpBalance, token0Address, token1Address, reserves, totalSupply] = await Promise.all([
-                pairContract.balanceOf(address),
-                pairContract.token0(),
-                pairContract.token1(),
-                pairContract.getReserves(),
-                pairContract.totalSupply(),
-              ]);
+        const token0: Token = {
+          address: pos.token0Address,
+          name: token0Known?.name || pos.token0Name,
+          symbol: token0Known?.symbol || pos.token0Symbol,
+          decimals: pos.token0Decimals,
+          logoURI: token0Known?.logoURI || "/img/logos/unknown-token.png",
+          verified: false,
+          chainId,
+        };
 
-              if (lpBalance <= 0n) return null;
+        const token1: Token = {
+          address: pos.token1Address,
+          name: token1Known?.name || pos.token1Name,
+          symbol: token1Known?.symbol || pos.token1Symbol,
+          decimals: pos.token1Decimals,
+          logoURI: token1Known?.logoURI || "/img/logos/unknown-token.png",
+          verified: false,
+          chainId,
+        };
 
-              const t0 = new Contract(token0Address, ERC20_ABI, provider);
-              const t1 = new Contract(token1Address, ERC20_ABI, provider);
-              const [name0, symbol0, decimals0] = await Promise.all([t0.name(), t0.symbol(), t0.decimals()]);
-              const [name1, symbol1, decimals1] = await Promise.all([t1.name(), t1.symbol(), t1.decimals()]);
-
-              const token0: Token = {
-                address: token0Address,
-                name: name0,
-                symbol: symbol0,
-                decimals: Number(decimals0),
-                logoURI: tokens.find(t => t.address.toLowerCase() === token0Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
-                verified: false,
-                chainId: chainId!,
-              };
-              const token1: Token = {
-                address: token1Address,
-                name: name1,
-                symbol: symbol1,
-                decimals: Number(decimals1),
-                logoURI: tokens.find(t => t.address.toLowerCase() === token1Address.toLowerCase())?.logoURI || "/img/logos/unknown-token.png",
-                verified: false,
-                chainId: chainId!,
-              };
-
-              return {
-                pairAddress,
-                token0,
-                token1,
-                lpBalance,
-                totalSupply,
-                reserve0: reserves[0],
-                reserve1: reserves[1],
-                sharePercent: Number((lpBalance * 10000n) / totalSupply) / 100,
-              };
-            } catch {
-              return null;
-            }
-          })
-        );
-
-        for (const pos of batchPositions) {
-          if (pos) userPositions.push(pos);
-        }
-      }
+        return {
+          pairAddress: pos.pairAddress,
+          token0,
+          token1,
+          lpBalance: pos.liquidity,
+          totalSupply: pos.totalSupply,
+          reserve0: pos.reserve0,
+          reserve1: pos.reserve1,
+          sharePercent: Number((pos.liquidity * 10000n) / pos.totalSupply) / 100,
+        };
+      });
 
       setPositions(userPositions);
+      setSelectedPosition((current) => {
+        if (!current) return null;
+        const matchedPosition = userPositions.find(
+          (position) =>
+            position.pairAddress.toLowerCase() === current.pairAddress.toLowerCase(),
+        );
+        return matchedPosition ?? null;
+      });
+      if (userPositions.length === 0) {
+        setSelectedPosition(null);
+      }
       if (userPositions.length === 0) toast({ title: "No V2 positions found", description: "You don't have any V2 liquidity positions to migrate" });
     } catch (error) {
       console.error("Error loading positions:", error);
-      toast({ title: "Failed to load positions", description: "Could not fetch your V2 liquidity positions", variant: "destructive" });
+      toast({ title: "Failed to load positions", description: "Could not fetch your V2 liquidity positions from explorer API", variant: "destructive" });
     } finally { setIsLoading(false); }
-  };
+  }, [address, contracts, chainId, toast, tokens]);
 
   useEffect(() => {
     if (isConnected && address) loadPositions();
-  }, [isConnected, address, chainId]);
+  }, [isConnected, address, chainId, loadPositions]);
 
   // ── Migrate ─────────────────────────────────────────────────────────────────
   const handleMigrate = async () => {
     if (!selectedPosition || !address || !contracts || !window.ethereum || !migratorExists) return;
-    if (showPriceWarning) { toast({ title: "Confirmation required", description: "Please confirm the price difference before migrating", variant: "destructive" }); return; }
+    if (isExtremePriceDiff && !priceWarningConfirmed) {
+      setConfirmModalType("price");
+      return;
+    }
+    if (showPriceWarning) {
+      setConfirmModalType("price");
+      return;
+    }
 
     setIsMigrating(true);
     try {
@@ -282,53 +418,179 @@ export function MigrateV2ToV3() {
       const pairContract = new Contract(selectedPosition.pairAddress, V2_PAIR_ABI, signer);
       const liquidityToMigrate = (selectedPosition.lpBalance * BigInt(percentToMigrate)) / 100n;
 
-      toast({ title: "Approving LP tokens…", description: "Please approve LP token spending" });
+      if (percentToMigrate < 1 || percentToMigrate > 100) {
+        throw new Error("Invalid migration percentage");
+      }
+
+      if (liquidityToMigrate <= 0n) {
+        throw new Error("Selected migration percentage is too small for current LP balance");
+      }
+
+      if (percentToMigrate < 100 && liquidityToMigrate >= selectedPosition.lpBalance) {
+        throw new Error("Migration amount safety check failed");
+      }
+
       const allowance = await pairContract.allowance(address, contracts.v3.migrator);
-      if (allowance < liquidityToMigrate) {
-        const approveTx = await pairContract.approve(contracts.v3.migrator, liquidityToMigrate);
-        await approveTx.wait();
+      if (allowance !== liquidityToMigrate) {
+        try {
+          const approveTx = await pairContract.approve(contracts.v3.migrator, liquidityToMigrate);
+          await approveTx.wait();
+        } catch (approveError) {
+          if (allowance > 0n && liquidityToMigrate > 0n) {
+            const resetTx = await pairContract.approve(contracts.v3.migrator, 0n);
+            await resetTx.wait();
+            const approveTx = await pairContract.approve(contracts.v3.migrator, liquidityToMigrate);
+            await approveTx.wait();
+          } else {
+            throw approveError;
+          }
+        }
       }
 
       const { tickLower, tickUpper } = getFullRangeTicks(selectedFee);
-      const expectedAmount0 = (selectedPosition.reserve0 * liquidityToMigrate) / selectedPosition.totalSupply;
-      const expectedAmount1 = (selectedPosition.reserve1 * liquidityToMigrate) / selectedPosition.totalSupply;
-      const migrateParams = {
+
+      const readProvider = createAlchemyProvider(chainId);
+      const latestPair = new Contract(selectedPosition.pairAddress, V2_PAIR_ABI, readProvider);
+      const latestFactory = new Contract(contracts.v3.factory, V3_FACTORY_ABI, readProvider);
+
+      const readMigrationState = async () => {
+        const [latestReserves, latestTotalSupply, latestPoolAddress] = await Promise.all([
+          latestPair.getReserves(),
+          latestPair.totalSupply(),
+          latestFactory.getPool(selectedPosition.token0.address, selectedPosition.token1.address, selectedFee),
+        ]);
+
+        const reserve0Raw = latestReserves.reserve0 ?? latestReserves[0] ?? 0n;
+        const reserve1Raw = latestReserves.reserve1 ?? latestReserves[1] ?? 0n;
+        const reserve0 = typeof reserve0Raw === "bigint" ? reserve0Raw : BigInt(reserve0Raw.toString());
+        const reserve1 = typeof reserve1Raw === "bigint" ? reserve1Raw : BigInt(reserve1Raw.toString());
+        const totalSupply = typeof latestTotalSupply === "bigint" ? latestTotalSupply : BigInt(latestTotalSupply.toString());
+        const poolExists = !!latestPoolAddress && latestPoolAddress !== "0x0000000000000000000000000000000000000000";
+
+        if (totalSupply <= 0n) {
+          throw new Error("Latest V2 pool supply is zero");
+        }
+
+        return {
+          reserve0,
+          reserve1,
+          totalSupply,
+          poolExists,
+        };
+      };
+
+      const buildMigrateParams = (
+        state: {
+          reserve0: bigint;
+          reserve1: bigint;
+          totalSupply: bigint;
+          poolExists: boolean;
+        },
+        slippageBps: bigint | null,
+      ) => {
+        const expectedAmount0 = (state.reserve0 * liquidityToMigrate) / state.totalSupply;
+        const expectedAmount1 = (state.reserve1 * liquidityToMigrate) / state.totalSupply;
+
+        return {
+          ...baseMigrateParams,
+          amount0Min: slippageBps === null ? 0n : applySlippageMin(expectedAmount0, slippageBps),
+          amount1Min: slippageBps === null ? 0n : applySlippageMin(expectedAmount1, slippageBps),
+        };
+      };
+
+      const baseMigrateParams = {
         pair: selectedPosition.pairAddress,
         liquidityToMigrate,
-        percentageToMigrate: percentToMigrate,
+        // This UI slider already scales LP amount via liquidityToMigrate.
+        // Keep migrator's internal percentage at 100 to avoid double-scaling.
+        percentageToMigrate: 100,
         token0: selectedPosition.token0.address,
         token1: selectedPosition.token1.address,
         fee: selectedFee,
         tickLower,
         tickUpper,
-        amount0Min: applySlippageMin(expectedAmount0),
-        amount1Min: applySlippageMin(expectedAmount1),
         recipient: address,
         deadline: Math.floor(Date.now() / 1000) + 1200,
         refundAsETH: false,
       };
 
-      let receipt;
-      if (v3PoolInfo?.exists) {
-        toast({ title: "Migrating…", description: "Removing V2 liquidity and adding to V3" });
-        const gasEstimate = await migrator.migrate.estimateGas(migrateParams);
-        const tx = await migrator.migrate(migrateParams, { gasLimit: (gasEstimate * 150n) / 100n });
-        receipt = await tx.wait();
-      } else {
-        const v2Price = getV2Price();
-        if (!v2Price) throw new Error("Could not calculate V2 price");
-        const sqrtPriceX96 = priceToSqrtPriceX96(v2Price, selectedPosition.token0.decimals, selectedPosition.token1.decimals);
+      const executeMigration = async (
+        params: ReturnType<typeof buildMigrateParams>,
+        state: {
+          reserve0: bigint;
+          reserve1: bigint;
+          totalSupply: bigint;
+          poolExists: boolean;
+        },
+      ) => {
+        if (state.poolExists) {
+          toast({ title: "Migrating…", description: "Removing V2 liquidity and adding to V3" });
+          const gasEstimate = await migrator.migrate.estimateGas(params);
+          const tx = await migrator.migrate(params, { gasLimit: (gasEstimate * 150n) / 100n });
+          return tx.wait();
+        }
+
+        const sqrtPriceX96 = sqrtPriceX96FromV2Reserves(state.reserve0, state.reserve1);
         toast({ title: "Creating pool & migrating…", description: "Initializing V3 pool and migrating in one transaction" });
         const createData = migrator.interface.encodeFunctionData("createAndInitializePoolIfNecessary", [selectedPosition.token0.address, selectedPosition.token1.address, selectedFee, sqrtPriceX96]);
-        const migrateData = migrator.interface.encodeFunctionData("migrate", [migrateParams]);
+        const migrateData = migrator.interface.encodeFunctionData("migrate", [params]);
         const gasEstimate = await migrator.multicall.estimateGas([createData, migrateData]);
         const tx = await migrator.multicall([createData, migrateData], { gasLimit: (gasEstimate * 150n) / 100n });
-        receipt = await tx.wait();
+        return tx.wait();
+      };
+
+      const initialState = await readMigrationState();
+      const allowZeroMinFallback = !initialState.poolExists && zeroMinConfirmed;
+      const strictAttemptBps = Array.from(
+        new Set([
+          adaptiveSlippageBps,
+          MIGRATION_SLIPPAGE_BPS,
+          MIGRATION_SLIPPAGE_BPS_RETRY,
+          MIGRATION_SLIPPAGE_BPS_RETRY_WIDE,
+          MIGRATION_SLIPPAGE_BPS_RETRY_MAX,
+        ]),
+      ).sort((a, b) => Number(a - b));
+
+      let receipt: Awaited<ReturnType<typeof executeMigration>> | null = null;
+      let lastSlippageError: unknown = null;
+      let stateForAttempt = initialState;
+
+      for (let attempt = 0; attempt < strictAttemptBps.length; attempt++) {
+        const params = buildMigrateParams(stateForAttempt, strictAttemptBps[attempt]);
+        try {
+          receipt = await executeMigration(params, stateForAttempt);
+          break;
+        } catch (error) {
+          if (!isPriceSlippageCheckError(error)) {
+            throw error;
+          }
+
+          lastSlippageError = error;
+          if (attempt < strictAttemptBps.length - 1) {
+            stateForAttempt = await readMigrationState();
+          }
+        }
+      }
+
+      if (!receipt) {
+        if (!allowZeroMinFallback) {
+          if (!initialState.poolExists && !zeroMinConfirmed) {
+            setConfirmModalType("zero-min");
+            setIsMigrating(false);
+            return;
+          }
+          throw (lastSlippageError ?? new Error("Migration failed due to slippage checks"));
+        }
+
+        const relaxedState = await readMigrationState();
+        const relaxedParams = buildMigrateParams(relaxedState, null);
+        receipt = await executeMigration(relaxedParams, relaxedState);
       }
 
       setSelectedPosition(null);
       setV3PoolInfo(null);
       setPriceWarningConfirmed(false);
+      setZeroMinConfirmed(false);
       await loadPositions();
 
       toast({
@@ -439,6 +701,9 @@ export function MigrateV2ToV3() {
             const isSelected = selectedPosition?.pairAddress === position.pairAddress;
             const token0Amount = formatAmount((position.reserve0 * position.lpBalance) / position.totalSupply, position.token0.decimals);
             const token1Amount = formatAmount((position.reserve1 * position.lpBalance) / position.totalSupply, position.token1.decimals);
+            const token0Display = getDisplayTokenMeta(position.token0);
+            const token1Display = getDisplayTokenMeta(position.token1);
+            const v2Price = isSelected ? getV2Price() : null;
 
             return (
               <Card
@@ -455,20 +720,20 @@ export function MigrateV2ToV3() {
                   <div className="flex items-center gap-3 px-4 py-3.5">
                     {/* Overlapping logos */}
                     <div className="relative w-10 h-7 flex-shrink-0">
-                      <img src={position.token0.logoURI} alt={position.token0.symbol}
+                      <img src={token0Display.logoURI} alt={token0Display.symbol}
                         className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-0 top-0 z-10"
                         onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                       />
-                      <img src={position.token1.logoURI} alt={position.token1.symbol}
+                      <img src={token1Display.logoURI} alt={token1Display.symbol}
                         className="w-7 h-7 rounded-full border-2 border-background object-cover absolute left-4 top-0"
                         onError={(e) => { e.currentTarget.src = "/img/logos/unknown-token.png"; }}
                       />
                     </div>
 
                     <div className="flex-1 min-w-0 pl-1">
-                      <p className="font-bold text-sm">{position.token0.symbol}/{position.token1.symbol}</p>
+                      <p className="font-bold text-sm">{token0Display.symbol}/{token1Display.symbol}</p>
                       <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                        {parseFloat(token0Amount).toFixed(4)} {position.token0.symbol} + {parseFloat(token1Amount).toFixed(4)} {position.token1.symbol}
+                        {parseFloat(token0Amount).toFixed(4)} {token0Display.symbol} + {parseFloat(token1Amount).toFixed(4)} {token1Display.symbol}
                       </p>
                     </div>
 
@@ -490,12 +755,12 @@ export function MigrateV2ToV3() {
                         <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                           V3 Fee Tier
                         </p>
-                        <div className="grid grid-cols-5 gap-1">
+                        <div className="grid grid-cols-3 sm:grid-cols-5 gap-1">
                           {FEE_OPTIONS.map((opt) => (
                             <button
                               key={opt.value}
                               onClick={() => setSelectedFee(opt.value)}
-                              className={`flex flex-col items-center py-2 px-1 rounded-lg text-center transition-all ${
+                              className={`flex flex-col items-center py-2 px-1 rounded-lg min-h-[44px] text-center transition-all ${
                                 selectedFee === opt.value
                                   ? "bg-indigo-500/20 border border-indigo-500/50 text-indigo-300"
                                   : "bg-muted/30 border border-transparent text-muted-foreground hover:bg-muted/50"
@@ -579,12 +844,12 @@ export function MigrateV2ToV3() {
                             >
                               <div className="flex items-center justify-between px-3 py-2">
                                 <span className="text-[11px] text-muted-foreground">V2 Price</span>
-                                <span className="text-xs font-mono font-medium">{getV2Price()?.toFixed(6)}</span>
+                                <span className="text-xs font-mono font-medium">{formatPrice(v2Price)}</span>
                               </div>
                               <div className="h-px mx-3 bg-border/30" />
                               <div className="flex items-center justify-between px-3 py-2">
                                 <span className="text-[11px] text-muted-foreground">V3 Price</span>
-                                <span className="text-xs font-mono font-medium">{v3PoolInfo.currentPrice.toFixed(6)}</span>
+                                <span className="text-xs font-mono font-medium">{formatPrice(v3PoolInfo.currentPrice)}</span>
                               </div>
                               {priceDiff && (
                                 <>
@@ -599,11 +864,32 @@ export function MigrateV2ToV3() {
                               )}
                             </div>
                           )}
+
+                          {!v3PoolInfo.exists && (
+                            <div className="rounded-lg overflow-hidden"
+                              style={{ background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.24)" }}
+                            >
+                              <div className="flex items-center justify-between px-3 py-2">
+                                <span className="text-[11px] text-indigo-200/70">V2 Price</span>
+                                <span className="text-xs font-mono font-medium text-indigo-100">{formatPrice(v2Price)}</span>
+                              </div>
+                              <div className="h-px mx-3 bg-indigo-300/20" />
+                              <div className="flex items-center justify-between px-3 py-2">
+                                <span className="text-[11px] text-indigo-200/70">Initial V3 Price</span>
+                                <span className="text-xs font-mono font-medium text-indigo-100">{formatPrice(v2Price)}</span>
+                              </div>
+                              <div className="h-px mx-3 bg-indigo-300/20" />
+                              <div className="flex items-center justify-between px-3 py-2">
+                                <span className="text-[11px] text-indigo-200/70">Difference</span>
+                                <span className="text-xs font-semibold text-emerald-300">0.00%</span>
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
 
                       {/* Price warning */}
-                      {showPriceWarning && (
+                      {showPriceWarning && !isExtremePriceDiff && (
                         <>
                           <div className="mx-4 h-px bg-border/30" />
                           <div className="px-4 py-3 space-y-2.5">
@@ -619,7 +905,9 @@ export function MigrateV2ToV3() {
                               </div>
                             </div>
                             <button
-                              onClick={() => setPriceWarningConfirmed(true)}
+                              onClick={() => {
+                                setConfirmModalType("price");
+                              }}
                               className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
                               style={{
                                 background: "rgba(245,158,11,0.12)",
@@ -627,7 +915,73 @@ export function MigrateV2ToV3() {
                                 color: "#fde68a",
                               }}
                             >
-                              I understand, proceed anyway
+                              Review price warning risks
+                            </button>
+                          </div>
+                        </>
+                      )}
+
+                      {isExtremePriceDiff && !priceWarningConfirmed && (
+                        <>
+                          <div className="mx-4 h-px bg-border/30" />
+                          <div className="px-4 py-3 space-y-2.5">
+                            <div className="flex items-start gap-2.5 p-3 rounded-xl"
+                              style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)" }}
+                            >
+                              <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0 mt-0.5" />
+                              <div className="flex-1">
+                                <p className="text-xs font-semibold text-red-300">Extreme price mismatch detected ({priceDiff?.diff.toFixed(2)}%)</p>
+                                <p className="text-[11px] text-red-300/70 mt-1 leading-relaxed">
+                                  Review the full risk details before migrating.
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setConfirmModalType("price");
+                              }}
+                              className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
+                              style={{
+                                background: "rgba(239,68,68,0.12)",
+                                border: "1px solid rgba(239,68,68,0.3)",
+                                color: "#fecaca",
+                              }}
+                            >
+                              Review price mismatch risks
+                            </button>
+                          </div>
+                        </>
+                      )}
+
+                      {showZeroMinWarning && (
+                        <>
+                          <div className="mx-4 h-px bg-border/30" />
+                          <div className="px-4 py-3 space-y-2.5">
+                            <div
+                              className="flex items-start gap-2.5 p-3 rounded-xl"
+                              style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)" }}
+                            >
+                              <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
+                              <div className="flex-1">
+                                <p className="text-xs font-semibold text-amber-300">New pool uses flexible minimums</p>
+                                <p className="text-[11px] text-amber-400/60 mt-1 leading-relaxed">
+                                  This migration initializes a new V3 pool. By default, strict minimums are used.
+                                  Confirm only if you want to allow a zero-min fallback.
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => {
+                                setConfirmModalType("zero-min");
+                              }}
+                              className="w-full py-2.5 rounded-lg text-xs font-semibold transition-all"
+                              style={{
+                                background: "rgba(245,158,11,0.12)",
+                                border: "1px solid rgba(245,158,11,0.3)",
+                                color: "#fde68a",
+                              }}
+                            >
+                              Review flexible minimum risks
                             </button>
                           </div>
                         </>
@@ -637,32 +991,32 @@ export function MigrateV2ToV3() {
                       <div className="mx-4 h-px bg-border/30" />
                       <div className="px-4 py-3 space-y-3">
                         {/* From → To summary */}
-                        <div className="flex items-center gap-2 p-3 rounded-xl"
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 p-3 rounded-xl"
                           style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
                         >
                           {/* V2 side */}
                           <div className="flex-1 min-w-0">
                             <p className="text-[10px] text-muted-foreground mb-1">From V2</p>
-                            <p className="text-xs font-semibold">{position.token0.symbol}/{position.token1.symbol}</p>
+                            <p className="text-xs font-semibold">{token0Display.symbol}/{token1Display.symbol}</p>
                             <p className="text-[10px] text-muted-foreground mt-0.5 truncate">
-                              {getTokenAmount(position.reserve0, position.token0.decimals)} {position.token0.symbol}
+                              {getTokenAmount(position.reserve0, position.token0.decimals)} {token0Display.symbol}
                             </p>
                             <p className="text-[10px] text-muted-foreground truncate">
-                              {getTokenAmount(position.reserve1, position.token1.decimals)} {position.token1.symbol}
+                              {getTokenAmount(position.reserve1, position.token1.decimals)} {token1Display.symbol}
                             </p>
                           </div>
 
                           {/* Arrow */}
-                          <div className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center"
+                          <div className="flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center self-center"
                             style={{ background: "rgba(99,102,241,0.15)", border: "1px solid rgba(99,102,241,0.3)" }}
                           >
-                            <ArrowDown className="w-3.5 h-3.5 text-indigo-400 -rotate-90" />
+                            <ArrowDown className="w-3.5 h-3.5 text-indigo-400 sm:-rotate-90" />
                           </div>
 
                           {/* V3 side */}
-                          <div className="flex-1 min-w-0 text-right">
+                          <div className="flex-1 min-w-0 text-left sm:text-right">
                             <p className="text-[10px] text-muted-foreground mb-1">To V3</p>
-                            <p className="text-xs font-semibold">{position.token0.symbol}/{position.token1.symbol}</p>
+                            <p className="text-xs font-semibold">{token0Display.symbol}/{token1Display.symbol}</p>
                             <p className="text-[10px] text-indigo-400 mt-0.5">
                               {FEE_TIER_LABELS[selectedFee as keyof typeof FEE_TIER_LABELS]} fee
                             </p>
@@ -676,9 +1030,9 @@ export function MigrateV2ToV3() {
 
                         <Button
                           onClick={handleMigrate}
-                          disabled={!migratorExists || isMigrating || !!showPriceWarning || isCheckingPool}
+                          disabled={!migratorExists || isMigrating || !!showPriceWarning || (isExtremePriceDiff && !priceWarningConfirmed) || isCheckingPool}
                           className="w-full h-11 text-sm font-semibold disabled:opacity-40 transition-all"
-                          style={migratorExists && !isMigrating && !showPriceWarning
+                          style={migratorExists && !isMigrating && !showPriceWarning && !(isExtremePriceDiff && !priceWarningConfirmed)
                             ? { background: "linear-gradient(135deg, #6366f1, #8b5cf6)", border: "none" }
                             : {}
                           }
@@ -690,6 +1044,8 @@ export function MigrateV2ToV3() {
                             </span>
                           ) : showPriceWarning ? (
                             "Confirm price warning above"
+                          ) : isExtremePriceDiff && !priceWarningConfirmed ? (
+                            "Review price mismatch risks"
                           ) : (
                             <span className="flex items-center gap-2">
                               <Zap className="w-4 h-4" />
@@ -705,6 +1061,39 @@ export function MigrateV2ToV3() {
             );
           })}
         </div>
+      )}
+
+      {confirmModalType && (
+        <RiskConfirmationModal
+          open
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) {
+              setConfirmModalType(null);
+            }
+          }}
+          title={confirmModalType === "price" ? "Large Price Difference Detected" : "Flexible Minimums (Zero-Min)"}
+          description={
+            confirmModalType === "price"
+              ? `This migration sees a large mismatch between V2 and V3 pricing (${priceDiff ? `${priceDiff.diff.toFixed(2)}%` : "unknown"}). Execution can be significantly worse than expected.`
+              : "This fallback sets amount0Min and amount1Min to zero so slippage checks won't block migration, but execution can be materially worse if price moves."
+          }
+          warningText={
+            confirmModalType === "price"
+              ? `V2 ${formatPrice(priceDiff?.v2Price ?? null)} vs V3 ${formatPrice(priceDiff?.v3Price ?? null)}. Consider a smaller migration first.`
+              : `Current adaptive strict slippage: ${(Number(adaptiveSlippageBps) / 100).toFixed(2)}%. Use zero-min only as a last resort.`
+          }
+          tone={confirmModalType === "price" ? "danger" : "warning"}
+          confirmPhrase="CONFIRM MIGRATE"
+          confirmButtonLabel="Confirm Migration"
+          onConfirm={() => {
+            if (confirmModalType === "price") {
+              setPriceWarningConfirmed(true);
+            } else {
+              setZeroMinConfirmed(true);
+            }
+            setConfirmModalType(null);
+          }}
+        />
       )}
 
       {/* Refresh */}

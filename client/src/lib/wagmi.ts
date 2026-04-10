@@ -8,9 +8,9 @@ import {
 } from '@rainbow-me/rainbowkit/wallets';
 import { createConfig, http } from 'wagmi';
 import { defineChain } from 'viem';
-import { RPC_CONFIG, FALLBACK_RPC } from './config';
+import { RPC_CONFIG } from './config';
 
-const ARC_WALLET_ADD_RPC = RPC_CONFIG.arcTestnet || FALLBACK_RPC;
+const ARC_WALLET_ADD_RPC = RPC_CONFIG.arcTestnet;
 
 // Define ARC Testnet chain
 export const arcTestnet = defineChain({
