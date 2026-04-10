@@ -80,6 +80,7 @@ type ProtocolDayData = {
   dailyV3VolumeUsd: string;
   dailyRwaVolumeUsd: string;
   dailyTotalFeesUsd: string;
+  dailyRwaFeesUsd?: string;
   dailySwapCount: string;
   activeUsers: string;
   totalTvlUsd: string;
@@ -205,6 +206,10 @@ const protocolChartConfig = {
     label: "Fees",
     color: "hsl(var(--chart-5))",
   },
+  rwaFees: {
+    label: "RWA Fees",
+    color: "hsl(var(--destructive))",
+  },
 } satisfies ChartConfig;
 
 const compositionChartConfig = {
@@ -256,6 +261,7 @@ type VolumeSeriesPoint = {
   v3: number;
   rwa: number;
   fees: number;
+  rwaFees: number;
   swaps: number;
   activeUsers: number;
   tvl: number;
@@ -430,6 +436,7 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
         dailyV3VolumeUsd
         dailyRwaVolumeUsd
         dailyTotalFeesUsd
+        dailyRwaFeesUsd
         dailySwapCount
         activeUsers
         totalTvlUsd
@@ -710,6 +717,7 @@ export default function Pools() {
       v3: parseNum(d.dailyV3VolumeUsd),
       rwa: parseNum(d.dailyRwaVolumeUsd),
       fees: parseNum(d.dailyTotalFeesUsd),
+      rwaFees: parseNum(d.dailyRwaFeesUsd),
       swaps: parseNum(d.dailySwapCount),
       activeUsers: parseNum(d.activeUsers),
       tvl: parseNum(d.totalTvlUsd),
@@ -972,6 +980,7 @@ export default function Pools() {
                               <ChartLegend content={<ChartLegendContent />} />
                               <Area type="monotone" dataKey="total" stroke="var(--color-total)" fill="var(--color-total)" fillOpacity={0.15} strokeWidth={2.2} activeDot={{ r: 4 }} />
                               <Area type="monotone" dataKey="fees" stroke="var(--color-fees)" fill="var(--color-fees)" fillOpacity={0.08} strokeWidth={1.8} activeDot={{ r: 4 }} />
+                              <Area type="monotone" dataKey="rwaFees" stroke="var(--color-rwaFees)" fill="none" strokeWidth={1.6} strokeDasharray="4 4" activeDot={{ r: 4 }} />
                               <Area type="monotone" dataKey="v2" stroke="var(--color-v2)" fill="none" strokeWidth={1.4} activeDot={{ r: 4 }} />
                               <Area type="monotone" dataKey="v3" stroke="var(--color-v3)" fill="none" strokeWidth={1.4} activeDot={{ r: 4 }} />
                               <Area type="monotone" dataKey="rwa" stroke="var(--color-rwa)" fill="none" strokeWidth={1.4} activeDot={{ r: 4 }} />
@@ -998,6 +1007,7 @@ export default function Pools() {
                                 {[
                                   { key: "total", label: protocolChartConfig.total.label, value: selectedVolumePoint.total, color: "var(--color-total)" },
                                   { key: "fees", label: protocolChartConfig.fees.label, value: selectedVolumePoint.fees, color: "var(--color-fees)" },
+                                  { key: "rwaFees", label: protocolChartConfig.rwaFees.label, value: selectedVolumePoint.rwaFees, color: "var(--color-rwaFees)" },
                                   { key: "rwa", label: protocolChartConfig.rwa.label, value: selectedVolumePoint.rwa, color: "var(--color-rwa)" },
                                   { key: "v2", label: protocolChartConfig.v2.label, value: selectedVolumePoint.v2, color: "var(--color-v2)" },
                                   { key: "v3", label: protocolChartConfig.v3.label, value: selectedVolumePoint.v3, color: "var(--color-v3)" },
