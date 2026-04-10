@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Area,
   AreaChart,
@@ -7,7 +7,6 @@ import {
   CartesianGrid,
   Pie,
   PieChart,
-  ResponsiveContainer,
   XAxis,
   YAxis,
 } from "recharts";
@@ -41,9 +40,9 @@ import {
   type ChartConfig,
 } from "@/components/ui/chart";
 import { getContractsForChain } from "@/lib/contracts";
+import { useAccount } from "wagmi";
 
-const SUBGRAPH_SLUG = "ach";
-const SUBGRAPH_BASE_URL = "https://api.studio.thegraph.com/query/1742338";
+const SUBGRAPH_PROXY_URL = "/api/subgraph";
 
 type Maybe<T> = T | null;
 
@@ -180,6 +179,7 @@ type AnalyticsData = {
   rwaUsersCount: number;
   outlierPoolsCount: number;
   targetUser: Maybe<User>;
+  targetUserRank: number | null;
   targetUserDexSwaps: DexSwap[];
   targetUserRwaTrades: RwaTrade[];
   topRwaPairs: RwaPair[];
@@ -254,11 +254,6 @@ function formatCompact(value: number): string {
   return value.toFixed(0);
 }
 
-function formatPercent(value: number): string {
-  if (!Number.isFinite(value)) return "0.00%";
-  return `${value.toFixed(2)}%`;
-}
-
 function parseNum(v: string | number | null | undefined): number {
   if (typeof v === "number") return Number.isFinite(v) ? v : 0;
   if (!v) return 0;
@@ -277,7 +272,7 @@ function formatDate(ts: number): string {
 }
 
 function toDayLabel(unixDay: number): string {
-  const date = new Date(unixDay * 1000);
+  const date = new Date(unixDay * 86400 * 1000);
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
@@ -286,23 +281,21 @@ function normalizeAddressInput(value: string): string {
   return /^0x[a-f0-9]{40}$/.test(trimmed) ? trimmed : "";
 }
 
-async function fetchSubgraph<T>(
-  query: string,
-  variables?: Record<string, unknown>,
-  signal?: AbortSignal,
-): Promise<T> {
-  const key = import.meta.env.VITE_SUBGRAPH_KEY;
-  if (!key) throw new Error("Missing VITE_SUBGRAPH_KEY environment variable");
+async function fetchSubgraph<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+  const payload = { query, variables };
 
-  const res = await fetch(`${SUBGRAPH_BASE_URL}/${SUBGRAPH_SLUG}/version/latest`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify({ query, variables }),
-    signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(SUBGRAPH_PROXY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    res = new Response(null, { status: 599 });
+  }
 
   if (!res.ok) throw new Error(`Subgraph request failed with ${res.status}`);
 
@@ -326,6 +319,31 @@ async function countEntity(entity: string, where?: string): Promise<number> {
   }
 
   return total;
+}
+
+async function userRankByEffectiveVolume(targetUserId: string): Promise<number | null> {
+  if (!targetUserId) return null;
+  let rank = 1;
+  let skip = 0;
+
+  while (true) {
+    const query = `
+      query RankChunk {
+        users(first: 1000, skip: ${skip}, orderBy: totalEffectiveVolumeUsd, orderDirection: desc) {
+          id
+        }
+      }
+    `;
+    const data = await fetchSubgraph<{ users: Array<{ id: string }> }>(query);
+    if (!data.users.length) return null;
+
+    const foundIndex = data.users.findIndex((u) => u.id.toLowerCase() === targetUserId.toLowerCase());
+    if (foundIndex >= 0) return rank + foundIndex;
+
+    rank += data.users.length;
+    if (data.users.length < 1000) return null;
+    skip += 1000;
+  }
 }
 
 async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
@@ -510,10 +528,11 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
     topRwaPairs: RwaPair[];
   }>(query, { wallet: normalizedWallet || "0x0000000000000000000000000000000000000000" });
 
-  const [totalUsersCount, swapUsersCount, rwaUsersCount] = await Promise.all([
+  const [totalUsersCount, swapUsersCount, rwaUsersCount, targetUserRank] = await Promise.all([
     countEntity("users"),
     countEntity("users", "{ swapCount_gt: 0 }"),
     countEntity("users", "{ rwaBuyCount_gt: 0 }"),
+    normalizedWallet ? userRankByEffectiveVolume(normalizedWallet) : Promise.resolve(null),
   ]);
 
   const outlierPoolsCount = await countEntity("pools", "{ flaggedLowLiquidityOutlier: true }");
@@ -535,6 +554,7 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
     rwaUsersCount,
     outlierPoolsCount,
     targetUser: snapshot.targetUser,
+    targetUserRank,
     targetUserDexSwaps: snapshot.targetUserDexSwaps,
     targetUserRwaTrades: snapshot.targetUserRwaTrades,
     topRwaPairs: snapshot.topRwaPairs,
@@ -582,12 +602,36 @@ function EmptyState({ text }: { text: string }) {
 }
 
 export default function Pools() {
-  const [walletInput, setWalletInput] = useState("0x7d9Cb2994D86B6a4e65761B5d81DADa69ce54a7f");
+  const { address } = useAccount();
+  const [walletInput, setWalletInput] = useState("0x7d9cb2994d86b6a4e65761b5d81dada69ce54a7f");
   const [appliedWallet, setAppliedWallet] = useState("0x7d9cb2994d86b6a4e65761b5d81dada69ce54a7f");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsData | null>(null);
+  const [manualOverride, setManualOverride] = useState(false);
+  const [refreshNonce, setRefreshNonce] = useState(0);
+
+  useEffect(() => {
+    const preferred = normalizeAddressInput(address ?? "") || "0x7d9cb2994d86b6a4e65761b5d81dada69ce54a7f";
+    if (!manualOverride) {
+      setWalletInput(preferred);
+      setAppliedWallet(preferred);
+    }
+  }, [address, manualOverride]);
+
+  useEffect(() => {
+    const normalized = normalizeAddressInput(walletInput);
+    if (!walletInput.trim()) {
+      setError(null);
+      return;
+    }
+    if (!normalized) {
+      return;
+    }
+    setError(null);
+    setAppliedWallet(normalized);
+  }, [walletInput]);
 
   useEffect(() => {
     let disposed = false;
@@ -610,11 +654,11 @@ export default function Pools() {
       }
     }
 
-    run(true);
+    run(refreshNonce === 0);
     return () => {
       disposed = true;
     };
-  }, [appliedWallet]);
+  }, [appliedWallet, refreshNonce]);
 
   const protocol = data?.protocol;
 
@@ -657,7 +701,7 @@ export default function Pools() {
 
   return (
     <div className="container mx-auto max-w-7xl px-4 pb-20 pt-4 sm:pt-8">
-      <div className="relative overflow-hidden rounded-2xl border border-border/40 bg-gradient-to-br from-primary/20 via-background to-background p-6 shadow-2xl">
+      <div className="relative overflow-hidden rounded-2xl border border-border/40 bg-gradient-to-br from-primary/20 via-background to-background p-4 shadow-2xl sm:p-6">
         <div className="absolute -left-12 top-0 h-40 w-40 rounded-full bg-primary/20 blur-3xl" />
         <div className="absolute right-0 top-0 h-48 w-48 rounded-full bg-sky-400/10 blur-3xl" />
 
@@ -670,11 +714,10 @@ export default function Pools() {
             <h1 className="text-3xl font-black tracking-tight text-foreground sm:text-4xl">Analytics</h1>
             <p className="mt-3 text-sm text-muted-foreground sm:text-base">
               Platform-wide TVL, volume, swaps, fees, outlier diagnostics, user leaderboard, and wallet-level behavior
-              (raw vs effective) from the Arc analytics subgraph.
+              (raw vs effective) powered by Arc analytics index data.
             </p>
             {data ? (
               <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <Badge variant="outline" className="bg-background/60">Deployment {data.meta.deployment.slice(0, 12)}...</Badge>
                 <Badge variant="outline" className="bg-background/60">Block {formatCompact(data.meta.blockNumber)}</Badge>
                 <Badge variant={data.meta.hasIndexingErrors ? "destructive" : "secondary"}>
                   {data.meta.hasIndexingErrors ? "Indexing Errors" : "Healthy"}
@@ -683,7 +726,7 @@ export default function Pools() {
             ) : null}
           </div>
 
-          <div className="w-full max-w-xl rounded-xl border border-border/50 bg-card/70 p-4 backdrop-blur">
+          <div className="w-full max-w-xl rounded-xl border border-border/50 bg-card/70 p-3 backdrop-blur sm:p-4">
             <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
               User analytics wallet
             </label>
@@ -692,32 +735,34 @@ export default function Pools() {
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={walletInput}
-                  onChange={(e) => setWalletInput(e.target.value)}
+                  onChange={(e) => {
+                    setManualOverride(true);
+                    setWalletInput(e.target.value);
+                  }}
                   placeholder="0x..."
                   className="pl-9"
                 />
               </div>
               <Button
-                onClick={() => {
-                  const normalized = normalizeAddressInput(walletInput);
-                  if (normalized) setAppliedWallet(normalized);
-                  else setError("Enter a valid wallet address");
-                }}
-                className="sm:min-w-[120px]"
-              >
-                Analyze
-              </Button>
-              <Button
                 variant="outline"
                 onClick={() => {
                   if (!appliedWallet) return;
-                  setAppliedWallet(appliedWallet);
+                  setRefreshNonce((n) => n + 1);
                 }}
                 disabled={refreshing || loading}
                 className="sm:min-w-[110px]"
               >
                 <RefreshCcw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
                 Refresh
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setManualOverride(false);
+                }}
+                className="sm:min-w-[132px]"
+              >
+                Use Connected Wallet
               </Button>
             </div>
           </div>
@@ -792,7 +837,7 @@ export default function Pools() {
           </section>
 
           <Tabs defaultValue="platform" className="mt-8">
-            <TabsList className="grid w-full grid-cols-2 bg-card/70 p-1 sm:w-[360px]">
+            <TabsList className="grid w-full grid-cols-2 bg-card/70 p-1 sm:w-[420px]">
               <TabsTrigger value="platform">Platform Analytics</TabsTrigger>
               <TabsTrigger value="user">User Analytics</TabsTrigger>
             </TabsList>
@@ -808,7 +853,7 @@ export default function Pools() {
                   </CardHeader>
                   <CardContent>
                     {volumeSeries.length ? (
-                      <ChartContainer config={protocolChartConfig} className="h-[320px] w-full">
+                      <ChartContainer config={protocolChartConfig} className="h-[280px] w-full sm:h-[320px]">
                         <AreaChart data={volumeSeries} margin={{ left: 0, right: 8, top: 8 }}>
                           <CartesianGrid vertical={false} strokeDasharray="3 3" />
                           <XAxis dataKey="label" tickMargin={8} axisLine={false} tickLine={false} />
@@ -842,7 +887,7 @@ export default function Pools() {
                   </CardHeader>
                   <CardContent>
                     {compositionSeries.length ? (
-                      <ChartContainer config={compositionChartConfig} className="h-[320px] w-full">
+                      <ChartContainer config={compositionChartConfig} className="h-[280px] w-full sm:h-[320px]">
                         <PieChart>
                           <ChartTooltip content={<ChartTooltipContent formatter={(v) => formatUsd(Number(v))} />} />
                           <Pie
@@ -981,7 +1026,7 @@ export default function Pools() {
                   </CardHeader>
                   <CardContent>
                     {data.topRwaPairs.length ? (
-                      <ChartContainer config={protocolChartConfig} className="h-[300px] w-full">
+                      <ChartContainer config={protocolChartConfig} className="h-[260px] w-full sm:h-[300px]">
                         <BarChart data={data.topRwaPairs.slice(0, 8).map((p) => ({
                           symbol: p.symbol,
                           volume: parseNum(p.volumeUsd),
@@ -1026,6 +1071,12 @@ export default function Pools() {
                       icon={<Activity className="h-4 w-4" />}
                     />
                     <StatTile
+                      title="Wallet Rank"
+                      value={data.targetUserRank ? `#${formatCompact(data.targetUserRank)}` : "Unranked"}
+                      subValue="Ranked by total effective volume"
+                      icon={<Users className="h-4 w-4" />}
+                    />
+                    <StatTile
                       title="Fees Paid"
                       value={formatUsd(parseNum(data.targetUser.totalFeesPaidUsd))}
                       subValue={`RWA ${formatUsd(parseNum(data.targetUser.rwaFeesPaidUsd))}`}
@@ -1040,7 +1091,7 @@ export default function Pools() {
                         <CardDescription>Raw vs effective DEX accounting plus RWA contribution.</CardDescription>
                       </CardHeader>
                       <CardContent>
-                        <ChartContainer config={userWalletChartConfig} className="h-[300px] w-full">
+                        <ChartContainer config={userWalletChartConfig} className="h-[240px] w-full sm:h-[300px]">
                           <BarChart data={userVolumeBars} margin={{ left: 0, right: 8 }}>
                             <CartesianGrid vertical={false} strokeDasharray="3 3" />
                             <XAxis dataKey="key" axisLine={false} tickLine={false} />
@@ -1061,6 +1112,12 @@ export default function Pools() {
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">Address</span>
                           <span className="font-semibold text-foreground">{shortenAddress(data.targetUser.id)}</span>
+                        </div>
+                        <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
+                          <span className="text-muted-foreground">Wallet Rank</span>
+                          <span className="font-semibold text-foreground">
+                            {data.targetUserRank ? `#${formatCompact(data.targetUserRank)}` : "Unranked"}
+                          </span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">Liquidity Provided</span>
@@ -1178,7 +1235,7 @@ export default function Pools() {
           <Card className="mt-8 border-border/50 bg-card/60">
             <CardContent className="flex flex-col gap-2 p-4 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
               <span>
-                Source: Graph Studio subgraph `{SUBGRAPH_SLUG}` via `VITE_SUBGRAPH_KEY`.
+                Source: Arc analytics index.
               </span>
               <a
                 href={`${explorerBase}`}
