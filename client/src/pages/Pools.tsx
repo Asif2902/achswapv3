@@ -5,6 +5,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   Pie,
   PieChart,
   XAxis,
@@ -686,11 +687,11 @@ export default function Pools() {
   }, [data]);
 
   const compositionSeries = useMemo(() => {
-    if (!protocol) return [] as Array<{ name: string; value: number; fill: string }>;
+    if (!protocol) return [] as Array<{ key: "v2" | "v3" | "rwa"; label: string; value: number; fill: string }>;
     return [
-      { name: "V2", value: parseNum(protocol.v2VolumeUsd), fill: "hsl(var(--chart-2))" },
-      { name: "V3", value: parseNum(protocol.v3VolumeUsd), fill: "hsl(var(--chart-3))" },
-      { name: "RWA", value: parseNum(protocol.rwaVolumeUsd), fill: "hsl(var(--chart-4))" },
+      { key: "v2", label: "V2", value: parseNum(protocol.v2VolumeUsd), fill: "#2563eb" },
+      { key: "v3", label: "V3", value: parseNum(protocol.v3VolumeUsd), fill: "#f97316" },
+      { key: "rwa", label: "RWA", value: parseNum(protocol.rwaVolumeUsd), fill: "#8b5cf6" },
     ];
   }, [protocol]);
 
@@ -883,7 +884,14 @@ export default function Pools() {
                                   const key = String(name ?? "");
                                   const isCount = key === "swaps" || key === "activeUsers";
                                   const rendered = isCount ? formatCompact(Number(value)) : formatUsd(Number(value));
-                                  return rendered;
+                                  const label =
+                                    protocolChartConfig[key as keyof typeof protocolChartConfig]?.label ?? key;
+                                  return (
+                                    <div className="flex min-w-[10rem] items-center justify-between gap-3">
+                                      <span className="text-muted-foreground">{label}</span>
+                                      <span className="font-mono font-medium text-foreground">{rendered}</span>
+                                    </div>
+                                  );
                                 }}
                               />
                             }
@@ -902,7 +910,7 @@ export default function Pools() {
                   </CardContent>
                 </Card>
 
-                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))] shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Volume Composition</CardTitle>
                     <CardDescription>Share of cumulative volume by execution stack.</CardDescription>
@@ -911,22 +919,87 @@ export default function Pools() {
                     {compositionSeries.length ? (
                       <ChartContainer config={compositionChartConfig} className="h-[220px] w-full sm:h-[320px]">
                         <PieChart>
-                          <ChartTooltip content={<ChartTooltipContent formatter={(v) => formatUsd(Number(v))} />} />
+                          <ChartTooltip
+                            content={
+                              <ChartTooltipContent
+                                nameKey="key"
+                                formatter={(value, name) => {
+                                  const key = String(name ?? "") as keyof typeof compositionChartConfig;
+                                  const label = compositionChartConfig[key]?.label ?? key.toUpperCase();
+                                  return (
+                                    <div className="flex min-w-[9rem] items-center justify-between gap-3">
+                                      <span className="text-muted-foreground">{label}</span>
+                                      <span className="font-mono font-medium text-foreground">
+                                        {formatUsd(Number(value))}
+                                      </span>
+                                    </div>
+                                  );
+                                }}
+                              />
+                            }
+                          />
                           <Pie
                             data={compositionSeries}
                             dataKey="value"
-                            nameKey="name"
+                            nameKey="key"
                             cx="50%"
                             cy="50%"
                             innerRadius={65}
                             outerRadius={108}
                             stroke="none"
-                          />
+                          >
+                            {compositionSeries.map((entry) => (
+                              <Cell key={entry.key} fill={entry.fill} />
+                            ))}
+                          </Pie>
                           <ChartLegend content={<ChartLegendContent />} />
                         </PieChart>
                       </ChartContainer>
                     ) : (
                       <EmptyState text="No protocol composition data available." />
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5 lg:col-span-2">
+                  <CardHeader>
+                    <CardTitle className="text-lg">Top RWA Pairs</CardTitle>
+                    <CardDescription>Buy/redeem flow and reserve health by pair.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
+                    {data.topRwaPairs.length ? (
+                      <ChartContainer config={protocolChartConfig} className="h-[230px] w-full sm:h-[300px]">
+                        <BarChart
+                          data={data.topRwaPairs.slice(0, 8).map((p) => ({
+                            symbol: p.symbol,
+                            volume: parseNum(p.volumeUsd),
+                            reserve: parseNum(p.reserveUsd),
+                          }))}
+                          margin={{ left: 0, right: 8 }}
+                        >
+                          <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                          <XAxis dataKey="symbol" axisLine={false} tickLine={false} />
+                          <YAxis axisLine={false} tickLine={false} tickFormatter={(v) => formatCompact(Number(v))} width={62} />
+                          <ChartTooltip
+                            content={
+                              <ChartTooltipContent
+                                labelFormatter={(label) => `Pair ${String(label ?? "")}`}
+                                formatter={(value) => (
+                                  <div className="flex min-w-[9rem] items-center justify-between gap-3">
+                                    <span className="text-muted-foreground">Volume</span>
+                                    <span className="font-mono font-medium text-foreground">
+                                      {formatUsd(Number(value))}
+                                    </span>
+                                  </div>
+                                )}
+                              />
+                            }
+                          />
+                          <Bar dataKey="volume" fill="var(--color-total)" radius={[6, 6, 0, 0]} />
+                        </BarChart>
+                      </ChartContainer>
+                    ) : (
+                      <EmptyState text="No RWA pair activity found yet." />
                     )}
                   </CardContent>
                 </Card>
@@ -1077,31 +1150,6 @@ export default function Pools() {
                   </CardContent>
                 </Card>
 
-                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
-                  <CardHeader>
-                    <CardTitle className="text-lg">Top RWA Pairs</CardTitle>
-                    <CardDescription>Buy/redeem flow and reserve health by pair.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
-                    {data.topRwaPairs.length ? (
-                      <ChartContainer config={protocolChartConfig} className="h-[230px] w-full sm:h-[300px]">
-                        <BarChart data={data.topRwaPairs.slice(0, 8).map((p) => ({
-                          symbol: p.symbol,
-                          volume: parseNum(p.volumeUsd),
-                          reserve: parseNum(p.reserveUsd),
-                        }))} margin={{ left: 0, right: 8 }}>
-                          <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                          <XAxis dataKey="symbol" axisLine={false} tickLine={false} />
-                          <YAxis axisLine={false} tickLine={false} tickFormatter={(v) => formatCompact(Number(v))} width={62} />
-                          <ChartTooltip content={<ChartTooltipContent formatter={(v) => formatUsd(Number(v))} />} />
-                          <Bar dataKey="volume" fill="var(--color-total)" radius={[6, 6, 0, 0]} />
-                        </BarChart>
-                      </ChartContainer>
-                    ) : (
-                      <EmptyState text="No RWA pair activity found yet." />
-                    )}
-                  </CardContent>
-                </Card>
               </div>
             </TabsContent>
 
