@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Area,
   AreaChart,
@@ -19,7 +19,6 @@ import {
   DollarSign,
   Flame,
   Layers,
-  RefreshCcw,
   Search,
   Sparkles,
   Users,
@@ -613,22 +612,21 @@ function EmptyState({ text }: { text: string }) {
 
 export default function Pools() {
   const { address } = useAccount();
-  const [walletInput, setWalletInput] = useState("0x7d9cb2994d86b6a4e65761b5d81dada69ce54a7f");
-  const [appliedWallet, setAppliedWallet] = useState("0x7d9cb2994d86b6a4e65761b5d81dada69ce54a7f");
+  const [walletInput, setWalletInput] = useState("");
+  const [appliedWallet, setAppliedWallet] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsData | null>(null);
-  const [manualOverride, setManualOverride] = useState(false);
   const [refreshNonce, setRefreshNonce] = useState(0);
 
   useEffect(() => {
-    const preferred = normalizeAddressInput(address ?? "") || "0x7d9cb2994d86b6a4e65761b5d81dada69ce54a7f";
-    if (!manualOverride) {
+    const preferred = normalizeAddressInput(address ?? "");
+    if (!walletInput && preferred) {
       setWalletInput(preferred);
       setAppliedWallet(preferred);
     }
-  }, [address, manualOverride]);
+  }, [address, walletInput]);
 
   useEffect(() => {
     const normalized = normalizeAddressInput(walletInput);
@@ -732,6 +730,15 @@ export default function Pools() {
                 <Badge variant={data.meta.hasIndexingErrors ? "destructive" : "secondary"}>
                   {data.meta.hasIndexingErrors ? "Indexing Errors" : "Healthy"}
                 </Badge>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setRefreshNonce((n) => n + 1)}
+                  disabled={refreshing || loading}
+                  className="ml-auto"
+                >
+                  {refreshing ? "Refreshing..." : "Refresh Data"}
+                </Button>
               </div>
             ) : null}
           </div>
@@ -745,35 +752,11 @@ export default function Pools() {
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={walletInput}
-                  onChange={(e) => {
-                    setManualOverride(true);
-                    setWalletInput(e.target.value);
-                  }}
+                  onChange={(e) => setWalletInput(e.target.value)}
                   placeholder="0x..."
                   className="pl-9"
                 />
               </div>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  if (!appliedWallet) return;
-                  setRefreshNonce((n) => n + 1);
-                }}
-                disabled={refreshing || loading}
-                className="sm:min-w-[110px]"
-              >
-                <RefreshCcw className={`mr-2 h-4 w-4 ${refreshing ? "animate-spin" : ""}`} />
-                Refresh
-              </Button>
-              <Button
-                variant="outline"
-                onClick={() => {
-                  setManualOverride(false);
-                }}
-                className="sm:min-w-[132px]"
-              >
-                Use Connected Wallet
-              </Button>
             </div>
           </div>
         </div>
@@ -1245,7 +1228,7 @@ export default function Pools() {
           <Card className="mt-8 border-border/50 bg-card/60">
             <CardContent className="flex flex-col gap-2 p-4 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
               <span>
-                Source: Arc analytics index.
+                Powered by The Graph.
               </span>
               <a
                 href={`${explorerBase}`}
