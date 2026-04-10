@@ -38,7 +38,6 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { getContractsForChain } from "@/lib/contracts";
 import { useAccount } from "wagmi";
 
 const SUBGRAPH_PROXY_URL = "/api/subgraph";
@@ -706,13 +705,13 @@ export default function Pools() {
   }, [data?.targetUser]);
 
   const totalPools = protocol ? parseNum(protocol.v2PoolCount) + parseNum(protocol.v3PoolCount) : 0;
-  const explorerBase = getContractsForChain(5042002).explorer;
 
   return (
-    <div className="container mx-auto max-w-7xl px-4 pb-20 pt-4 sm:pt-8">
-      <div className="relative overflow-hidden rounded-2xl border border-border/40 bg-gradient-to-br from-primary/20 via-background to-background p-4 shadow-2xl sm:p-6">
+    <div className="container mx-auto max-w-7xl px-3 pb-16 pt-4 sm:px-4 sm:pt-8">
+      <div className="relative overflow-hidden rounded-[28px] border border-border/50 bg-[radial-gradient(circle_at_top_left,_rgba(20,184,166,0.16),_transparent_34%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0))] p-4 shadow-2xl shadow-primary/5 sm:p-6">
         <div className="absolute -left-12 top-0 h-40 w-40 rounded-full bg-primary/20 blur-3xl" />
         <div className="absolute right-0 top-0 h-48 w-48 rounded-full bg-sky-400/10 blur-3xl" />
+        <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
 
         <div className="relative flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-3xl">
@@ -744,7 +743,7 @@ export default function Pools() {
             ) : null}
           </div>
 
-          <div className="w-full max-w-xl rounded-xl border border-border/50 bg-card/70 p-3 backdrop-blur sm:p-4">
+          <div className="w-full max-w-xl rounded-2xl border border-border/50 bg-background/75 p-3 shadow-lg shadow-black/5 backdrop-blur sm:p-4">
             <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
               User analytics wallet
             </label>
@@ -837,17 +836,17 @@ export default function Pools() {
             </TabsList>
 
             <TabsContent value="platform" className="mt-4 space-y-6">
-              <div className="grid gap-6 lg:grid-cols-[2fr_1fr]">
-                <Card className="border-border/50 bg-card/70">
+              <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">30D Volume & Fee Pulse</CardTitle>
                     <CardDescription>
                       Daily movement of total volume, V2/V3/RWA split, and fee generation.
                     </CardDescription>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
                     {volumeSeries.length ? (
-                      <ChartContainer config={protocolChartConfig} className="h-[240px] w-full sm:h-[320px]">
+                      <ChartContainer config={protocolChartConfig} className="h-[220px] w-full sm:h-[320px]">
                         <AreaChart data={volumeSeries} margin={{ left: 0, right: 8, top: 8 }}>
                           <CartesianGrid vertical={false} strokeDasharray="3 3" />
                           <XAxis
@@ -903,14 +902,14 @@ export default function Pools() {
                   </CardContent>
                 </Card>
 
-                <Card className="border-border/50 bg-card/70">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Volume Composition</CardTitle>
                     <CardDescription>Share of cumulative volume by execution stack.</CardDescription>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
                     {compositionSeries.length ? (
-                      <ChartContainer config={compositionChartConfig} className="h-[240px] w-full sm:h-[320px]">
+                      <ChartContainer config={compositionChartConfig} className="h-[220px] w-full sm:h-[320px]">
                         <PieChart>
                           <ChartTooltip content={<ChartTooltipContent formatter={(v) => formatUsd(Number(v))} />} />
                           <Pie
@@ -932,14 +931,14 @@ export default function Pools() {
                   </CardContent>
                 </Card>
 
-                <Card className="border-border/50 bg-card/70 lg:col-span-2">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5 lg:col-span-2">
                   <CardHeader>
                     <CardTitle className="text-base">30D Breakdown Snapshot</CardTitle>
                     <CardDescription>
                       Current last-day values to quickly compare Volume, Fees, V2, V3 and RWA.
                     </CardDescription>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="px-3 pb-4 sm:px-6">
                     {volumeSeries.length ? (
                       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
                         {[
@@ -970,13 +969,13 @@ export default function Pools() {
               </div>
 
               <div className="grid gap-6 xl:grid-cols-2">
-                <Card className="border-border/50 bg-card/70">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Top Pools by TVL</CardTitle>
                     <CardDescription>Most capital-dense pools across V2 and V3.</CardDescription>
                   </CardHeader>
-                  <CardContent>
-                    <div className="overflow-hidden rounded-xl border border-border/50">
+                  <CardContent className="px-3 pb-4 sm:px-6">
+                    <div className="overflow-x-auto rounded-xl border border-border/50">
                       <Table>
                         <TableHeader>
                           <TableRow>
@@ -1005,15 +1004,15 @@ export default function Pools() {
                   </CardContent>
                 </Card>
 
-                <Card className="border-border/50 bg-card/70">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Top Pools by Volume</CardTitle>
                     <CardDescription>
                       High-turnover pools, with outlier and unique swapper diagnostics.
                     </CardDescription>
                   </CardHeader>
-                  <CardContent>
-                    <div className="overflow-hidden rounded-xl border border-border/50">
+                  <CardContent className="px-3 pb-4 sm:px-6">
+                    <div className="overflow-x-auto rounded-xl border border-border/50">
                       <Table>
                         <TableHeader>
                           <TableRow>
@@ -1047,13 +1046,13 @@ export default function Pools() {
               </div>
 
               <div className="grid gap-6 xl:grid-cols-2">
-                <Card className="border-border/50 bg-card/70">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Top Users (Effective Volume)</CardTitle>
                     <CardDescription>Leaderboard with anti-route-inflation effective accounting.</CardDescription>
                   </CardHeader>
-                  <CardContent>
-                    <div className="overflow-hidden rounded-xl border border-border/50">
+                  <CardContent className="px-3 pb-4 sm:px-6">
+                    <div className="overflow-x-auto rounded-xl border border-border/50">
                       <Table>
                         <TableHeader>
                           <TableRow>
@@ -1078,14 +1077,14 @@ export default function Pools() {
                   </CardContent>
                 </Card>
 
-                <Card className="border-border/50 bg-card/70">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Top RWA Pairs</CardTitle>
                     <CardDescription>Buy/redeem flow and reserve health by pair.</CardDescription>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
                     {data.topRwaPairs.length ? (
-                      <ChartContainer config={protocolChartConfig} className="h-[260px] w-full sm:h-[300px]">
+                      <ChartContainer config={protocolChartConfig} className="h-[230px] w-full sm:h-[300px]">
                         <BarChart data={data.topRwaPairs.slice(0, 8).map((p) => ({
                           symbol: p.symbol,
                           volume: parseNum(p.volumeUsd),
@@ -1144,13 +1143,13 @@ export default function Pools() {
                   </div>
 
                   <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
-                    <Card className="border-border/50 bg-card/70">
+                    <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                       <CardHeader>
                         <CardTitle className="text-lg">Wallet Volume Lens</CardTitle>
                         <CardDescription>Raw vs effective DEX accounting plus RWA contribution.</CardDescription>
                       </CardHeader>
-                      <CardContent>
-                        <ChartContainer config={userWalletChartConfig} className="h-[240px] w-full sm:h-[300px]">
+                      <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
+                        <ChartContainer config={userWalletChartConfig} className="h-[220px] w-full sm:h-[300px]">
                           <BarChart data={userVolumeBars} margin={{ left: 0, right: 8 }}>
                             <CartesianGrid vertical={false} strokeDasharray="3 3" />
                             <XAxis dataKey="key" axisLine={false} tickLine={false} />
@@ -1162,12 +1161,12 @@ export default function Pools() {
                       </CardContent>
                     </Card>
 
-                    <Card className="border-border/50 bg-card/70">
+                    <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                       <CardHeader>
                         <CardTitle className="text-lg">Wallet Profile</CardTitle>
                         <CardDescription>Lifecycle and behavior stats for this address.</CardDescription>
                       </CardHeader>
-                      <CardContent className="space-y-3 text-sm">
+                      <CardContent className="space-y-3 px-3 pb-4 text-sm sm:px-6">
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">Address</span>
                           <span className="font-semibold text-foreground">{shortenAddress(data.targetUser.id)}</span>
@@ -1203,16 +1202,16 @@ export default function Pools() {
                   </div>
 
                   <div className="grid gap-6 xl:grid-cols-2">
-                    <Card className="border-border/50 bg-card/70">
+                    <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                       <CardHeader>
                         <CardTitle className="text-lg">Latest DEX Swaps</CardTitle>
                         <CardDescription>
                           Effective amount is the per-tx de-duplicated value used for anti-hop inflation.
                         </CardDescription>
                       </CardHeader>
-                      <CardContent>
+                      <CardContent className="px-3 pb-4 sm:px-6">
                         {data.targetUserDexSwaps.length ? (
-                          <div className="overflow-hidden rounded-xl border border-border/50">
+                          <div className="overflow-x-auto rounded-xl border border-border/50">
                             <Table>
                               <TableHeader>
                                 <TableRow>
@@ -1247,14 +1246,14 @@ export default function Pools() {
                       </CardContent>
                     </Card>
 
-                    <Card className="border-border/50 bg-card/70">
+                    <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                       <CardHeader>
                         <CardTitle className="text-lg">Latest RWA Trades</CardTitle>
                         <CardDescription>Pair-level synthetic buy/redeem activity.</CardDescription>
                       </CardHeader>
-                      <CardContent>
+                      <CardContent className="px-3 pb-4 sm:px-6">
                         {data.targetUserRwaTrades.length ? (
-                          <div className="overflow-hidden rounded-xl border border-border/50">
+                          <div className="overflow-x-auto rounded-xl border border-border/50">
                             <Table>
                               <TableHeader>
                                 <TableRow>
@@ -1290,23 +1289,6 @@ export default function Pools() {
               )}
             </TabsContent>
           </Tabs>
-
-          <Card className="mt-8 border-border/50 bg-card/60">
-            <CardContent className="flex flex-col gap-2 p-4 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-              <span>
-                Powered by The Graph.
-              </span>
-              <a
-                href={`${explorerBase}`}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1 font-semibold text-primary hover:underline"
-              >
-                Arcscan
-                <ArrowUpRight className="h-3.5 w-3.5" />
-              </a>
-            </CardContent>
-          </Card>
         </>
       )}
     </div>
