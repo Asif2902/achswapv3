@@ -187,38 +187,49 @@ type AnalyticsData = {
 const protocolChartConfig = {
   total: {
     label: "Total Volume",
-    color: "#14b8a6",
+    color: "hsl(var(--chart-1))",
   },
   v2: {
     label: "V2",
-    color: "#2563eb",
+    color: "hsl(var(--chart-2))",
   },
   v3: {
     label: "V3",
-    color: "#f97316",
+    color: "hsl(var(--chart-3))",
   },
   rwa: {
-    label: "RWA",
-    color: "#8b5cf6",
+    label: "RWA Volume",
+    color: "hsl(var(--chart-4))",
   },
   fees: {
     label: "Fees",
-    color: "#eab308",
+    color: "hsl(var(--chart-5))",
   },
 } satisfies ChartConfig;
 
 const compositionChartConfig = {
   v2: {
     label: "V2",
-    color: "#2563eb",
+    color: "hsl(var(--chart-2))",
   },
   v3: {
     label: "V3",
-    color: "#f97316",
+    color: "hsl(var(--chart-3))",
   },
   rwa: {
     label: "RWA",
-    color: "#8b5cf6",
+    color: "hsl(var(--chart-4))",
+  },
+} satisfies ChartConfig;
+
+const rwaPairsChartConfig = {
+  volume: {
+    label: "Volume",
+    color: "hsl(var(--chart-1))",
+  },
+  reserve: {
+    label: "Reserve",
+    color: "hsl(var(--chart-3))",
   },
 } satisfies ChartConfig;
 
@@ -236,6 +247,24 @@ const userWalletChartConfig = {
     color: "hsl(var(--chart-4))",
   },
 } satisfies ChartConfig;
+
+type VolumeSeriesPoint = {
+  label: string;
+  rawDay: number;
+  total: number;
+  v2: number;
+  v3: number;
+  rwa: number;
+  fees: number;
+  swaps: number;
+  activeUsers: number;
+  tvl: number;
+};
+
+type CompositionSeriesPoint = {
+  key: "v2" | "v3" | "rwa";
+  value: number;
+};
 
 function formatUsd(value: number): string {
   if (!Number.isFinite(value)) return "$0";
@@ -618,6 +647,7 @@ export default function Pools() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<AnalyticsData | null>(null);
+  const [selectedVolumeDay, setSelectedVolumeDay] = useState<number | null>(null);
   const [refreshNonce, setRefreshNonce] = useState(0);
 
   useEffect(() => {
@@ -670,8 +700,8 @@ export default function Pools() {
 
   const protocol = data?.protocol;
 
-  const volumeSeries = useMemo(() => {
-    if (!data) return [] as Array<Record<string, number | string>>;
+  const volumeSeries = useMemo<VolumeSeriesPoint[]>(() => {
+    if (!data) return [];
     return data.protocolDayData.map((d) => ({
       label: toDayLabel(d.date),
       rawDay: d.date,
@@ -686,12 +716,12 @@ export default function Pools() {
     }));
   }, [data]);
 
-  const compositionSeries = useMemo(() => {
-    if (!protocol) return [] as Array<{ key: "v2" | "v3" | "rwa"; label: string; value: number; fill: string }>;
+  const compositionSeries = useMemo<CompositionSeriesPoint[]>(() => {
+    if (!protocol) return [];
     return [
-      { key: "v2", label: "V2", value: parseNum(protocol.v2VolumeUsd), fill: "#2563eb" },
-      { key: "v3", label: "V3", value: parseNum(protocol.v3VolumeUsd), fill: "#f97316" },
-      { key: "rwa", label: "RWA", value: parseNum(protocol.rwaVolumeUsd), fill: "#8b5cf6" },
+      { key: "v2", value: parseNum(protocol.v2VolumeUsd) },
+      { key: "v3", value: parseNum(protocol.v3VolumeUsd) },
+      { key: "rwa", value: parseNum(protocol.rwaVolumeUsd) },
     ];
   }, [protocol]);
 
@@ -706,6 +736,40 @@ export default function Pools() {
   }, [data?.targetUser]);
 
   const totalPools = protocol ? parseNum(protocol.v2PoolCount) + parseNum(protocol.v3PoolCount) : 0;
+
+  useEffect(() => {
+    if (!volumeSeries.length) {
+      if (selectedVolumeDay !== null) setSelectedVolumeDay(null);
+      return;
+    }
+
+    const hasSelection = selectedVolumeDay !== null && volumeSeries.some((row) => row.rawDay === selectedVolumeDay);
+    if (!hasSelection) {
+      setSelectedVolumeDay(volumeSeries[volumeSeries.length - 1].rawDay);
+    }
+  }, [volumeSeries, selectedVolumeDay]);
+
+  const selectedVolumePoint = useMemo(() => {
+    if (!volumeSeries.length) return null;
+    if (selectedVolumeDay === null) return volumeSeries[volumeSeries.length - 1];
+    return volumeSeries.find((row) => row.rawDay === selectedVolumeDay) ?? volumeSeries[volumeSeries.length - 1];
+  }, [volumeSeries, selectedVolumeDay]);
+
+  const compositionLegendRows = useMemo(() => {
+    const total = compositionSeries.reduce((sum, row) => sum + row.value, 0);
+    return compositionSeries.map((row) => {
+      const config = compositionChartConfig[row.key];
+      const color = typeof config.color === "string" ? config.color : "hsl(var(--muted-foreground))";
+      const share = total > 0 ? (row.value / total) * 100 : 0;
+      return {
+        key: row.key,
+        label: config.label,
+        value: row.value,
+        color,
+        share,
+      };
+    });
+  }, [compositionSeries]);
 
   return (
     <div className="container mx-auto max-w-7xl px-3 pb-16 pt-4 sm:px-4 sm:pt-8">
@@ -838,204 +902,235 @@ export default function Pools() {
 
             <TabsContent value="platform" className="mt-4 space-y-6">
               <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
-                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
-                  <CardHeader>
-                    <CardTitle className="text-lg">30D Volume & Fee Pulse</CardTitle>
-                    <CardDescription>
-                      Daily movement of total volume, V2/V3/RWA split, and fee generation.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
-                    {volumeSeries.length ? (
-                      <ChartContainer config={protocolChartConfig} className="h-[220px] w-full sm:h-[320px]">
-                        <AreaChart data={volumeSeries} margin={{ left: 0, right: 8, top: 8 }}>
-                          <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                          <XAxis
-                            dataKey="label"
-                            tickMargin={8}
-                            axisLine={false}
-                            tickLine={false}
-                            interval="preserveStartEnd"
-                            minTickGap={26}
-                          />
-                          <YAxis
-                            tickFormatter={(v) => formatCompact(Number(v))}
-                            axisLine={false}
-                            tickLine={false}
-                            width={62}
-                          />
-                          <ChartTooltip
-                            content={
-                              <ChartTooltipContent
-                                labelFormatter={(label, payload) => {
-                                  const item = payload?.[0];
-                                  const rawDay = item?.payload?.rawDay as number | undefined;
-                                  if (typeof rawDay === "number") {
-                                    const fullDate = new Date(rawDay * 86400 * 1000).toLocaleDateString(undefined, {
+                <div className="space-y-6">
+                  <Card className="min-w-0 overflow-hidden border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] shadow-lg shadow-black/5">
+                    <CardHeader>
+                      <CardTitle className="text-lg">30D Volume & Fee Pulse</CardTitle>
+                      <CardDescription>
+                        Daily movement of total volume, V2/V3/RWA split, and fee generation.
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="min-w-0 space-y-4 px-3 pb-4 sm:px-6">
+                      {volumeSeries.length ? (
+                        <>
+                          <ChartContainer config={protocolChartConfig} className="h-[220px] w-full sm:h-[320px]">
+                            <AreaChart
+                              data={volumeSeries}
+                              margin={{ left: 0, right: 8, top: 8 }}
+                              onClick={(state) => {
+                                const rawDay = state?.activePayload?.[0]?.payload?.rawDay;
+                                if (typeof rawDay === "number") setSelectedVolumeDay(rawDay);
+                              }}
+                            >
+                              <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                              <XAxis
+                                dataKey="label"
+                                tickMargin={8}
+                                axisLine={false}
+                                tickLine={false}
+                                interval="preserveStartEnd"
+                                minTickGap={26}
+                              />
+                              <YAxis
+                                tickFormatter={(v) => formatCompact(Number(v))}
+                                axisLine={false}
+                                tickLine={false}
+                                width={62}
+                              />
+                              <ChartTooltip
+                                content={
+                                  <ChartTooltipContent
+                                    labelFormatter={(label, payload) => {
+                                      const item = payload?.[0];
+                                      const rawDay = item?.payload?.rawDay as number | undefined;
+                                      if (typeof rawDay === "number") {
+                                        const fullDate = new Date(rawDay * 86400 * 1000).toLocaleDateString(undefined, {
+                                          year: "numeric",
+                                          month: "short",
+                                          day: "numeric",
+                                        });
+                                        return `${label} (${fullDate})`;
+                                      }
+                                      return String(label ?? "");
+                                    }}
+                                    formatter={(value, name) => {
+                                      const key = String(name ?? "");
+                                      const isCount = key === "swaps" || key === "activeUsers";
+                                      const rendered = isCount ? formatCompact(Number(value)) : formatUsd(Number(value));
+                                      const label =
+                                        protocolChartConfig[key as keyof typeof protocolChartConfig]?.label ?? key;
+                                      return (
+                                        <div className="flex min-w-[10rem] items-center justify-between gap-3">
+                                          <span className="text-muted-foreground">{label}</span>
+                                          <span className="font-mono font-medium text-foreground">{rendered}</span>
+                                        </div>
+                                      );
+                                    }}
+                                  />
+                                }
+                              />
+                              <ChartLegend content={<ChartLegendContent />} />
+                              <Area type="monotone" dataKey="total" stroke="var(--color-total)" fill="var(--color-total)" fillOpacity={0.15} strokeWidth={2.2} activeDot={{ r: 4 }} />
+                              <Area type="monotone" dataKey="fees" stroke="var(--color-fees)" fill="var(--color-fees)" fillOpacity={0.08} strokeWidth={1.8} activeDot={{ r: 4 }} />
+                              <Area type="monotone" dataKey="v2" stroke="var(--color-v2)" fill="none" strokeWidth={1.4} activeDot={{ r: 4 }} />
+                              <Area type="monotone" dataKey="v3" stroke="var(--color-v3)" fill="none" strokeWidth={1.4} activeDot={{ r: 4 }} />
+                              <Area type="monotone" dataKey="rwa" stroke="var(--color-rwa)" fill="none" strokeWidth={1.4} activeDot={{ r: 4 }} />
+                            </AreaChart>
+                          </ChartContainer>
+
+                          {selectedVolumePoint ? (
+                            <div className="rounded-xl border border-border/60 bg-background/55 p-4">
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">Selected Day Snapshot</p>
+                                  <p className="mt-1 text-sm font-semibold text-foreground">
+                                    {new Date(selectedVolumePoint.rawDay * 86400 * 1000).toLocaleDateString(undefined, {
+                                      weekday: "short",
                                       year: "numeric",
                                       month: "short",
                                       day: "numeric",
-                                    });
-                                    return `${label} (${fullDate})`;
-                                  }
-                                  return String(label ?? "");
-                                }}
-                                formatter={(value, name) => {
-                                  const key = String(name ?? "");
-                                  const isCount = key === "swaps" || key === "activeUsers";
-                                  const rendered = isCount ? formatCompact(Number(value)) : formatUsd(Number(value));
-                                  const label =
-                                    protocolChartConfig[key as keyof typeof protocolChartConfig]?.label ?? key;
-                                  return (
-                                    <div className="flex min-w-[10rem] items-center justify-between gap-3">
-                                      <span className="text-muted-foreground">{label}</span>
-                                      <span className="font-mono font-medium text-foreground">{rendered}</span>
+                                    })}
+                                  </p>
+                                </div>
+                                <Badge variant="outline" className="bg-background/70">Click chart points to update</Badge>
+                              </div>
+                              <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                                {[
+                                  { key: "total", label: protocolChartConfig.total.label, value: selectedVolumePoint.total, color: "var(--color-total)" },
+                                  { key: "fees", label: protocolChartConfig.fees.label, value: selectedVolumePoint.fees, color: "var(--color-fees)" },
+                                  { key: "rwa", label: protocolChartConfig.rwa.label, value: selectedVolumePoint.rwa, color: "var(--color-rwa)" },
+                                  { key: "v2", label: protocolChartConfig.v2.label, value: selectedVolumePoint.v2, color: "var(--color-v2)" },
+                                  { key: "v3", label: protocolChartConfig.v3.label, value: selectedVolumePoint.v3, color: "var(--color-v3)" },
+                                ].map((row) => (
+                                  <div key={row.key} className="rounded-lg border border-border/60 bg-background/50 px-3 py-2">
+                                    <div className="mb-1 flex items-center gap-2">
+                                      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: row.color }} />
+                                      <span className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">{row.label}</span>
                                     </div>
-                                  );
-                                }}
-                              />
-                            }
-                          />
-                          <ChartLegend content={<ChartLegendContent />} />
-                          <Area type="monotone" dataKey="total" stroke="var(--color-total)" fill="var(--color-total)" fillOpacity={0.15} strokeWidth={2.2} />
-                          <Area type="monotone" dataKey="fees" stroke="var(--color-fees)" fill="var(--color-fees)" fillOpacity={0.08} strokeWidth={1.8} />
-                          <Area type="monotone" dataKey="v2" stroke="var(--color-v2)" fill="none" strokeWidth={1.4} />
-                          <Area type="monotone" dataKey="v3" stroke="var(--color-v3)" fill="none" strokeWidth={1.4} />
-                          <Area type="monotone" dataKey="rwa" stroke="var(--color-rwa)" fill="none" strokeWidth={1.4} />
-                        </AreaChart>
-                      </ChartContainer>
-                    ) : (
-                      <EmptyState text="No historical protocol day data indexed yet." />
-                    )}
-                  </CardContent>
-                </Card>
+                                    <div className="font-mono text-sm font-semibold text-foreground">{formatUsd(row.value)}</div>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                        </>
+                      ) : (
+                        <EmptyState text="No historical protocol day data indexed yet." />
+                      )}
+                    </CardContent>
+                  </Card>
 
-                <Card className="min-w-0 overflow-hidden border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.03))] shadow-lg shadow-black/5">
+                  <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
+                    <CardHeader>
+                      <CardTitle className="text-lg">Top RWA Pairs</CardTitle>
+                      <CardDescription>Buy/redeem flow and reserve health by pair.</CardDescription>
+                    </CardHeader>
+                    <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
+                      {data.topRwaPairs.length ? (
+                        <ChartContainer config={rwaPairsChartConfig} className="h-[230px] w-full sm:h-[300px]">
+                          <BarChart
+                            data={data.topRwaPairs.slice(0, 8).map((p) => ({
+                              symbol: p.symbol,
+                              volume: parseNum(p.volumeUsd),
+                              reserve: parseNum(p.reserveUsd),
+                            }))}
+                            margin={{ left: 0, right: 8 }}
+                          >
+                            <CartesianGrid vertical={false} strokeDasharray="3 3" />
+                            <XAxis dataKey="symbol" axisLine={false} tickLine={false} />
+                            <YAxis axisLine={false} tickLine={false} tickFormatter={(v) => formatCompact(Number(v))} width={62} />
+                            <ChartTooltip
+                              content={
+                                <ChartTooltipContent
+                                  labelFormatter={(label) => `Pair ${String(label ?? "")}`}
+                                  formatter={(value, name) => {
+                                    const key = String(name ?? "") as keyof typeof rwaPairsChartConfig;
+                                    const label = rwaPairsChartConfig[key]?.label ?? key;
+                                    return (
+                                      <div className="flex min-w-[9rem] items-center justify-between gap-3">
+                                        <span className="text-muted-foreground">{label}</span>
+                                        <span className="font-mono font-medium text-foreground">
+                                          {formatUsd(Number(value))}
+                                        </span>
+                                      </div>
+                                    );
+                                  }}
+                                />
+                              }
+                            />
+                            <ChartLegend content={<ChartLegendContent />} />
+                            <Bar dataKey="volume" fill="var(--color-volume)" radius={[6, 6, 0, 0]} />
+                            <Bar dataKey="reserve" fill="var(--color-reserve)" radius={[6, 6, 0, 0]} />
+                          </BarChart>
+                        </ChartContainer>
+                      ) : (
+                        <EmptyState text="No RWA pair activity found yet." />
+                      )}
+                    </CardContent>
+                  </Card>
+                </div>
+
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Volume Composition</CardTitle>
                     <CardDescription>Share of cumulative volume by execution stack.</CardDescription>
                   </CardHeader>
                   <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
                     {compositionSeries.length ? (
-                      <ChartContainer config={compositionChartConfig} className="h-[220px] w-full sm:h-[320px]">
-                        <PieChart>
-                          <ChartTooltip
-                            content={
-                              <ChartTooltipContent
-                                nameKey="key"
-                                formatter={(value, name) => {
-                                  const key = String(name ?? "") as keyof typeof compositionChartConfig;
-                                  const label = compositionChartConfig[key]?.label ?? key.toUpperCase();
-                                  return (
-                                    <div className="flex min-w-[9rem] items-center justify-between gap-3">
-                                      <span className="text-muted-foreground">{label}</span>
-                                      <span className="font-mono font-medium text-foreground">
-                                        {formatUsd(Number(value))}
-                                      </span>
-                                    </div>
-                                  );
-                                }}
-                              />
-                            }
-                          />
-                          <Pie
-                            data={compositionSeries}
-                            dataKey="value"
-                            nameKey="key"
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={65}
-                            outerRadius={108}
-                            stroke="none"
-                          >
-                            {compositionSeries.map((entry) => (
-                              <Cell key={entry.key} fill={entry.fill} />
-                            ))}
-                          </Pie>
-                          <ChartLegend content={<ChartLegendContent />} />
-                        </PieChart>
-                      </ChartContainer>
-                    ) : (
-                      <EmptyState text="No protocol composition data available." />
-                    )}
-                  </CardContent>
-                </Card>
+                      <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)] sm:items-center">
+                        <ChartContainer config={compositionChartConfig} className="h-[220px] w-full sm:h-[300px]">
+                          <PieChart>
+                            <ChartTooltip
+                              content={
+                                <ChartTooltipContent
+                                  nameKey="key"
+                                  formatter={(value, name) => {
+                                    const key = String(name ?? "") as keyof typeof compositionChartConfig;
+                                    const label = compositionChartConfig[key]?.label ?? key.toUpperCase();
+                                    return (
+                                      <div className="flex min-w-[9rem] items-center justify-between gap-3">
+                                        <span className="text-muted-foreground">{label}</span>
+                                        <span className="font-mono font-medium text-foreground">{formatUsd(Number(value))}</span>
+                                      </div>
+                                    );
+                                  }}
+                                />
+                              }
+                            />
+                            <Pie
+                              data={compositionSeries}
+                              dataKey="value"
+                              nameKey="key"
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={65}
+                              outerRadius={108}
+                              stroke="none"
+                            >
+                              {compositionSeries.map((entry) => (
+                                <Cell key={entry.key} fill={`var(--color-${entry.key})`} />
+                              ))}
+                            </Pie>
+                          </PieChart>
+                        </ChartContainer>
 
-                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5 lg:col-span-2">
-                  <CardHeader>
-                    <CardTitle className="text-lg">Top RWA Pairs</CardTitle>
-                    <CardDescription>Buy/redeem flow and reserve health by pair.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
-                    {data.topRwaPairs.length ? (
-                      <ChartContainer config={protocolChartConfig} className="h-[230px] w-full sm:h-[300px]">
-                        <BarChart
-                          data={data.topRwaPairs.slice(0, 8).map((p) => ({
-                            symbol: p.symbol,
-                            volume: parseNum(p.volumeUsd),
-                            reserve: parseNum(p.reserveUsd),
-                          }))}
-                          margin={{ left: 0, right: 8 }}
-                        >
-                          <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                          <XAxis dataKey="symbol" axisLine={false} tickLine={false} />
-                          <YAxis axisLine={false} tickLine={false} tickFormatter={(v) => formatCompact(Number(v))} width={62} />
-                          <ChartTooltip
-                            content={
-                              <ChartTooltipContent
-                                labelFormatter={(label) => `Pair ${String(label ?? "")}`}
-                                formatter={(value) => (
-                                  <div className="flex min-w-[9rem] items-center justify-between gap-3">
-                                    <span className="text-muted-foreground">Volume</span>
-                                    <span className="font-mono font-medium text-foreground">
-                                      {formatUsd(Number(value))}
-                                    </span>
-                                  </div>
-                                )}
-                              />
-                            }
-                          />
-                          <Bar dataKey="volume" fill="var(--color-total)" radius={[6, 6, 0, 0]} />
-                        </BarChart>
-                      </ChartContainer>
-                    ) : (
-                      <EmptyState text="No RWA pair activity found yet." />
-                    )}
-                  </CardContent>
-                </Card>
-
-                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5 lg:col-span-2">
-                  <CardHeader>
-                    <CardTitle className="text-base">30D Breakdown Snapshot</CardTitle>
-                    <CardDescription>
-                      Current last-day values to quickly compare Volume, Fees, V2, V3 and RWA.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="px-3 pb-4 sm:px-6">
-                    {volumeSeries.length ? (
-                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-                        {[
-                          { key: "total", label: "Volume", color: "#14b8a6" },
-                          { key: "fees", label: "Fees", color: "#eab308" },
-                          { key: "v2", label: "V2", color: "#2563eb" },
-                          { key: "v3", label: "V3", color: "#f97316" },
-                          { key: "rwa", label: "RWA", color: "#8b5cf6" },
-                        ].map((row) => {
-                          const latest = volumeSeries[volumeSeries.length - 1] as Record<string, number | string>;
-                          const val = Number(latest[row.key] ?? 0);
-                          return (
-                            <div key={row.key} className="rounded-lg border border-border/60 bg-background/40 p-3">
-                              <div className="mb-2 flex items-center gap-2">
+                        <div className="grid gap-2">
+                          {compositionLegendRows.map((row) => (
+                            <div key={row.key} className="flex items-center justify-between rounded-lg border border-border/60 bg-background/40 px-3 py-2">
+                              <div className="flex items-center gap-2">
                                 <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
                                 <span className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{row.label}</span>
                               </div>
-                              <div className="text-lg font-bold">{formatUsd(val)}</div>
+                              <div className="text-right">
+                                <p className="font-mono text-sm font-semibold text-foreground">{formatUsd(row.value)}</p>
+                                <p className="text-[11px] text-muted-foreground">{row.share.toFixed(1)}%</p>
+                              </div>
                             </div>
-                          );
-                        })}
+                          ))}
+                        </div>
                       </div>
                     ) : (
-                      <EmptyState text="No daily data available for breakdown." />
+                      <EmptyState text="No protocol composition data available." />
                     )}
                   </CardContent>
                 </Card>
