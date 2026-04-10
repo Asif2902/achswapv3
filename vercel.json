@@ -3,7 +3,7 @@
   "outputDirectory": "dist/public",
   "framework": "vite",
   "functions": {
-    "api/relay.js": { "maxDuration": 30 },
+    "api/relay.js": { "maxDuration": 60 },
     "api/subgraph.js": { "maxDuration": 30 }
   },
   "rewrites": [

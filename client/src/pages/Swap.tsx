@@ -233,6 +233,35 @@ export default function Swap() {
 
   const openExplorer = (txHash: string) => { if (contracts) window.open(`${contracts.explorer}${txHash}`, "_blank"); };
 
+  const getFastTxOverrides = async (provider: BrowserProvider): Promise<{
+    maxFeePerGas?: bigint;
+    maxPriorityFeePerGas?: bigint;
+    gasPrice?: bigint;
+  }> => {
+    try {
+      const feeData = await provider.getFeeData();
+      const bump = 150n;
+
+      if (feeData.maxFeePerGas !== null || feeData.maxPriorityFeePerGas !== null) {
+        const basePriority = feeData.maxPriorityFeePerGas ?? 1_500_000_000n;
+        const baseMax = feeData.maxFeePerGas ?? (feeData.gasPrice !== null ? feeData.gasPrice * 2n : basePriority * 2n);
+        const maxPriorityFeePerGas = (basePriority * bump) / 100n + 1n;
+        const bumpedMax = (baseMax * bump) / 100n + 1n;
+        const minMax = maxPriorityFeePerGas * 2n;
+        const maxFeePerGas = bumpedMax > minMax ? bumpedMax : minMax;
+        return { maxFeePerGas, maxPriorityFeePerGas };
+      }
+
+      if (feeData.gasPrice !== null) {
+        return { gasPrice: (feeData.gasPrice * bump) / 100n + 1n };
+      }
+    } catch {
+      // Fall back to wallet/provider defaults.
+    }
+
+    return {};
+  };
+
   useEffect(() => { loadTokens(); }, [chainId]);
 
   useEffect(() => {
@@ -590,12 +619,13 @@ export default function Swap() {
     setIsSwapping(true);
     try {
       const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
+      const feeOverrides = await getFastTxOverrides(provider);
       const amountBigInt = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(amount, wrappedToken.decimals);
       maxAmountWeiRef.current = null;
       const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
       toast({ title: "Wrapping…" });
       const g = await wc.deposit.estimateGas({ value: amountBigInt });
-      const tx = await wc.deposit({ value: amountBigInt, gasLimit: g * 150n / 100n });
+      const tx = await wc.deposit({ value: amountBigInt, gasLimit: g * 150n / 100n, ...feeOverrides });
       const receipt = await waitForTransaction(provider, tx.hash);
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
@@ -612,12 +642,13 @@ export default function Swap() {
     setIsSwapping(true);
     try {
       const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
+      const feeOverrides = await getFastTxOverrides(provider);
       const amountBigInt = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(amount, wrappedToken.decimals);
       maxAmountWeiRef.current = null;
       const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
       toast({ title: "Unwrapping…" });
       const g = await wc.withdraw.estimateGas(amountBigInt);
-      const tx = await wc.withdraw(amountBigInt, { gasLimit: g * 150n / 100n });
+      const tx = await wc.withdraw(amountBigInt, { gasLimit: g * 150n / 100n, ...feeOverrides });
       const receipt = await waitForTransaction(provider, tx.hash);
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
@@ -658,6 +689,7 @@ export default function Swap() {
         if (!address || !window.ethereum) throw new Error("Please connect your wallet");
         const provider = new BrowserProvider(window.ethereum);
         const signer = await provider.getSigner();
+        const feeOverrides = await getFastTxOverrides(provider);
         const vault = new Contract(contracts.rwa.vault, RWA_VAULT_ABI, signer);
         const amountIn = maxAmountWeiRef.current !== null ? maxAmountWeiRef.current : parseAmount(fromAmount, fromToken.decimals);
 
@@ -699,7 +731,7 @@ export default function Swap() {
           const minSynth = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Buying RWA token…", description: `Buying ${toToken.symbol} with USDC` });
           const g = await vault.buy.estimateGas(rwaQuoteResult.pairId, minSynth, { value: amountIn });
-          const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, gasLimit: g * 150n / 100n });
+          const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, gasLimit: g * 150n / 100n, ...feeOverrides });
           const receipt = await waitForTransaction(provider, tx.hash);
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
@@ -718,7 +750,7 @@ export default function Swap() {
           const minUsdc = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Redeeming RWA token…", description: `Redeeming ${fromToken.symbol} for USDC` });
           const g = await vault.redeem.estimateGas(rwaQuoteResult.pairId, amountIn, minUsdc);
-          const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { gasLimit: g * 150n / 100n });
+          const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { gasLimit: g * 150n / 100n, ...feeOverrides });
           const receipt = await waitForTransaction(provider, tx.hash);
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
@@ -895,6 +927,7 @@ export default function Swap() {
       
       // ── REGULAR SWAP PATH ───────────────────────────────────────────────────
       const provider = new BrowserProvider(window.ethereum); const signer = await provider.getSigner();
+      const feeOverrides = await getFastTxOverrides(provider);
       const bestQuote = smartRoutingResult.bestQuote;
       // Use max balance in wei if MAX button was clicked, otherwise parse from string
       const amountIn = currentAmountIn;
@@ -966,7 +999,7 @@ export default function Swap() {
           }
 
           const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
+          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue, ...feeOverrides });
         } else {
           // Multi-hop V3 path
           const { encodePath } = await import("@/lib/v3-utils");
@@ -996,7 +1029,7 @@ export default function Swap() {
           }
 
           const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
+          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue, ...feeOverrides });
         }
       } else {
         // ── V2 path ────────────────────────────────────────────────────────
@@ -1019,17 +1052,17 @@ export default function Swap() {
         }
         if (fromNative) {
           const g = await router.swapExactETHForTokens.estimateGas(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn });
-          tx = await router.swapExactETHForTokens(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn, gasLimit: g * 150n / 100n });
+          tx = await router.swapExactETHForTokens(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn, gasLimit: g * 150n / 100n, ...feeOverrides });
         } else if (toNative) {
           const tc = new Contract(fromToken.address, ERC20_ABI, signer);
           if (await tc.allowance(address, contracts.v2.router) < amountIn) { const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn); await (await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n })).wait(); }
           const g = await router.swapExactTokensForETH.estimateGas(amountIn, minAmountOut, path, recipient, deadlineTimestamp);
-          tx = await router.swapExactTokensForETH(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
+          tx = await router.swapExactTokensForETH(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n, ...feeOverrides });
         } else {
           const tc = new Contract(fromToken.address, ERC20_ABI, signer);
           if (await tc.allowance(address, contracts.v2.router) < amountIn) { const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn); await (await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n })).wait(); }
           const g = await router.swapExactTokensForTokens.estimateGas(amountIn, minAmountOut, path, recipient, deadlineTimestamp);
-          tx = await router.swapExactTokensForTokens(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
+          tx = await router.swapExactTokensForTokens(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n, ...feeOverrides });
         }
       }
 
