@@ -2,6 +2,8 @@ import { ethers, Contract, BrowserProvider, Interface, AbiCoder } from "ethers";
 import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID, NATIVE_TOKEN } from "./gasless-config";
 
 const abiCoder = new AbiCoder();
+const ARC_TESTNET_WSS = "wss://arc-testnet.drpc.org";
+const FAST_POLL_INTERVAL_MS = 400;
 
 async function assertGaslessChain(signer: any): Promise<void> {
   const network = await signer.provider.getNetwork();
@@ -183,32 +185,43 @@ export async function waitForTransaction(
   txHash: string,
   timeout = 60000
 ): Promise<any> {
-  return new Promise((resolve, reject) => {
+  const waitByPolling = async (): Promise<any> => {
     const startTime = Date.now();
-    
-    const check = async () => {
-      try {
-        const receipt = await provider.getTransactionReceipt(txHash);
-        if (receipt) {
-          if (receipt.status === 0) {
-            reject(new Error("Transaction reverted"));
-            return;
-          }
-          resolve(receipt);
-          return;
-        }
-        if (Date.now() - startTime > timeout) {
-          reject(new Error("Transaction wait timeout"));
-          return;
-        }
-        setTimeout(check, 2000);
-      } catch (e) {
-        reject(e);
+    while (Date.now() - startTime <= timeout) {
+      const receipt = await provider.getTransactionReceipt(txHash);
+      if (receipt) {
+        if (receipt.status === 0) throw new Error("Transaction reverted");
+        return receipt;
       }
-    };
-    
-    check();
-  });
+      await new Promise((resolve) => setTimeout(resolve, FAST_POLL_INTERVAL_MS));
+    }
+    throw new Error("Transaction wait timeout");
+  };
+
+  if (CHAIN_ID !== 5042002) {
+    return waitByPolling();
+  }
+
+  const waitByWebSocket = async (): Promise<any> => {
+    const wsProvider = new ethers.WebSocketProvider(ARC_TESTNET_WSS, CHAIN_ID);
+    try {
+      const receipt = await wsProvider.waitForTransaction(txHash, 1, timeout);
+      if (!receipt) throw new Error("Transaction wait timeout");
+      if (receipt.status === 0) throw new Error("Transaction reverted");
+      return receipt;
+    } finally {
+      wsProvider.destroy();
+    }
+  };
+
+  try {
+    return await Promise.any([waitByWebSocket(), waitByPolling()]);
+  } catch (error) {
+    if (error instanceof AggregateError && error.errors.length > 0) {
+      throw error.errors[0];
+    }
+    throw error;
+  }
 }
 
 export async function executeGaslessSwapV2(
