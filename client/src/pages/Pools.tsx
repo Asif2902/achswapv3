@@ -187,38 +187,38 @@ type AnalyticsData = {
 const protocolChartConfig = {
   total: {
     label: "Total Volume",
-    color: "hsl(var(--chart-1))",
+    color: "#14b8a6",
   },
   v2: {
     label: "V2",
-    color: "hsl(var(--chart-2))",
+    color: "#2563eb",
   },
   v3: {
     label: "V3",
-    color: "hsl(var(--chart-3))",
+    color: "#f97316",
   },
   rwa: {
     label: "RWA",
-    color: "hsl(var(--chart-4))",
+    color: "#8b5cf6",
   },
   fees: {
     label: "Fees",
-    color: "hsl(var(--chart-5))",
+    color: "#eab308",
   },
 } satisfies ChartConfig;
 
 const compositionChartConfig = {
   v2: {
     label: "V2",
-    color: "hsl(var(--chart-2))",
+    color: "#2563eb",
   },
   v3: {
     label: "V3",
-    color: "hsl(var(--chart-3))",
+    color: "#f97316",
   },
   rwa: {
     label: "RWA",
-    color: "hsl(var(--chart-4))",
+    color: "#8b5cf6",
   },
 } satisfies ChartConfig;
 
@@ -674,6 +674,7 @@ export default function Pools() {
     if (!data) return [] as Array<Record<string, number | string>>;
     return data.protocolDayData.map((d) => ({
       label: toDayLabel(d.date),
+      rawDay: d.date,
       total: parseNum(d.dailyTotalVolumeUsd),
       v2: parseNum(d.dailyV2VolumeUsd),
       v3: parseNum(d.dailyV3VolumeUsd),
@@ -846,10 +847,17 @@ export default function Pools() {
                   </CardHeader>
                   <CardContent>
                     {volumeSeries.length ? (
-                      <ChartContainer config={protocolChartConfig} className="h-[280px] w-full sm:h-[320px]">
+                      <ChartContainer config={protocolChartConfig} className="h-[240px] w-full sm:h-[320px]">
                         <AreaChart data={volumeSeries} margin={{ left: 0, right: 8, top: 8 }}>
                           <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                          <XAxis dataKey="label" tickMargin={8} axisLine={false} tickLine={false} />
+                          <XAxis
+                            dataKey="label"
+                            tickMargin={8}
+                            axisLine={false}
+                            tickLine={false}
+                            interval="preserveStartEnd"
+                            minTickGap={26}
+                          />
                           <YAxis
                             tickFormatter={(v) => formatCompact(Number(v))}
                             axisLine={false}
@@ -857,7 +865,29 @@ export default function Pools() {
                             width={62}
                           />
                           <ChartTooltip
-                            content={<ChartTooltipContent formatter={(value) => formatUsd(Number(value))} />}
+                            content={
+                              <ChartTooltipContent
+                                labelFormatter={(label, payload) => {
+                                  const item = payload?.[0];
+                                  const rawDay = item?.payload?.rawDay as number | undefined;
+                                  if (typeof rawDay === "number") {
+                                    const fullDate = new Date(rawDay * 86400 * 1000).toLocaleDateString(undefined, {
+                                      year: "numeric",
+                                      month: "short",
+                                      day: "numeric",
+                                    });
+                                    return `${label} (${fullDate})`;
+                                  }
+                                  return String(label ?? "");
+                                }}
+                                formatter={(value, name) => {
+                                  const key = String(name ?? "");
+                                  const isCount = key === "swaps" || key === "activeUsers";
+                                  const rendered = isCount ? formatCompact(Number(value)) : formatUsd(Number(value));
+                                  return rendered;
+                                }}
+                              />
+                            }
                           />
                           <ChartLegend content={<ChartLegendContent />} />
                           <Area type="monotone" dataKey="total" stroke="var(--color-total)" fill="var(--color-total)" fillOpacity={0.15} strokeWidth={2.2} />
@@ -880,7 +910,7 @@ export default function Pools() {
                   </CardHeader>
                   <CardContent>
                     {compositionSeries.length ? (
-                      <ChartContainer config={compositionChartConfig} className="h-[280px] w-full sm:h-[320px]">
+                      <ChartContainer config={compositionChartConfig} className="h-[240px] w-full sm:h-[320px]">
                         <PieChart>
                           <ChartTooltip content={<ChartTooltipContent formatter={(v) => formatUsd(Number(v))} />} />
                           <Pie
@@ -898,6 +928,42 @@ export default function Pools() {
                       </ChartContainer>
                     ) : (
                       <EmptyState text="No protocol composition data available." />
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card className="border-border/50 bg-card/70 lg:col-span-2">
+                  <CardHeader>
+                    <CardTitle className="text-base">30D Breakdown Snapshot</CardTitle>
+                    <CardDescription>
+                      Current last-day values to quickly compare Volume, Fees, V2, V3 and RWA.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    {volumeSeries.length ? (
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                        {[
+                          { key: "total", label: "Volume", color: "#14b8a6" },
+                          { key: "fees", label: "Fees", color: "#eab308" },
+                          { key: "v2", label: "V2", color: "#2563eb" },
+                          { key: "v3", label: "V3", color: "#f97316" },
+                          { key: "rwa", label: "RWA", color: "#8b5cf6" },
+                        ].map((row) => {
+                          const latest = volumeSeries[volumeSeries.length - 1] as Record<string, number | string>;
+                          const val = Number(latest[row.key] ?? 0);
+                          return (
+                            <div key={row.key} className="rounded-lg border border-border/60 bg-background/40 p-3">
+                              <div className="mb-2 flex items-center gap-2">
+                                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
+                                <span className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{row.label}</span>
+                              </div>
+                              <div className="text-lg font-bold">{formatUsd(val)}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <EmptyState text="No daily data available for breakdown." />
                     )}
                   </CardContent>
                 </Card>
