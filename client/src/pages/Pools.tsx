@@ -348,9 +348,11 @@ async function userRankByEffectiveVolume(targetUserId: string): Promise<number |
 
 async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
   const normalizedWallet = normalizeAddressInput(targetWallet);
+  const nowDay = Math.floor(Date.now() / 86400000);
+  const dateCutoff = nowDay - 29;
 
   const query = `
-    query AnalyticsSnapshot($wallet: String!) {
+    query AnalyticsSnapshot($wallet: String!, $dateCutoff: Int!) {
       _meta {
         deployment
         hasIndexingErrors
@@ -387,7 +389,12 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
         rwaRedeemCount
       }
 
-      protocolDayDatas(first: 30, orderBy: date, orderDirection: asc) {
+      protocolDayDatas(
+        first: 30
+        where: { date_gte: $dateCutoff }
+        orderBy: date
+        orderDirection: asc
+      ) {
         id
         date
         dailyTotalVolumeUsd
@@ -526,7 +533,10 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
     targetUserDexSwaps: DexSwap[];
     targetUserRwaTrades: RwaTrade[];
     topRwaPairs: RwaPair[];
-  }>(query, { wallet: normalizedWallet || "0x0000000000000000000000000000000000000000" });
+  }>(query, {
+    wallet: normalizedWallet || "0x0000000000000000000000000000000000000000",
+    dateCutoff,
+  });
 
   const [totalUsersCount, swapUsersCount, rwaUsersCount, targetUserRank] = await Promise.all([
     countEntity("users"),
