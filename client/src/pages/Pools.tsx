@@ -1104,16 +1104,16 @@ export default function Pools() {
                   </Card>
                 </div>
 
-                <Card className="min-w-0 overflow-hidden border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] shadow-lg shadow-black/5">
+                <Card className="min-w-0 max-w-[680px] overflow-hidden border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Volume Composition</CardTitle>
                     <CardDescription>Share of cumulative volume by execution stack.</CardDescription>
                   </CardHeader>
                   <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
                     {compositionSeries.length ? (
-                      <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,0.95fr)] sm:items-center">
-                        <ChartContainer config={compositionChartConfig} className="h-[220px] w-full sm:h-[300px]">
-                          <PieChart>
+                      <div className="grid gap-4 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] sm:items-center">
+                        <ChartContainer config={compositionChartConfig} className="h-[185px] w-full sm:h-[240px]">
+                          <PieChart margin={{ left: 14, right: 14, top: 8, bottom: 8 }}>
                             <ChartTooltip
                               content={
                                 <ChartTooltipContent
@@ -1137,8 +1137,8 @@ export default function Pools() {
                               nameKey="key"
                               cx="50%"
                               cy="50%"
-                              innerRadius={65}
-                              outerRadius={108}
+                              innerRadius={48}
+                              outerRadius={78}
                               stroke="none"
                             >
                               {compositionSeries.map((entry) => (
