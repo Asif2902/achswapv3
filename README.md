@@ -42,6 +42,24 @@ VITE_WALLETCONNECT_PROJECT_ID=your_project_id_here
 VITE_ALCHEMY_KEY=your_alchemy_key_here
 ```
 
+### Server Environment (Vercel)
+
+Set these in **Vercel Project Settings -> Environment Variables**:
+
+| Variable | Required | What to put |
+|----------|----------|-------------|
+| `GRAPH_QUERY_TOKEN` | Yes | Your The Graph Studio query key (used by `/api/subgraph` and `/api/analytics-summary`) |
+| `SUBGRAPH_PROXY_TOKEN` | Recommended | Any strong random secret (for cross-origin proxy auth), e.g. `openssl rand -hex 32` |
+| `UPSTASH_REDIS_REST_URL` | Optional | Upstash Redis REST URL for shared rate limiting across serverless instances |
+| `UPSTASH_REDIS_REST_TOKEN` | Optional | Upstash Redis REST token |
+| `SUBGRAPH_RATE_LIMIT_PER_MINUTE` | Optional | Integer request limit per minute (default `240` on `/api/subgraph`) |
+| `UPSTREAM_TIMEOUT_MS` | Optional | Integer upstream timeout in milliseconds (default `5000`) |
+
+Important notes:
+- `SUBGRAPH_PROXY_TOKEN` is **not** your Graph key.
+- `GRAPH_QUERY_TOKEN` is the Graph key used server-side when proxying requests.
+- Same-origin frontend calls can work without `SUBGRAPH_PROXY_TOKEN`, but setting it is still recommended for safer production setups and any cross-origin usage.
+
 ### Getting Required API Keys
 
 **WalletConnect Project ID:**
