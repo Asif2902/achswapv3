@@ -9,8 +9,12 @@ const RATE_LIMIT_MAX = Number(process.env.SUBGRAPH_RATE_LIMIT_PER_MINUTE || 180)
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 5_000);
 const SUMMARY_CACHE_TTL_MS = Number(process.env.ANALYTICS_SUMMARY_CACHE_TTL_MS || 60_000);
 const MAX_RANK_CACHE_ENTRIES = Number(process.env.ANALYTICS_RANK_CACHE_MAX || 1000);
+const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim();
+const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
+const RATE_LIMIT_WINDOW_SECONDS = Math.max(1, Math.floor(RATE_LIMIT_WINDOW_MS / 1000));
 
 const rateLimitByKey = new Map();
+let rateLimitRequestCount = 0;
 const summaryCache = {
   value: null,
   expiresAt: 0,
@@ -76,9 +80,83 @@ function sameOrigin(req) {
   }
 }
 
-function checkRateLimit(req) {
+async function fetchJsonWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const json = await response.json();
+    return { response, json };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function incrementSharedRateLimit(key) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
+
+  const pipelineUrl = `${UPSTASH_REDIS_REST_URL.replace(/\/$/, "")}/pipeline`;
+  const payload = [
+    ["INCR", key],
+    ["EXPIRE", key, String(RATE_LIMIT_WINDOW_SECONDS), "NX"],
+  ];
+
+  const { response, json } = await fetchJsonWithTimeout(
+    pipelineUrl,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    1500,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Shared rate-limit store error ${response.status}`);
+  }
+
+  const incrementResult = Array.isArray(json) ? json[0]?.result : null;
+  const incrementCount = Number(incrementResult);
+  if (!Number.isFinite(incrementCount)) {
+    throw new Error("Shared rate-limit store returned invalid counter");
+  }
+
+  return incrementCount;
+}
+
+function pruneRateLimitBuckets(now) {
+  for (const [key, state] of rateLimitByKey) {
+    if (!state || typeof state.resetAt !== "number" || state.resetAt <= now) {
+      rateLimitByKey.delete(key);
+    }
+  }
+}
+
+async function checkRateLimit(req) {
   const key = `${getClientIp(req)}:${req.headers["x-app-token"] || "anon"}`;
   const now = Date.now();
+
+  try {
+    const sharedCount = await incrementSharedRateLimit(`analytics-summary:rl:${key}`);
+    if (typeof sharedCount === "number") {
+      return sharedCount <= RATE_LIMIT_MAX;
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(`[analytics-summary] shared rate-limit unavailable, using in-memory fallback: ${detail}`);
+  }
+
+  rateLimitRequestCount += 1;
+  if (rateLimitRequestCount % 64 === 0) {
+    pruneRateLimitBuckets(now);
+  }
+
   const state = rateLimitByKey.get(key) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
 
   if (now > state.resetAt) {
@@ -225,7 +303,7 @@ export default async function handler(req, res) {
   const isSameOrigin = sameOrigin(req);
   if (!isSameOrigin && !SUBGRAPH_PROXY_TOKEN) return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
   if (!isAuthorized(req) && !isSameOrigin) return res.status(403).json({ error: "Unauthorized" });
-  if (!checkRateLimit(req)) return res.status(429).json({ error: "Rate limit exceeded" });
+  if (!(await checkRateLimit(req))) return res.status(429).json({ error: "Rate limit exceeded" });
 
   const token = process.env.GRAPH_QUERY_TOKEN;
   if (!token) {
