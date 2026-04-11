@@ -4,7 +4,8 @@
   "framework": "vite",
   "functions": {
     "api/relay.js": { "maxDuration": 60 },
-    "api/subgraph.js": { "maxDuration": 30 }
+    "api/subgraph.js": { "maxDuration": 30 },
+    "api/analytics-summary.js": { "maxDuration": 30 }
   },
   "rewrites": [
     { "source": "/((?!api/).*)", "destination": "/index.html" }

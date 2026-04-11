@@ -5,7 +5,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .filter(Boolean);
 const APP_PROXY_TOKEN = (process.env.SUBGRAPH_PROXY_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = Number(process.env.SUBGRAPH_RATE_LIMIT_PER_MINUTE || 240);
+const RATE_LIMIT_MAX = Number(process.env.SUBGRAPH_RATE_LIMIT_PER_MINUTE || 180);
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 5_000);
 
 const rateLimitByKey = new Map();
@@ -64,16 +64,88 @@ function checkRateLimit(req) {
   return state.count <= RATE_LIMIT_MAX;
 }
 
-async function fetchWithTimeout(url, options, timeoutMs) {
+async function fetchSubgraph(token, query, variables) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {
-    return await fetch(url, {
-      ...options,
+    return await fetch(STUDIO_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ query, variables }),
       signal: controller.signal,
     });
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+function normalizeAddressInput(value) {
+  const trimmed = String(value || "").trim().toLowerCase();
+  return /^0x[a-f0-9]{40}$/.test(trimmed) ? trimmed : "";
+}
+
+async function countEntityByPagination(token, entity, where = "") {
+  let total = 0;
+  let skip = 0;
+
+  while (true) {
+    const filter = where ? `, where: ${where}` : "";
+    const query = `query Count${entity}${skip} { ${entity}(first: 1000, skip: ${skip}${filter}) { id } }`;
+    const upstream = await fetchSubgraph(token, query, {});
+    const payload = await upstream.json();
+
+    if (!upstream.ok) {
+      throw new Error(payload?.errors?.[0]?.message || `Upstream ${entity} count failed`);
+    }
+    if (payload?.errors?.length) {
+      throw new Error(payload.errors[0]?.message || `${entity} count query failed`);
+    }
+
+    const rows = payload?.data?.[entity] || [];
+    total += rows.length;
+    if (rows.length < 1000) break;
+    skip += 1000;
+  }
+
+  return total;
+}
+
+async function getUserRankByEffectiveVolume(token, wallet) {
+  if (!wallet) return null;
+
+  let rank = 1;
+  let skip = 0;
+
+  while (true) {
+    const query = `
+      query RankChunk {
+        users(first: 1000, skip: ${skip}, orderBy: totalEffectiveVolumeUsd, orderDirection: desc) {
+          id
+        }
+      }
+    `;
+    const upstream = await fetchSubgraph(token, query, {});
+    const payload = await upstream.json();
+
+    if (!upstream.ok) {
+      throw new Error(payload?.errors?.[0]?.message || "Upstream rank query failed");
+    }
+    if (payload?.errors?.length) {
+      throw new Error(payload.errors[0]?.message || "Rank query failed");
+    }
+
+    const users = payload?.data?.users || [];
+    if (!users.length) return null;
+
+    const foundIndex = users.findIndex((u) => String(u.id || "").toLowerCase() === wallet);
+    if (foundIndex >= 0) return rank + foundIndex;
+
+    rank += users.length;
+    if (users.length < 1000) return null;
+    skip += 1000;
   }
 }
 
@@ -84,6 +156,7 @@ export default async function handler(req, res) {
     if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
     return res.status(200).end();
   }
+
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
   if (!isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
@@ -94,25 +167,35 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Missing GRAPH_QUERY_TOKEN server environment variable" });
   }
 
-  try {
-    const upstream = await fetchWithTimeout(STUDIO_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(req.body ?? {}),
-    }, UPSTREAM_TIMEOUT_MS);
+  const wallet = normalizeAddressInput(req.body?.wallet || "");
 
-    const text = await upstream.text();
-    res.status(upstream.status);
-    res.setHeader("Content-Type", "application/json");
-    return res.send(text);
+  try {
+    const [
+      totalUsersCount,
+      swapUsersCount,
+      rwaUsersCount,
+      outlierPoolsCount,
+      targetUserRank,
+    ] = await Promise.all([
+      countEntityByPagination(token, "users"),
+      countEntityByPagination(token, "users", "{ swapCount_gt: 0 }"),
+      countEntityByPagination(token, "users", "{ rwaBuyCount_gt: 0 }"),
+      countEntityByPagination(token, "pools", "{ flaggedLowLiquidityOutlier: true }"),
+      getUserRankByEffectiveVolume(token, wallet),
+    ]);
+
+    return res.status(200).json({
+      totalUsersCount,
+      swapUsersCount,
+      rwaUsersCount,
+      outlierPoolsCount,
+      targetUserRank,
+    });
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       return res.status(504).json({ error: "Subgraph upstream timeout" });
     }
-    const message = err instanceof Error ? err.message : "Unknown subgraph proxy error";
+    const message = err instanceof Error ? err.message : "Unknown analytics summary error";
     return res.status(502).json({ error: message });
   }
 }

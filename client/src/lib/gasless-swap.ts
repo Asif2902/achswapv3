@@ -185,42 +185,81 @@ export async function waitForTransaction(
   txHash: string,
   timeout = 60000
 ): Promise<any> {
-  const waitByPolling = async (): Promise<any> => {
+  const network = await provider.getNetwork();
+  const chainId = Number(network.chainId);
+  const useArcWebSocket = chainId === 5042002;
+
+  if (!useArcWebSocket) {
+    const receipt = await provider.waitForTransaction(txHash, 1, timeout);
+    if (!receipt) throw new Error("Transaction wait timeout");
+    if (receipt.status === 0) throw new Error("Transaction reverted");
+    return receipt;
+  }
+
+  const controller = new AbortController();
+  let wsProvider: ethers.WebSocketProvider | null = new ethers.WebSocketProvider(ARC_TESTNET_WSS, chainId);
+
+  const waitByPolling = async (signal: AbortSignal): Promise<any> => {
     const startTime = Date.now();
-    while (Date.now() - startTime <= timeout) {
+    while (!signal.aborted && Date.now() - startTime <= timeout) {
       const receipt = await provider.getTransactionReceipt(txHash);
       if (receipt) {
         if (receipt.status === 0) throw new Error("Transaction reverted");
         return receipt;
       }
-      await new Promise((resolve) => setTimeout(resolve, FAST_POLL_INTERVAL_MS));
+
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, FAST_POLL_INTERVAL_MS);
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            resolve(null);
+          },
+          { once: true },
+        );
+      });
     }
+
+    if (signal.aborted) {
+      throw new Error("Transaction wait aborted");
+    }
+
     throw new Error("Transaction wait timeout");
   };
 
-  if (CHAIN_ID !== 5042002) {
-    return waitByPolling();
-  }
-
-  const waitByWebSocket = async (): Promise<any> => {
-    const wsProvider = new ethers.WebSocketProvider(ARC_TESTNET_WSS, CHAIN_ID);
+  const waitByWebSocket = async (signal: AbortSignal): Promise<any> => {
+    if (!wsProvider) throw new Error("WebSocket provider unavailable");
+    const handleAbort = () => {
+      wsProvider?.destroy();
+      wsProvider = null;
+    };
+    signal.addEventListener("abort", handleAbort, { once: true });
     try {
       const receipt = await wsProvider.waitForTransaction(txHash, 1, timeout);
       if (!receipt) throw new Error("Transaction wait timeout");
       if (receipt.status === 0) throw new Error("Transaction reverted");
       return receipt;
     } finally {
-      wsProvider.destroy();
+      signal.removeEventListener("abort", handleAbort);
     }
   };
 
   try {
-    return await Promise.any([waitByWebSocket(), waitByPolling()]);
+    const result = await Promise.race([
+      waitByWebSocket(controller.signal),
+      waitByPolling(controller.signal),
+    ]);
+    controller.abort();
+    return result;
   } catch (error) {
-    if (error instanceof AggregateError && error.errors.length > 0) {
-      throw error.errors[0];
-    }
     throw error;
+  } finally {
+    controller.abort();
+    if (wsProvider) {
+      wsProvider.destroy();
+      wsProvider = null;
+    }
   }
 }
 

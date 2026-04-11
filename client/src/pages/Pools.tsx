@@ -42,6 +42,8 @@ import {
 import { useAccount } from "wagmi";
 
 const SUBGRAPH_PROXY_URL = "/api/subgraph";
+const ANALYTICS_SUMMARY_URL = "/api/analytics-summary";
+const SUBGRAPH_PROXY_APP_TOKEN = (import.meta.env.VITE_SUBGRAPH_PROXY_TOKEN as string | undefined)?.trim();
 
 type Maybe<T> = T | null;
 
@@ -317,14 +319,19 @@ function normalizeAddressInput(value: string): string {
 
 async function fetchSubgraph<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const payload = { query, variables };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (SUBGRAPH_PROXY_APP_TOKEN) {
+    headers["X-App-Token"] = SUBGRAPH_PROXY_APP_TOKEN;
+  }
 
   let res: Response;
   try {
     res = await fetch(SUBGRAPH_PROXY_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify(payload),
     });
   } catch {
@@ -338,46 +345,39 @@ async function fetchSubgraph<T>(query: string, variables?: Record<string, unknow
   return json.data as T;
 }
 
-async function countEntity(entity: string, where?: string): Promise<number> {
-  let total = 0;
-  let skip = 0;
+async function fetchAnalyticsSummary(wallet: string): Promise<{
+  totalUsersCount: number;
+  swapUsersCount: number;
+  rwaUsersCount: number;
+  outlierPoolsCount: number;
+  targetUserRank: number | null;
+}> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
 
-  while (true) {
-    const filter = where ? `, where: ${where}` : "";
-    const query = `query Count${entity}${skip} { ${entity}(first: 1000, skip: ${skip}${filter}) { id } }`;
-    const data = await fetchSubgraph<Record<string, Array<{ id: string }>>>(query);
-    const rows = data[entity] ?? [];
-    total += rows.length;
-    if (rows.length < 1000) break;
-    skip += 1000;
+  if (SUBGRAPH_PROXY_APP_TOKEN) {
+    headers["X-App-Token"] = SUBGRAPH_PROXY_APP_TOKEN;
   }
 
-  return total;
-}
+  const response = await fetch(ANALYTICS_SUMMARY_URL, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ wallet }),
+  });
 
-async function userRankByEffectiveVolume(targetUserId: string): Promise<number | null> {
-  if (!targetUserId) return null;
-  let rank = 1;
-  let skip = 0;
-
-  while (true) {
-    const query = `
-      query RankChunk {
-        users(first: 1000, skip: ${skip}, orderBy: totalEffectiveVolumeUsd, orderDirection: desc) {
-          id
-        }
-      }
-    `;
-    const data = await fetchSubgraph<{ users: Array<{ id: string }> }>(query);
-    if (!data.users.length) return null;
-
-    const foundIndex = data.users.findIndex((u) => u.id.toLowerCase() === targetUserId.toLowerCase());
-    if (foundIndex >= 0) return rank + foundIndex;
-
-    rank += data.users.length;
-    if (data.users.length < 1000) return null;
-    skip += 1000;
+  if (!response.ok) {
+    throw new Error(`Analytics summary request failed with ${response.status}`);
   }
+
+  const json = await response.json();
+  return {
+    totalUsersCount: parseNum(json.totalUsersCount),
+    swapUsersCount: parseNum(json.swapUsersCount),
+    rwaUsersCount: parseNum(json.rwaUsersCount),
+    outlierPoolsCount: parseNum(json.outlierPoolsCount),
+    targetUserRank: typeof json.targetUserRank === "number" ? json.targetUserRank : null,
+  };
 }
 
 async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
@@ -573,14 +573,7 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
     dateCutoff,
   });
 
-  const [totalUsersCount, swapUsersCount, rwaUsersCount, targetUserRank] = await Promise.all([
-    countEntity("users"),
-    countEntity("users", "{ swapCount_gt: 0 }"),
-    countEntity("users", "{ rwaBuyCount_gt: 0 }"),
-    normalizedWallet ? userRankByEffectiveVolume(normalizedWallet) : Promise.resolve(null),
-  ]);
-
-  const outlierPoolsCount = await countEntity("pools", "{ flaggedLowLiquidityOutlier: true }");
+  const summary = await fetchAnalyticsSummary(normalizedWallet);
 
   return {
     meta: {
@@ -594,12 +587,12 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
     topPoolsByTvl: snapshot.topPoolsByTvl,
     topPoolsByVolume: snapshot.topPoolsByVolume,
     topUsersByEffectiveVolume: snapshot.topUsersByEffectiveVolume,
-    totalUsersCount,
-    swapUsersCount,
-    rwaUsersCount,
-    outlierPoolsCount,
+    totalUsersCount: summary.totalUsersCount,
+    swapUsersCount: summary.swapUsersCount,
+    rwaUsersCount: summary.rwaUsersCount,
+    outlierPoolsCount: summary.outlierPoolsCount,
     targetUser: snapshot.targetUser,
-    targetUserRank,
+    targetUserRank: summary.targetUserRank,
     targetUserDexSwaps: snapshot.targetUserDexSwaps,
     targetUserRwaTrades: snapshot.targetUserRwaTrades,
     topRwaPairs: snapshot.topRwaPairs,
@@ -693,9 +686,10 @@ export default function Pools() {
         if (disposed) return;
         setError(e instanceof Error ? e.message : "Failed to load analytics data");
       } finally {
-        if (disposed) return;
-        if (initial) setLoading(false);
-        else setRefreshing(false);
+        if (!disposed) {
+          if (initial) setLoading(false);
+          else setRefreshing(false);
+        }
       }
     }
 
@@ -733,9 +727,9 @@ export default function Pools() {
     ];
   }, [protocol]);
 
-  const userVolumeBars = useMemo(() => {
+  const userVolumeBars = useMemo<Array<{ key: "effective" | "raw" | "rwa"; value: number }>>(() => {
     const user = data?.targetUser;
-    if (!user) return [] as Array<{ key: string; value: number }>;
+    if (!user) return [];
     return [
       { key: "effective", value: parseNum(user.dexEffectiveVolumeUsd) },
       { key: "raw", value: parseNum(user.totalVolumeUsd) - parseNum(user.rwaVolumeUsd) },
@@ -778,6 +772,12 @@ export default function Pools() {
       };
     });
   }, [compositionSeries]);
+
+  const userVolumeColorMap: Record<"effective" | "raw" | "rwa", string> = {
+    effective: "var(--color-effective)",
+    raw: "var(--color-raw)",
+    rwa: "var(--color-rwa)",
+  };
 
   return (
     <div className="container mx-auto max-w-7xl px-3 pb-16 pt-4 sm:px-4 sm:pt-8">
@@ -1308,7 +1308,11 @@ export default function Pools() {
                             <XAxis dataKey="key" axisLine={false} tickLine={false} />
                             <YAxis axisLine={false} tickLine={false} tickFormatter={(v) => formatCompact(Number(v))} width={62} />
                             <ChartTooltip content={<ChartTooltipContent formatter={(v) => formatUsd(Number(v))} />} />
-                            <Bar dataKey="value" fill="var(--color-effective)" radius={[8, 8, 0, 0]} />
+                            <Bar dataKey="value" radius={[8, 8, 0, 0]}>
+                              {userVolumeBars.map((entry, index) => (
+                                <Cell key={`${entry.key}-${index}`} fill={userVolumeColorMap[entry.key]} />
+                              ))}
+                            </Bar>
                           </BarChart>
                         </ChartContainer>
                       </CardContent>

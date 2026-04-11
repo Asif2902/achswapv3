@@ -27,7 +27,6 @@ import {
   executeGaslessSwapV2,
   executeGaslessSwapV3,
   executeGaslessSwapV3MultiHop,
-  waitForTransaction,
 } from "@/lib/gasless-swap";
 import { GASLESS_CONFIG, NATIVE_TOKEN, NATIVE_TOKEN_DECIMALS } from "@/lib/gasless-config";
 
@@ -626,7 +625,10 @@ export default function Swap() {
       toast({ title: "Wrapping…" });
       const g = await wc.deposit.estimateGas({ value: amountBigInt });
       const tx = await wc.deposit({ value: amountBigInt, gasLimit: g * 150n / 100n, ...feeOverrides });
-      const receipt = await waitForTransaction(provider, tx.hash);
+      const receipt = await tx.wait();
+      if (!receipt || receipt.status === 0) {
+        throw new Error("Transaction reverted");
+      }
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
       toast({ title: "Wrap successful!", description: (<div className="flex items-center gap-2"><span>Wrapped {amount} USDC → wUSDC</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
@@ -649,7 +651,10 @@ export default function Swap() {
       toast({ title: "Unwrapping…" });
       const g = await wc.withdraw.estimateGas(amountBigInt);
       const tx = await wc.withdraw(amountBigInt, { gasLimit: g * 150n / 100n, ...feeOverrides });
-      const receipt = await waitForTransaction(provider, tx.hash);
+      const receipt = await tx.wait();
+      if (!receipt || receipt.status === 0) {
+        throw new Error("Transaction reverted");
+      }
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
       toast({ title: "Unwrap successful!", description: (<div className="flex items-center gap-2"><span>Unwrapped {amount} wUSDC → USDC</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
@@ -732,7 +737,10 @@ export default function Swap() {
           toast({ title: "Buying RWA token…", description: `Buying ${toToken.symbol} with USDC` });
           const g = await vault.buy.estimateGas(rwaQuoteResult.pairId, minSynth, { value: amountIn });
           const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, gasLimit: g * 150n / 100n, ...feeOverrides });
-          const receipt = await waitForTransaction(provider, tx.hash);
+          const receipt = await tx.wait();
+          if (!receipt || receipt.status === 0) {
+            throw new Error("Transaction reverted");
+          }
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
           setFromAmount(""); setToAmount(""); setRwaQuoteResult(null); setRouteHops([]);
@@ -751,7 +759,10 @@ export default function Swap() {
           toast({ title: "Redeeming RWA token…", description: `Redeeming ${fromToken.symbol} for USDC` });
           const g = await vault.redeem.estimateGas(rwaQuoteResult.pairId, amountIn, minUsdc);
           const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { gasLimit: g * 150n / 100n, ...feeOverrides });
-          const receipt = await waitForTransaction(provider, tx.hash);
+          const receipt = await tx.wait();
+          if (!receipt || receipt.status === 0) {
+            throw new Error("Transaction reverted");
+          }
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
           setFromAmount(""); setToAmount(""); setRwaQuoteResult(null); setRouteHops([]);
@@ -1066,7 +1077,10 @@ export default function Swap() {
         }
       }
 
-      const receipt = await waitForTransaction(provider, tx.hash);
+      const receipt = await tx.wait();
+      if (!receipt || receipt.status === 0) {
+        throw new Error("Transaction reverted");
+      }
       saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);

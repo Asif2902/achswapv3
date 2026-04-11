@@ -21,6 +21,81 @@ if (process.env.RELAYER_PRIVATE_KEY) {
   contracts = relayerWallets.map((wallet) => new ethers.Contract(CONTRACT_ADDRESS, ABI, wallet));
 }
 
+const nonceStateByWallet = new Map();
+const nonceLockByWallet = new Map();
+
+async function withNonceLock(walletAddress, task) {
+  const key = walletAddress.toLowerCase();
+  const previous = nonceLockByWallet.get(key) ?? Promise.resolve();
+
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  nonceLockByWallet.set(
+    key,
+    previous.then(() => current),
+  );
+
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (nonceLockByWallet.get(key) === current) {
+      nonceLockByWallet.delete(key);
+    }
+  }
+}
+
+async function getNextNonce(provider, walletAddress) {
+  return withNonceLock(walletAddress, async () => {
+    const key = walletAddress.toLowerCase();
+    const state = nonceStateByWallet.get(key) ?? { nextNonce: null };
+
+    const pending = BigInt(await provider.getTransactionCount(walletAddress, "pending"));
+    if (state.nextNonce === null || state.nextNonce < pending) {
+      state.nextNonce = pending;
+    }
+
+    const nonce = state.nextNonce;
+    state.nextNonce = nonce + 1n;
+    nonceStateByWallet.set(key, state);
+    return nonce;
+  });
+}
+
+async function markNonceSuccess(walletAddress, nonce) {
+  await withNonceLock(walletAddress, async () => {
+    const key = walletAddress.toLowerCase();
+    const state = nonceStateByWallet.get(key) ?? { nextNonce: null };
+    const expectedNext = nonce + 1n;
+    if (state.nextNonce === null || state.nextNonce < expectedNext) {
+      state.nextNonce = expectedNext;
+    }
+    nonceStateByWallet.set(key, state);
+  });
+}
+
+async function markNonceFailure(provider, walletAddress, nonce, err) {
+  await withNonceLock(walletAddress, async () => {
+    const key = walletAddress.toLowerCase();
+    const state = nonceStateByWallet.get(key) ?? { nextNonce: null };
+    const message = getErrorMessage(err);
+    const retryable = isRetryableError(message);
+
+    try {
+      const pending = BigInt(await provider.getTransactionCount(walletAddress, "pending"));
+      state.nextNonce = retryable ? (pending > nonce ? pending : nonce + 1n) : pending;
+    } catch {
+      state.nextNonce = retryable ? nonce + 1n : nonce;
+    }
+
+    nonceStateByWallet.set(key, state);
+  });
+}
+
 function toBigInt(value, field) {
   try {
     return BigInt(value);
@@ -87,9 +162,11 @@ async function sendExecuteWithRetry(payload) {
     const contract = contracts[idx];
     const wallet = relayerWallets[idx];
     const provider = providers[idx];
+    let nonce = null;
 
     try {
       const feeOverrides = await getFeeOverrides(provider, attempt);
+      nonce = await getNextNonce(provider, wallet.address);
 
       const txRequest = await contract.execute.populateTransaction(
         payload.user,
@@ -112,7 +189,6 @@ async function sendExecuteWithRetry(payload) {
         gasLimit = 2_400_000n;
       }
 
-      const nonce = await provider.getTransactionCount(wallet.address, "pending");
       const tx = await contract.execute(
         payload.user,
         payload.tokenIn,
@@ -128,9 +204,14 @@ async function sendExecuteWithRetry(payload) {
         },
       );
 
+      await markNonceSuccess(wallet.address, nonce);
+
       return tx;
     } catch (err) {
       lastError = err;
+      if (nonce !== null) {
+        await markNonceFailure(provider, wallet.address, nonce, err);
+      }
       const message = getErrorMessage(err);
       if (!isRetryableError(message) || attempt === 4) {
         break;
