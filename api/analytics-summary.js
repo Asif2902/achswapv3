@@ -186,7 +186,8 @@ function pruneRateLimitBuckets(now) {
 }
 
 async function checkRateLimit(req) {
-  const key = `${getClientIp(req)}:${req.headers["x-app-token"] || "anon"}`;
+  const authIdentity = req.auth?.appId || req.user?.id || "anon";
+  const key = `${getClientIp(req)}:${authIdentity}`;
   const now = Date.now();
 
   try {
@@ -414,7 +415,8 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   if (req.headers.origin && !isAllowedBrowserOrigin(req)) return res.status(403).json({ error: "Origin not allowed" });
   const trustedSameOrigin = sameOrigin(req);
-  if (!trustedSameOrigin) {
+  const trustedBrowserOrigin = isAllowedBrowserOrigin(req);
+  if (!trustedSameOrigin && !trustedBrowserOrigin) {
     if (!SUBGRAPH_PROXY_TOKEN) return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
     if (!isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
   }
