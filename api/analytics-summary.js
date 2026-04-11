@@ -329,7 +329,7 @@ function triggerSummaryRefresh(token) {
     .catch((err) => {
       const detail = err instanceof Error ? err.message : String(err);
       console.warn(`[analytics-summary] summary refresh failed: ${detail}`);
-      return null;
+      throw err;
     })
     .finally(() => {
       summaryRefreshPromise = null;
@@ -363,31 +363,20 @@ async function getUserRankByEffectiveVolume(token, wallet) {
 
   const targetVolume = String(target.totalEffectiveVolumeUsd ?? "0");
 
-  const rankQuery = `
-    query ComputeUserRank($wallet: String!, $targetVolume: String!) {
-      higher: users(where: { totalEffectiveVolumeUsd_gt: $targetVolume }) {
-        id
-      }
-      tiedLowerId: users(where: { totalEffectiveVolumeUsd: $targetVolume, id_lt: $wallet }) {
-        id
-      }
-    }
-  `;
+  const encodedTargetVolume = JSON.stringify(targetVolume);
+  const encodedWallet = JSON.stringify(wallet);
 
-  const { response: rankResponse, json: rankPayload } = await fetchSubgraph(token, rankQuery, {
-    wallet,
-    targetVolume,
-  });
+  const higherCount = await countEntityByPagination(
+    token,
+    "users",
+    `{ totalEffectiveVolumeUsd_gt: ${encodedTargetVolume} }`,
+  );
 
-  if (!rankResponse.ok) {
-    throw new Error(rankPayload?.errors?.[0]?.message || "Upstream rank aggregation query failed");
-  }
-  if (rankPayload?.errors?.length) {
-    throw new Error(rankPayload.errors[0]?.message || "Rank aggregation query failed");
-  }
-
-  const higherCount = Array.isArray(rankPayload?.data?.higher) ? rankPayload.data.higher.length : 0;
-  const tiedLowerCount = Array.isArray(rankPayload?.data?.tiedLowerId) ? rankPayload.data.tiedLowerId.length : 0;
+  const tiedLowerCount = await countEntityByPagination(
+    token,
+    "users",
+    `{ totalEffectiveVolumeUsd: ${encodedTargetVolume}, id_lt: ${encodedWallet} }`,
+  );
 
   return higherCount + tiedLowerCount + 1;
 }
@@ -404,7 +393,7 @@ function triggerRankRefresh(token, wallet) {
     .catch((err) => {
       const detail = err instanceof Error ? err.message : String(err);
       console.warn(`[analytics-summary] rank refresh failed for ${wallet}: ${detail}`);
-      return null;
+      throw err;
     })
     .finally(() => {
       rankRefreshPromises.delete(wallet);
@@ -446,9 +435,14 @@ export default async function handler(req, res) {
 
     let aggregateSummary = summaryState.value;
     if (!aggregateSummary) {
-      aggregateSummary = await triggerSummaryRefresh(token);
+      try {
+        aggregateSummary = await triggerSummaryRefresh(token);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        return res.status(503).json({ error: `Analytics summary refresh failed: ${detail}` });
+      }
     } else if (!summaryState.fresh || forceRefresh) {
-      void triggerSummaryRefresh(token);
+      void triggerSummaryRefresh(token).catch(() => {});
     }
 
     if (!aggregateSummary) {
@@ -462,11 +456,16 @@ export default async function handler(req, res) {
         : getCachedRankState(wallet);
 
       if (!rankState.exists) {
-        targetUserRank = await triggerRankRefresh(token, wallet);
+        try {
+          targetUserRank = await triggerRankRefresh(token, wallet);
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          return res.status(503).json({ error: `Analytics rank refresh failed: ${detail}` });
+        }
       } else {
         targetUserRank = rankState.value;
         if (!rankState.fresh || forceRefresh) {
-          void triggerRankRefresh(token, wallet);
+          void triggerRankRefresh(token, wallet).catch(() => {});
         }
       }
     }
