@@ -55,6 +55,8 @@ Set these in **Vercel Project Settings -> Environment Variables**:
 | `UPSTASH_REDIS_REST_TOKEN` | Optional | Upstash Redis REST token |
 | `SUBGRAPH_RATE_LIMIT_PER_MINUTE` | Optional | Integer request limit per minute (default `240` in `api/subgraph.js`, default `180` in `api/analytics-summary.js`) |
 | `UPSTREAM_TIMEOUT_MS` | Optional | Integer upstream timeout in milliseconds (default `5000`) |
+| `ANALYTICS_SUMMARY_CACHE_TTL_MS` | Optional | Cache TTL for analytics summary in milliseconds (default `60000` ms; controls freshness) |
+| `ANALYTICS_RANK_CACHE_MAX` | Optional | Maximum entries in in-memory rank cache (default `1000` entries; bounds memory usage) |
 
 Important notes:
 - `SUBGRAPH_PROXY_TOKEN` is **not** your Graph key.

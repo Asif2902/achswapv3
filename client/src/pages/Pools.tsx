@@ -819,23 +819,25 @@ export default function Pools() {
               Platform-wide TVL, volume, swaps, fees, outlier diagnostics, user leaderboard, and wallet-level behavior
               (raw vs effective) powered by Arc analytics index data.
             </p>
-            {data ? (
-              <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                <Badge variant="outline" className="bg-background/60">Block {formatCompact(data.meta.blockNumber)}</Badge>
-                <Badge variant={data.meta.hasIndexingErrors ? "destructive" : "secondary"}>
-                  {data.meta.hasIndexingErrors ? "Indexing Errors" : "Healthy"}
-                </Badge>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setRefreshNonce((n) => n + 1)}
-                  disabled={refreshing || loading}
-                  className="ml-auto"
-                >
-                  {refreshing ? "Refreshing..." : "Refresh Data"}
-                </Button>
-              </div>
-            ) : null}
+            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              {data ? (
+                <>
+                  <Badge variant="outline" className="bg-background/60">Block {formatCompact(data.meta.blockNumber)}</Badge>
+                  <Badge variant={data.meta.hasIndexingErrors ? "destructive" : "secondary"}>
+                    {data.meta.hasIndexingErrors ? "Indexing Errors" : "Healthy"}
+                  </Badge>
+                </>
+              ) : null}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setRefreshNonce((n) => n + 1)}
+                disabled={refreshing || loading}
+                className="ml-auto"
+              >
+                {refreshing ? "Refreshing..." : "Refresh Data"}
+              </Button>
+            </div>
           </div>
 
           <div className="w-full max-w-xl rounded-2xl border border-border/50 bg-background/75 p-3 shadow-lg shadow-black/5 backdrop-blur sm:p-4">
