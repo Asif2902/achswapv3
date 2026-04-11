@@ -5,10 +5,28 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .filter(Boolean);
 const SUBGRAPH_PROXY_TOKEN = (process.env.SUBGRAPH_PROXY_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = Number(process.env.SUBGRAPH_RATE_LIMIT_PER_MINUTE || 180);
-const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 5_000);
-const SUMMARY_CACHE_TTL_MS = Number(process.env.ANALYTICS_SUMMARY_CACHE_TTL_MS || 60_000);
-const MAX_RANK_CACHE_ENTRIES = Number(process.env.ANALYTICS_RANK_CACHE_MAX || 1000);
+const DEFAULT_RATE_LIMIT_MAX = 180;
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 5_000;
+const DEFAULT_SUMMARY_CACHE_TTL_MS = 60_000;
+const DEFAULT_MAX_RANK_CACHE_ENTRIES = 1000;
+
+function readPositiveEnvNumber(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < min || parsed > max) {
+    console.warn(`[analytics-summary] Invalid ${name}=${raw}; using default ${fallback}`);
+    return fallback;
+  }
+
+  return parsed;
+}
+
+const RATE_LIMIT_MAX = readPositiveEnvNumber("SUBGRAPH_RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_MAX, 1, 100_000);
+const UPSTREAM_TIMEOUT_MS = readPositiveEnvNumber("UPSTREAM_TIMEOUT_MS", DEFAULT_UPSTREAM_TIMEOUT_MS, 250, 120_000);
+const SUMMARY_CACHE_TTL_MS = readPositiveEnvNumber("ANALYTICS_SUMMARY_CACHE_TTL_MS", DEFAULT_SUMMARY_CACHE_TTL_MS, 1_000, 3_600_000);
+const MAX_RANK_CACHE_ENTRIES = readPositiveEnvNumber("ANALYTICS_RANK_CACHE_MAX", DEFAULT_MAX_RANK_CACHE_ENTRIES, 1, 100_000);
 const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim();
 const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_SECONDS = Math.max(1, Math.floor(RATE_LIMIT_WINDOW_MS / 1000));
@@ -62,7 +80,7 @@ function isAuthorized(req) {
 
 function sameOrigin(req) {
   const originHeader = req.headers.origin;
-  if (!originHeader) return true;
+  if (!originHeader) return false;
 
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
   if (!host) return false;
@@ -206,21 +224,18 @@ function setCachedRank(wallet, rank) {
 }
 
 async function fetchSubgraph(token, query, variables) {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
-  try {
-    return await fetch(STUDIO_URL, {
+  return fetchJsonWithTimeout(
+    STUDIO_URL,
+    {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${token}`,
       },
       body: JSON.stringify({ query, variables }),
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeoutId);
-  }
+    },
+    UPSTREAM_TIMEOUT_MS,
+  );
 }
 
 function normalizeAddressInput(value) {
@@ -235,8 +250,7 @@ async function countEntityByPagination(token, entity, where = "") {
   while (true) {
     const filter = where ? `, where: ${where}` : "";
     const query = `query Count${entity}${skip} { ${entity}(first: 1000, skip: ${skip}${filter}) { id } }`;
-    const upstream = await fetchSubgraph(token, query, {});
-    const payload = await upstream.json();
+    const { response: upstream, json: payload } = await fetchSubgraph(token, query, {});
 
     if (!upstream.ok) {
       throw new Error(payload?.errors?.[0]?.message || `Upstream ${entity} count failed`);
@@ -268,8 +282,7 @@ async function getUserRankByEffectiveVolume(token, wallet) {
         }
       }
     `;
-    const upstream = await fetchSubgraph(token, query, {});
-    const payload = await upstream.json();
+    const { response: upstream, json: payload } = await fetchSubgraph(token, query, {});
 
     if (!upstream.ok) {
       throw new Error(payload?.errors?.[0]?.message || "Upstream rank query failed");

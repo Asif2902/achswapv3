@@ -69,7 +69,7 @@ function isAuthorized(req) {
 
 function sameOrigin(req) {
   const originHeader = req.headers.origin;
-  if (!originHeader) return true;
+  if (!originHeader) return false;
 
   const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
   if (!host) return false;
