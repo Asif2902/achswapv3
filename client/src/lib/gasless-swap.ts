@@ -141,43 +141,63 @@ export async function submitToRelayer(
     typeof value === "bigint" ? value.toString() : value
   );
   
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-  
-  try {
-    const response = await fetch(GASLESS_CONFIG.relayerUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: serializedRequest,
-      signal: controller.signal,
-    });
+  const timeoutMs = 45000;
+  const maxAttempts = 2;
+  let lastError: Error | null = null;
 
-    clearTimeout(timeout);
-
-    const text = await response.text();
-    if (!response.ok) {
-      let errorMessage = `Relayer failed (${response.status})`;
-      try {
-        const error = JSON.parse(text);
-        if (error.error) errorMessage = error.error;
-      } catch {
-        errorMessage = `Relayer error (${response.status}): ${text.slice(0, 200)}`;
-      }
-      throw new Error(errorMessage);
-    }
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error(`Invalid relayer response: ${text.slice(0, 100)}`);
+      const response = await fetch(GASLESS_CONFIG.relayerUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: serializedRequest,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      const text = await response.text();
+      if (!response.ok) {
+        let errorMessage = `Relayer failed (${response.status})`;
+        try {
+          const error = JSON.parse(text);
+          if (error.error) errorMessage = error.error;
+        } catch {
+          errorMessage = `Relayer error (${response.status}): ${text.slice(0, 200)}`;
+        }
+        throw new Error(errorMessage);
+      }
+
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error(`Invalid relayer response: ${text.slice(0, 100)}`);
+      }
+    } catch (err: any) {
+      clearTimeout(timeout);
+      const normalizedError = err?.name === "AbortError"
+        ? new Error("Relayer request timed out")
+        : (err instanceof Error ? err : new Error(String(err)));
+      lastError = normalizedError;
+
+      const retryable =
+        normalizedError.message.toLowerCase().includes("timed out") ||
+        normalizedError.message.toLowerCase().includes("network") ||
+        normalizedError.message.toLowerCase().includes("failed to fetch") ||
+        normalizedError.message.toLowerCase().includes("502") ||
+        normalizedError.message.toLowerCase().includes("503") ||
+        normalizedError.message.toLowerCase().includes("504");
+
+      if (!retryable || attempt === maxAttempts - 1) {
+        break;
+      }
     }
-  } catch (err: any) {
-    clearTimeout(timeout);
-    if (err.name === "AbortError") {
-      throw new Error("Relayer request timed out");
-    }
-    throw err;
   }
+
+  throw lastError ?? new Error("Relayer request failed");
 }
 
 export async function waitForTransaction(

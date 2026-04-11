@@ -56,12 +56,21 @@ function isAuthorized(req) {
   return appHeader === SUBGRAPH_PROXY_TOKEN || bearer === SUBGRAPH_PROXY_TOKEN;
 }
 
-function isSameOriginRequest(req) {
-  const origin = req.headers.origin;
-  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim().toLowerCase();
-  if (typeof origin !== "string" || !host) return false;
+function sameOrigin(req) {
+  const originHeader = req.headers.origin;
+  if (!originHeader) return true;
+
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
+  if (!host) return false;
+
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+
+  const serverOrigin = `${proto}://${host}`.toLowerCase();
   try {
-    return new URL(origin).host.toLowerCase() === host;
+    return new URL(originHeader).origin.toLowerCase() === serverOrigin;
   } catch {
     return false;
   }
@@ -213,9 +222,9 @@ export default async function handler(req, res) {
 
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
-  if (!SUBGRAPH_PROXY_TOKEN) return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
-  const sameOriginRequest = isSameOriginRequest(req);
-  if (!sameOriginRequest && !isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
+  const isSameOrigin = sameOrigin(req);
+  if (!isSameOrigin && !SUBGRAPH_PROXY_TOKEN) return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
+  if (!isAuthorized(req) && !isSameOrigin) return res.status(403).json({ error: "Unauthorized" });
   if (!checkRateLimit(req)) return res.status(429).json({ error: "Rate limit exceeded" });
 
   const token = process.env.GRAPH_QUERY_TOKEN;

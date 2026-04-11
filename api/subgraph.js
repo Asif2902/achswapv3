@@ -24,6 +24,9 @@ const UPSTREAM_TIMEOUT_MS = readPositiveEnvNumber("UPSTREAM_TIMEOUT_MS", DEFAULT
 
 const rateLimitByKey = new Map();
 let rateLimitRequestCount = 0;
+const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim();
+const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
+const RATE_LIMIT_WINDOW_SECONDS = Math.max(1, Math.floor(RATE_LIMIT_WINDOW_MS / 1000));
 
 function normalizeOrigin(origin) {
   if (!origin) return "";
@@ -64,6 +67,76 @@ function isAuthorized(req) {
   return appHeader === SUBGRAPH_PROXY_TOKEN || bearer === SUBGRAPH_PROXY_TOKEN;
 }
 
+function sameOrigin(req) {
+  const originHeader = req.headers.origin;
+  if (!originHeader) return true;
+
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
+  if (!host) return false;
+
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+
+  const serverOrigin = `${proto}://${host}`.toLowerCase();
+  try {
+    return new URL(originHeader).origin.toLowerCase() === serverOrigin;
+  } catch {
+    return false;
+  }
+}
+
+async function fetchJsonWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const json = await response.json();
+    return { response, json };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function incrementSharedRateLimit(key) {
+  if (!UPSTASH_REDIS_REST_URL || !UPSTASH_REDIS_REST_TOKEN) return null;
+
+  const pipelineUrl = `${UPSTASH_REDIS_REST_URL.replace(/\/$/, "")}/pipeline`;
+  const payload = [
+    ["INCR", key],
+    ["EXPIRE", key, String(RATE_LIMIT_WINDOW_SECONDS), "NX"],
+  ];
+
+  const { response, json } = await fetchJsonWithTimeout(
+    pipelineUrl,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    },
+    1500,
+  );
+
+  if (!response.ok) {
+    throw new Error(`Shared rate-limit store error ${response.status}`);
+  }
+
+  const incrementResult = Array.isArray(json) ? json[0]?.result : null;
+  const incrementCount = Number(incrementResult);
+  if (!Number.isFinite(incrementCount)) {
+    throw new Error("Shared rate-limit store returned invalid counter");
+  }
+
+  return incrementCount;
+}
+
 function pruneRateLimitBuckets(now) {
   for (const [key, state] of rateLimitByKey) {
     if (!state || typeof state.resetAt !== "number" || state.resetAt <= now) {
@@ -72,9 +145,19 @@ function pruneRateLimitBuckets(now) {
   }
 }
 
-function checkRateLimit(req) {
+async function checkRateLimit(req) {
   const key = `${getClientIp(req)}:${req.headers["x-app-token"] || "anon"}`;
   const now = Date.now();
+
+  try {
+    const sharedCount = await incrementSharedRateLimit(`subgraph:rl:${key}`);
+    if (typeof sharedCount === "number") {
+      return sharedCount <= RATE_LIMIT_MAX;
+    }
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(`[subgraph] shared rate-limit unavailable, using in-memory fallback: ${detail}`);
+  }
 
   rateLimitRequestCount += 1;
   if (rateLimitRequestCount % 64 === 0) {
@@ -118,11 +201,12 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
-  if (!SUBGRAPH_PROXY_TOKEN) {
+  const isSameOrigin = sameOrigin(req);
+  if (!isSameOrigin && !SUBGRAPH_PROXY_TOKEN) {
     return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
   }
-  if (!isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
-  if (!checkRateLimit(req)) return res.status(429).json({ error: "Rate limit exceeded" });
+  if (!isAuthorized(req) && !isSameOrigin) return res.status(403).json({ error: "Unauthorized" });
+  if (!(await checkRateLimit(req))) return res.status(429).json({ error: "Rate limit exceeded" });
 
   const token = process.env.GRAPH_QUERY_TOKEN;
   if (!token) {
