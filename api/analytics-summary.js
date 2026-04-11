@@ -77,9 +77,13 @@ function sameOrigin(req) {
   const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
     .split(",")[0]
     .trim()
-    .toLowerCase();
+    .toLowerCase()
+    .replace(/:$/, "");
 
-  const serverOrigin = `${proto}://${host}`.toLowerCase();
+  const normalizedHost = host
+    .replace(/:443$/i, proto === "https" ? "" : "$&")
+    .replace(/:80$/i, proto === "http" ? "" : "$&");
+  const serverOrigin = `${proto}://${normalizedHost}`.toLowerCase();
   try {
     return new URL(originHeader).origin.toLowerCase() === serverOrigin;
   } catch {
@@ -393,7 +397,10 @@ function triggerRankRefresh(token, wallet) {
     })
     .catch((err) => {
       const detail = err instanceof Error ? err.message : String(err);
-      console.warn(`[analytics-summary] rank refresh failed for ${wallet}: ${detail}`);
+      const maskedWallet = typeof wallet === "string" && wallet.length > 10
+        ? `${wallet.slice(0, 6)}...${wallet.slice(-4)}`
+        : "<redacted>";
+      console.warn(`[analytics-summary] rank refresh failed for ${maskedWallet}: ${detail}`);
       throw err;
     })
     .finally(() => {
