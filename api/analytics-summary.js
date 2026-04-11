@@ -64,7 +64,7 @@ function normalizeOrigin(origin) {
 function isOriginAllowed(origin) {
   if (ALLOWED_ORIGINS.length === 0) return false;
   const normalized = normalizeOrigin(origin);
-  return ALLOWED_ORIGINS.some((allowed) => normalizeOrigin(allowed) === normalized);
+  return ALLOWED_ORIGINS.includes(normalized);
 }
 
 function sameOrigin(req) {
