@@ -71,7 +71,9 @@ function sameOrigin(req) {
   const originHeader = req.headers.origin;
   if (!originHeader) return false;
 
-  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "")
+    .split(",")[0]
+    .trim();
   if (!host) return false;
 
   const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
@@ -447,8 +449,7 @@ export default async function handler(req, res) {
       try {
         aggregateSummary = await triggerSummaryRefresh(token);
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        return res.status(503).json({ error: `Analytics summary refresh failed: ${detail}` });
+        throw err;
       }
     } else if (!summaryState.fresh || forceRefresh) {
       void triggerSummaryRefresh(token).catch(() => {});
@@ -468,8 +469,7 @@ export default async function handler(req, res) {
         try {
           targetUserRank = await triggerRankRefresh(token, wallet);
         } catch (err) {
-          const detail = err instanceof Error ? err.message : String(err);
-          return res.status(503).json({ error: `Analytics rank refresh failed: ${detail}` });
+          throw err;
         }
       } else {
         targetUserRank = rankState.value;
