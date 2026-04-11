@@ -67,26 +67,6 @@ function isAuthorized(req) {
   return appHeader === SUBGRAPH_PROXY_TOKEN || bearer === SUBGRAPH_PROXY_TOKEN;
 }
 
-function sameOrigin(req) {
-  const originHeader = req.headers.origin;
-  if (!originHeader) return false;
-
-  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
-  if (!host) return false;
-
-  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
-    .split(",")[0]
-    .trim()
-    .toLowerCase();
-
-  const serverOrigin = `${proto}://${host}`.toLowerCase();
-  try {
-    return new URL(originHeader).origin.toLowerCase() === serverOrigin;
-  } catch {
-    return false;
-  }
-}
-
 async function fetchJsonWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -201,11 +181,10 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
-  const isSameOrigin = sameOrigin(req);
-  if (!isSameOrigin && !SUBGRAPH_PROXY_TOKEN) {
+  if (!SUBGRAPH_PROXY_TOKEN) {
     return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
   }
-  if (!isAuthorized(req) && !isSameOrigin) return res.status(403).json({ error: "Unauthorized" });
+  if (!isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
   if (!(await checkRateLimit(req))) return res.status(429).json({ error: "Rate limit exceeded" });
 
   const token = process.env.GRAPH_QUERY_TOKEN;

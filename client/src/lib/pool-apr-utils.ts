@@ -1,4 +1,5 @@
 const SUBGRAPH_PROXY_URL = "/api/subgraph";
+const SUBGRAPH_PROXY_APP_TOKEN = (import.meta.env.VITE_SUBGRAPH_PROXY_TOKEN as string | undefined)?.trim();
 const WUSDC_ADDRESS = "0xde5db9049a8dd344dc1b7bbb098f9da60930a6da";
 const USDC_ERC20_INTERFACE = "0x3600000000000000000000000000000000000000";
 const NATIVE_USDC = "0x0000000000000000000000000000000000000000";
@@ -59,11 +60,17 @@ interface TopPoolsResponse {
 }
 
 async function subgraphFetch<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (SUBGRAPH_PROXY_APP_TOKEN) {
+    headers["X-App-Token"] = SUBGRAPH_PROXY_APP_TOKEN;
+  }
+
   const response = await fetch(SUBGRAPH_PROXY_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify({ query, variables }),
   });
 

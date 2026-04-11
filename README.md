@@ -58,7 +58,15 @@ Set these in **Vercel Project Settings -> Environment Variables**:
 Important notes:
 - `SUBGRAPH_PROXY_TOKEN` is **not** your Graph key.
 - `GRAPH_QUERY_TOKEN` is the Graph key used server-side when proxying requests.
-- Same-origin frontend calls can work without `SUBGRAPH_PROXY_TOKEN`, but setting it is still recommended for safer production setups and any cross-origin usage.
+- The proxy endpoints now require auth; set `VITE_SUBGRAPH_PROXY_TOKEN` on the frontend to the same value as `SUBGRAPH_PROXY_TOKEN`.
+
+### Frontend Environment (for proxy auth header)
+
+Set in frontend env (local `.env` and Vercel frontend env):
+
+| Variable | Required | What to put |
+|----------|----------|-------------|
+| `VITE_SUBGRAPH_PROXY_TOKEN` | Yes (with protected proxy) | Same exact value as `SUBGRAPH_PROXY_TOKEN` |
 
 ### Getting Required API Keys
 

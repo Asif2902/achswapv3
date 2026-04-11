@@ -12,6 +12,7 @@ const RPC_URLS = [
 ].filter((v, idx, arr) => typeof v === "string" && v.length > 0 && arr.indexOf(v) === idx);
 
 const providers = RPC_URLS.map((url) => new ethers.JsonRpcProvider(url));
+const providerReadyByIndex = new Map();
 
 let relayerWallets = [];
 let contracts = [];
@@ -124,6 +125,9 @@ function isRetryableError(message) {
     text.includes("429") ||
     text.includes("rate") ||
     text.includes("network") ||
+    text.includes("failed to detect network") ||
+    text.includes("server error") ||
+    text.includes("internal server error") ||
     text.includes("temporarily") ||
     text.includes("header not found")
   );
@@ -154,6 +158,12 @@ async function getFeeOverrides(provider, attempt) {
   return {};
 }
 
+async function ensureProviderReady(provider, idx) {
+  if (providerReadyByIndex.get(idx)) return;
+  await provider.getNetwork();
+  providerReadyByIndex.set(idx, true);
+}
+
 async function sendExecuteWithRetry(payload) {
   let lastError = null;
 
@@ -165,6 +175,7 @@ async function sendExecuteWithRetry(payload) {
     let nonce = null;
 
     try {
+      await ensureProviderReady(provider, idx);
       const feeOverrides = await getFeeOverrides(provider, attempt);
       nonce = await getNextNonce(provider, wallet.address);
 

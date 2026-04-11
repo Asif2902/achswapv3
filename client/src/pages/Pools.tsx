@@ -43,6 +43,7 @@ import { useAccount } from "wagmi";
 
 const SUBGRAPH_PROXY_URL = "/api/subgraph";
 const ANALYTICS_SUMMARY_URL = "/api/analytics-summary";
+const SUBGRAPH_PROXY_APP_TOKEN = (import.meta.env.VITE_SUBGRAPH_PROXY_TOKEN as string | undefined)?.trim();
 
 type Maybe<T> = T | null;
 
@@ -318,14 +319,19 @@ function normalizeAddressInput(value: string): string {
 
 async function fetchSubgraph<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
   const payload = { query, variables };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (SUBGRAPH_PROXY_APP_TOKEN) {
+    headers["X-App-Token"] = SUBGRAPH_PROXY_APP_TOKEN;
+  }
 
   let res: Response;
   try {
     res = await fetch(SUBGRAPH_PROXY_URL, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify(payload),
     });
   } catch {
@@ -346,11 +352,17 @@ async function fetchAnalyticsSummary(wallet: string): Promise<{
   outlierPoolsCount: number;
   targetUserRank: number | null;
 }> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (SUBGRAPH_PROXY_APP_TOKEN) {
+    headers["X-App-Token"] = SUBGRAPH_PROXY_APP_TOKEN;
+  }
+
   const response = await fetch(ANALYTICS_SUMMARY_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify({ wallet }),
   });
 
