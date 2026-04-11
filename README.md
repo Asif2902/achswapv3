@@ -50,6 +50,7 @@ Set these in **Vercel Project Settings -> Environment Variables**:
 |----------|----------|-------------|
 | `GRAPH_QUERY_TOKEN` | Yes | Your The Graph Studio query key (used by `/api/subgraph` and `/api/analytics-summary`) |
 | `SUBGRAPH_PROXY_TOKEN` | Recommended | Any strong random secret (for cross-origin proxy auth), e.g. `openssl rand -hex 32` |
+| `ALLOWED_ORIGINS` | Recommended | Comma-separated allowed browser origins for API CORS (e.g. `https://app.example.com,https://admin.example.com`) |
 | `UPSTASH_REDIS_REST_URL` | Optional | Upstash Redis REST URL for shared rate limiting across serverless instances |
 | `UPSTASH_REDIS_REST_TOKEN` | Optional | Upstash Redis REST token |
 | `SUBGRAPH_RATE_LIMIT_PER_MINUTE` | Optional | Integer request limit per minute (default `240` on `/api/subgraph`) |
@@ -59,6 +60,8 @@ Important notes:
 - `SUBGRAPH_PROXY_TOKEN` is **not** your Graph key.
 - `GRAPH_QUERY_TOKEN` is the Graph key used server-side when proxying requests.
 - The proxy endpoints now require auth; set `VITE_SUBGRAPH_PROXY_TOKEN` on the frontend to the same value as `SUBGRAPH_PROXY_TOKEN`.
+- `ALLOWED_ORIGINS` narrows browser access for API handlers that enforce CORS; if unset, those handlers now reject browser-origin requests by default.
+- Requests from the same deployed origin are accepted by server-side same-origin checks, while cross-origin calls must include `SUBGRAPH_PROXY_TOKEN`.
 
 ### Frontend Environment (for proxy auth header)
 

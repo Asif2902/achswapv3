@@ -708,8 +708,8 @@ export default function Pools() {
         setError(e instanceof Error ? e.message : "Failed to load analytics data");
       } finally {
         if (!disposed) {
-          if (initial) setLoading(false);
-          else setRefreshing(false);
+          setLoading(false);
+          setRefreshing(false);
         }
       }
     }

@@ -34,17 +34,15 @@ async function withNonceLock(walletAddress, task) {
     release = resolve;
   });
 
-  nonceLockByWallet.set(
-    key,
-    previous.then(() => current),
-  );
+  const lock = previous.then(() => current);
+  nonceLockByWallet.set(key, lock);
 
   await previous;
   try {
     return await task();
   } finally {
     release();
-    if (nonceLockByWallet.get(key) === current) {
+    if (nonceLockByWallet.get(key) === lock) {
       nonceLockByWallet.delete(key);
     }
   }

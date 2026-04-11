@@ -34,14 +34,41 @@ function normalizeOrigin(origin) {
 }
 
 function isOriginAllowed(origin) {
-  if (ALLOWED_ORIGINS.length === 0) return true;
   const normalized = normalizeOrigin(origin);
   return ALLOWED_ORIGINS.some((allowed) => normalizeOrigin(allowed) === normalized);
 }
 
+function sameOrigin(req) {
+  const originHeader = req.headers.origin;
+  if (!originHeader) return false;
+
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim();
+  if (!host) return false;
+
+  const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "https")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+
+  const serverOrigin = `${proto}://${host}`.toLowerCase();
+  try {
+    return new URL(originHeader).origin.toLowerCase() === serverOrigin;
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedBrowserOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  if (sameOrigin(req)) return true;
+  if (ALLOWED_ORIGINS.length === 0) return false;
+  return isOriginAllowed(origin);
+}
+
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
-  if (origin && isOriginAllowed(origin)) {
+  if (origin && isAllowedBrowserOrigin(req)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
@@ -176,15 +203,19 @@ export default async function handler(req, res) {
   setCorsHeaders(req, res);
 
   if (req.method === "OPTIONS") {
-    if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
+    if (req.headers.origin && !isAllowedBrowserOrigin(req)) return res.status(403).json({ error: "Origin not allowed" });
     return res.status(200).end();
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-  if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
-  if (!SUBGRAPH_PROXY_TOKEN) {
-    return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
+  if (req.headers.origin && !isAllowedBrowserOrigin(req)) return res.status(403).json({ error: "Origin not allowed" });
+  const trustedSameOrigin = sameOrigin(req);
+  if (!trustedSameOrigin) {
+    if (!SUBGRAPH_PROXY_TOKEN) {
+      return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
+    }
+    if (!isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
   }
-  if (!isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
+
   if (!(await checkRateLimit(req))) return res.status(429).json({ error: "Rate limit exceeded" });
 
   const token = process.env.GRAPH_QUERY_TOKEN;
