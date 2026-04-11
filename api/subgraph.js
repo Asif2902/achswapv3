@@ -97,10 +97,13 @@ async function fetchWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, {
+    const response = await fetch(url, {
       ...options,
       signal: controller.signal,
     });
+
+    const text = await response.text();
+    return { response, text };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -136,10 +139,9 @@ export default async function handler(req, res) {
       body: JSON.stringify(req.body ?? {}),
     }, UPSTREAM_TIMEOUT_MS);
 
-    const text = await upstream.text();
-    res.status(upstream.status);
+    res.status(upstream.response.status);
     res.setHeader("Content-Type", "application/json");
-    return res.send(text);
+    return res.send(upstream.text);
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       return res.status(504).json({ error: "Subgraph upstream timeout" });

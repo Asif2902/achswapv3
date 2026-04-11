@@ -68,7 +68,26 @@ async function subgraphFetch<T>(query: string, variables: Record<string, unknown
   });
 
   if (!response.ok) {
-    throw new Error(`Subgraph HTTP error: ${response.status}`);
+    let proxyErrorDetail = "";
+    try {
+      const errorJson = await response.json();
+      if (errorJson?.error) {
+        proxyErrorDetail = String(errorJson.error);
+      } else if (errorJson?.message) {
+        proxyErrorDetail = String(errorJson.message);
+      } else {
+        proxyErrorDetail = JSON.stringify(errorJson);
+      }
+    } catch {
+      try {
+        proxyErrorDetail = await response.text();
+      } catch {
+        proxyErrorDetail = "";
+      }
+    }
+
+    const suffix = proxyErrorDetail ? `: ${proxyErrorDetail}` : "";
+    throw new Error(`Subgraph HTTP error ${response.status}${suffix}`);
   }
 
   const json = await response.json();
