@@ -98,13 +98,23 @@ function getActiveTVLUSD(
 
   if (liquidityBI === 0n || sqrtPriceBI === 0n) return 0;
 
-  // Use BigInt division to preserve fractional precision
-  const sqrtP = Number(sqrtPriceBI / Q96) + Number(sqrtPriceBI % Q96) / Number(Q96);
   const dec0  = parseInt(pool.token0.decimals);
   const dec1  = parseInt(pool.token1.decimals);
 
-  const amount0Active = (Number(liquidityBI) / sqrtP)  / Math.pow(10, dec0);
-  const amount1Active = (Number(liquidityBI) * sqrtP)  / Math.pow(10, dec1);
+  // Keep intermediate V3 math in bigint fixed-point form to avoid precision loss.
+  const amount0RawBI = (liquidityBI * Q96) / sqrtPriceBI;
+  const amount1RawBI = (liquidityBI * sqrtPriceBI) / Q96;
+
+  const dec0Scale = 10n ** BigInt(dec0);
+  const dec1Scale = 10n ** BigInt(dec1);
+
+  const amount0WholeBI = amount0RawBI / dec0Scale;
+  const amount1WholeBI = amount1RawBI / dec1Scale;
+  const amount0FracBI = amount0RawBI % dec0Scale;
+  const amount1FracBI = amount1RawBI % dec1Scale;
+
+  const amount0Active = Number(amount0WholeBI) + Number(amount0FracBI) / Number(dec0Scale);
+  const amount1Active = Number(amount1WholeBI) + Number(amount1FracBI) / Number(dec1Scale);
 
   let token0USD: number;
   let token1USD: number;
@@ -129,7 +139,7 @@ function getActiveTVLUSD(
 
   if (debug) {
     console.debug({
-      sqrtP,
+      sqrtPriceX96: sqrtPriceBI.toString(),
       amount0Active,
       amount1Active,
       activeTVLUSD: result,

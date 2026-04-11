@@ -5,10 +5,25 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .filter(Boolean);
 const SUBGRAPH_PROXY_TOKEN = (process.env.SUBGRAPH_PROXY_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = Number(process.env.SUBGRAPH_RATE_LIMIT_PER_MINUTE || 240);
-const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 5_000);
+const DEFAULT_RATE_LIMIT_MAX = 240;
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 5_000;
+
+function readPositiveEnvNumber(name, fallback) {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(`[subgraph] Invalid ${name}=${raw}; using default ${fallback}`);
+    return fallback;
+  }
+  return parsed;
+}
+
+const RATE_LIMIT_MAX = Math.floor(readPositiveEnvNumber("SUBGRAPH_RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_MAX));
+const UPSTREAM_TIMEOUT_MS = Math.floor(readPositiveEnvNumber("UPSTREAM_TIMEOUT_MS", DEFAULT_UPSTREAM_TIMEOUT_MS));
 
 const rateLimitByKey = new Map();
+let rateLimitRequestCount = 0;
 
 function normalizeOrigin(origin) {
   if (!origin) return "";
@@ -60,9 +75,23 @@ function isSameOriginRequest(req) {
   }
 }
 
+function pruneRateLimitBuckets(now) {
+  for (const [key, state] of rateLimitByKey) {
+    if (!state || typeof state.resetAt !== "number" || state.resetAt <= now) {
+      rateLimitByKey.delete(key);
+    }
+  }
+}
+
 function checkRateLimit(req) {
   const key = `${getClientIp(req)}:${req.headers["x-app-token"] || "anon"}`;
   const now = Date.now();
+
+  rateLimitRequestCount += 1;
+  if (rateLimitRequestCount % 64 === 0) {
+    pruneRateLimitBuckets(now);
+  }
+
   const state = rateLimitByKey.get(key) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
 
   if (now > state.resetAt) {
@@ -97,8 +126,10 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
-  if (!SUBGRAPH_PROXY_TOKEN) return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
   const sameOriginRequest = isSameOriginRequest(req);
+  if (!sameOriginRequest && !SUBGRAPH_PROXY_TOKEN) {
+    return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
+  }
   if (!sameOriginRequest && !isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
   if (!checkRateLimit(req)) return res.status(429).json({ error: "Rate limit exceeded" });
 

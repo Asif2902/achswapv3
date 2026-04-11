@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Area,
   AreaChart,
@@ -541,27 +541,28 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
     }
   `;
 
-  const snapshot = await fetchSubgraph<{
-    _meta: {
-      deployment: string;
-      hasIndexingErrors: boolean;
-      block: { number: number; timestamp: number };
-    };
-    protocols: Protocol[];
-    protocolDayDatas: ProtocolDayData[];
-    topPoolsByTvl: Pool[];
-    topPoolsByVolume: Pool[];
-    topUsersByEffectiveVolume: User[];
-    targetUser: Maybe<User>;
-    targetUserDexSwaps: DexSwap[];
-    targetUserRwaTrades: RwaTrade[];
-    topRwaPairs: RwaPair[];
-  }>(query, {
-    wallet: normalizedWallet || "0x0000000000000000000000000000000000000000",
-    dateCutoff,
-  });
-
-  const summary = await fetchAnalyticsSummary(normalizedWallet);
+  const [snapshot, summary] = await Promise.all([
+    fetchSubgraph<{
+      _meta: {
+        deployment: string;
+        hasIndexingErrors: boolean;
+        block: { number: number; timestamp: number };
+      };
+      protocols: Protocol[];
+      protocolDayDatas: ProtocolDayData[];
+      topPoolsByTvl: Pool[];
+      topPoolsByVolume: Pool[];
+      topUsersByEffectiveVolume: User[];
+      targetUser: Maybe<User>;
+      targetUserDexSwaps: DexSwap[];
+      targetUserRwaTrades: RwaTrade[];
+      topRwaPairs: RwaPair[];
+    }>(query, {
+      wallet: normalizedWallet || "0x0000000000000000000000000000000000000000",
+      dateCutoff,
+    }),
+    fetchAnalyticsSummary(normalizedWallet),
+  ]);
 
   return {
     meta: {
@@ -629,6 +630,7 @@ function EmptyState({ text }: { text: string }) {
 
 export default function Pools() {
   const { address } = useAccount();
+  const lastAutoAppliedAddressRef = useRef("");
   const [walletInput, setWalletInput] = useState("");
   const [appliedWallet, setAppliedWallet] = useState("");
   const [loading, setLoading] = useState(true);
@@ -640,9 +642,20 @@ export default function Pools() {
 
   useEffect(() => {
     const preferred = normalizeAddressInput(address ?? "");
-    if (!walletInput && preferred) {
+
+    if (!preferred) {
+      lastAutoAppliedAddressRef.current = "";
+      if (!walletInput) {
+        setAppliedWallet("");
+      }
+      return;
+    }
+
+    if (!walletInput && preferred !== lastAutoAppliedAddressRef.current) {
       setWalletInput(preferred);
       setAppliedWallet(preferred);
+      lastAutoAppliedAddressRef.current = preferred;
+      return;
     }
   }, [address, walletInput]);
 
@@ -650,6 +663,7 @@ export default function Pools() {
     const normalized = normalizeAddressInput(walletInput);
     if (!walletInput.trim()) {
       setError(null);
+      setAppliedWallet("");
       return;
     }
     if (!normalized) {
