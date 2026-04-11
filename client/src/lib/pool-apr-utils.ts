@@ -21,7 +21,7 @@ export interface PoolStats {
   activeTVLUSD: number
   currentTick: number
   liquidity: string
-  sqrtPrice: string
+  sqrtPriceX96: string
 
   aprConservative: number
   aprActive: number
@@ -260,6 +260,7 @@ export async function getPoolStats(
       avgDailyFees,
       tvlUSD,
       activeTVL,
+      useActiveTVL,
       aprConservative,
       aprActive,
     });
@@ -280,10 +281,10 @@ export async function getPoolStats(
     txCount7d,
     daysWithData,
     tvlUSD,
-    activeTVLUSD: activeTVL,
+    activeTVLUSD: useActiveTVL,
     currentTick: pool.tick,
     liquidity: pool.liquidity,
-    sqrtPrice: pool.sqrtPriceX96,
+    sqrtPriceX96: pool.sqrtPriceX96,
     aprConservative,
     aprActive,
     dailyFeeRate,

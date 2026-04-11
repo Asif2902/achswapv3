@@ -12,15 +12,15 @@ function readPositiveEnvNumber(name, fallback) {
   const raw = process.env[name];
   if (raw == null || raw === "") return fallback;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1) {
     console.warn(`[subgraph] Invalid ${name}=${raw}; using default ${fallback}`);
     return fallback;
   }
   return parsed;
 }
 
-const RATE_LIMIT_MAX = Math.floor(readPositiveEnvNumber("SUBGRAPH_RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_MAX));
-const UPSTREAM_TIMEOUT_MS = Math.floor(readPositiveEnvNumber("UPSTREAM_TIMEOUT_MS", DEFAULT_UPSTREAM_TIMEOUT_MS));
+const RATE_LIMIT_MAX = readPositiveEnvNumber("SUBGRAPH_RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_MAX);
+const UPSTREAM_TIMEOUT_MS = readPositiveEnvNumber("UPSTREAM_TIMEOUT_MS", DEFAULT_UPSTREAM_TIMEOUT_MS);
 
 const rateLimitByKey = new Map();
 let rateLimitRequestCount = 0;
@@ -62,17 +62,6 @@ function isAuthorized(req) {
     ? authHeader.slice(7)
     : "";
   return appHeader === SUBGRAPH_PROXY_TOKEN || bearer === SUBGRAPH_PROXY_TOKEN;
-}
-
-function isSameOriginRequest(req) {
-  const origin = req.headers.origin;
-  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim().toLowerCase();
-  if (typeof origin !== "string" || !host) return false;
-  try {
-    return new URL(origin).host.toLowerCase() === host;
-  } catch {
-    return false;
-  }
 }
 
 function pruneRateLimitBuckets(now) {
@@ -126,11 +115,10 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
-  const sameOriginRequest = isSameOriginRequest(req);
-  if (!sameOriginRequest && !SUBGRAPH_PROXY_TOKEN) {
+  if (!SUBGRAPH_PROXY_TOKEN) {
     return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
   }
-  if (!sameOriginRequest && !isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
+  if (!isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
   if (!checkRateLimit(req)) return res.status(429).json({ error: "Rate limit exceeded" });
 
   const token = process.env.GRAPH_QUERY_TOKEN;
