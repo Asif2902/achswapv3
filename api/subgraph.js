@@ -1,7 +1,7 @@
 const STUDIO_URL = "https://api.studio.thegraph.com/query/1742338/ach/version/latest";
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
-  .map((v) => v.trim())
+  .map((v) => normalizeOrigin(v))
   .filter(Boolean);
 const SUBGRAPH_PROXY_TOKEN = (process.env.SUBGRAPH_PROXY_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -30,7 +30,22 @@ const RATE_LIMIT_WINDOW_SECONDS = Math.max(1, Math.floor(RATE_LIMIT_WINDOW_MS / 
 
 function normalizeOrigin(origin) {
   if (!origin) return "";
-  return origin.trim().toLowerCase();
+  const trimmed = String(origin).trim();
+
+  try {
+    const parsed = new URL(trimmed);
+    const protocol = parsed.protocol.toLowerCase();
+    if (protocol !== "http:" && protocol !== "https:") return "";
+
+    const hostname = parsed.hostname.toLowerCase();
+    const defaultPort = (protocol === "http:" && (parsed.port === "" || parsed.port === "80"))
+      || (protocol === "https:" && (parsed.port === "" || parsed.port === "443"));
+    const portPart = defaultPort ? "" : `:${parsed.port}`;
+
+    return `${protocol}//${hostname}${portPart}`;
+  } catch {
+    return "";
+  }
 }
 
 function isOriginAllowed(origin) {

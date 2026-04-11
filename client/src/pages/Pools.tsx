@@ -386,7 +386,7 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
   const dateCutoff = nowDay - 29;
 
   const query = `
-    query AnalyticsSnapshot($wallet: String!, $dateCutoff: Int!) {
+    query AnalyticsSnapshot($wallet: String!, $dateCutoff: Int!, $hasWallet: Boolean!) {
       _meta {
         deployment
         hasIndexingErrors
@@ -489,7 +489,7 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
         lastSeenTimestamp
       }
 
-      targetUser: user(id: $wallet) {
+      targetUser: user(id: $wallet) @include(if: $hasWallet) {
         id
         txCount
         swapCount
@@ -511,7 +511,7 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
         lastSeenTimestamp
       }
 
-      targetUserDexSwaps: dexSwaps(first: 50, where: { user: $wallet }, orderBy: timestamp, orderDirection: desc) {
+      targetUserDexSwaps: dexSwaps(first: 50, where: { user: $wallet }, orderBy: timestamp, orderDirection: desc) @include(if: $hasWallet) {
         id
         timestamp
         amountUsd
@@ -528,7 +528,7 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
         }
       }
 
-      targetUserRwaTrades: rwaTrades(first: 50, where: { user: $wallet }, orderBy: timestamp, orderDirection: desc) {
+      targetUserRwaTrades: rwaTrades(first: 50, where: { user: $wallet }, orderBy: timestamp, orderDirection: desc) @include(if: $hasWallet) {
         id
         timestamp
         side
@@ -565,12 +565,13 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
       topPoolsByTvl: Pool[];
       topPoolsByVolume: Pool[];
       topUsersByEffectiveVolume: User[];
-      targetUser: Maybe<User>;
-      targetUserDexSwaps: DexSwap[];
-      targetUserRwaTrades: RwaTrade[];
+      targetUser?: Maybe<User>;
+      targetUserDexSwaps?: DexSwap[];
+      targetUserRwaTrades?: RwaTrade[];
       topRwaPairs: RwaPair[];
     }>(query, {
-      wallet: normalizedWallet || "0x0000000000000000000000000000000000000000",
+      wallet: normalizedWallet,
+      hasWallet: Boolean(normalizedWallet),
       dateCutoff,
     }),
     fetchAnalyticsSummary(normalizedWallet),
@@ -592,10 +593,10 @@ async function loadAnalytics(targetWallet: string): Promise<AnalyticsData> {
     swapUsersCount: summary.swapUsersCount,
     rwaUsersCount: summary.rwaUsersCount,
     outlierPoolsCount: summary.outlierPoolsCount,
-    targetUser: snapshot.targetUser,
+    targetUser: snapshot.targetUser ?? null,
     targetUserRank: summary.targetUserRank,
-    targetUserDexSwaps: snapshot.targetUserDexSwaps,
-    targetUserRwaTrades: snapshot.targetUserRwaTrades,
+    targetUserDexSwaps: snapshot.targetUserDexSwaps ?? [],
+    targetUserRwaTrades: snapshot.targetUserRwaTrades ?? [],
     topRwaPairs: snapshot.topRwaPairs,
   };
 }

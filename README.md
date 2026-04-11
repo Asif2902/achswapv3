@@ -53,7 +53,7 @@ Set these in **Vercel Project Settings -> Environment Variables**:
 | `ALLOWED_ORIGINS` | Recommended | Comma-separated allowed browser origins for API CORS (e.g. `https://app.example.com,https://admin.example.com`) |
 | `UPSTASH_REDIS_REST_URL` | Optional | Upstash Redis REST URL for shared rate limiting across serverless instances |
 | `UPSTASH_REDIS_REST_TOKEN` | Optional | Upstash Redis REST token |
-| `SUBGRAPH_RATE_LIMIT_PER_MINUTE` | Optional | Integer request limit per minute (default `240` on `/api/subgraph`) |
+| `SUBGRAPH_RATE_LIMIT_PER_MINUTE` | Optional | Integer request limit per minute (default `240` in `api/subgraph.js`, default `180` in `api/analytics-summary.js`) |
 | `UPSTREAM_TIMEOUT_MS` | Optional | Integer upstream timeout in milliseconds (default `5000`) |
 
 Important notes:

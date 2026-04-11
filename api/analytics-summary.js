@@ -347,7 +347,7 @@ export default async function handler(req, res) {
       const [totalUsersCount, swapUsersCount, rwaUsersCount, outlierPoolsCount] = await Promise.all([
         countEntityByPagination(token, "users"),
         countEntityByPagination(token, "users", "{ swapCount_gt: 0 }"),
-        countEntityByPagination(token, "users", "{ OR: [{ rwaBuyCount_gt: 0 }, { rwaRedeemCount_gt: 0 }] }"),
+        countEntityByPagination(token, "users", "{ or: [{ rwaBuyCount_gt: 0 }, { rwaRedeemCount_gt: 0 }] }"),
         countEntityByPagination(token, "pools", "{ flaggedLowLiquidityOutlier: true }"),
       ]);
 
