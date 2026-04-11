@@ -3,7 +3,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((v) => v.trim())
   .filter(Boolean);
-const APP_PROXY_TOKEN = (process.env.SUBGRAPH_PROXY_TOKEN || "").trim();
+const SUBGRAPH_PROXY_TOKEN = (process.env.SUBGRAPH_PROXY_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX = Number(process.env.SUBGRAPH_RATE_LIMIT_PER_MINUTE || 240);
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 5_000);
@@ -40,13 +40,24 @@ function getClientIp(req) {
 }
 
 function isAuthorized(req) {
-  if (!APP_PROXY_TOKEN) return true;
+  if (!SUBGRAPH_PROXY_TOKEN) return false;
   const appHeader = req.headers["x-app-token"];
   const authHeader = req.headers.authorization;
   const bearer = typeof authHeader === "string" && authHeader.startsWith("Bearer ")
     ? authHeader.slice(7)
     : "";
-  return appHeader === APP_PROXY_TOKEN || bearer === APP_PROXY_TOKEN;
+  return appHeader === SUBGRAPH_PROXY_TOKEN || bearer === SUBGRAPH_PROXY_TOKEN;
+}
+
+function isSameOriginRequest(req) {
+  const origin = req.headers.origin;
+  const host = String(req.headers["x-forwarded-host"] || req.headers.host || "").trim().toLowerCase();
+  if (typeof origin !== "string" || !host) return false;
+  try {
+    return new URL(origin).host.toLowerCase() === host;
+  } catch {
+    return false;
+  }
 }
 
 function checkRateLimit(req) {
@@ -86,7 +97,9 @@ export default async function handler(req, res) {
   }
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   if (!isOriginAllowed(req.headers.origin)) return res.status(403).json({ error: "Origin not allowed" });
-  if (!isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
+  if (!SUBGRAPH_PROXY_TOKEN) return res.status(500).json({ error: "Missing SUBGRAPH_PROXY_TOKEN server environment variable" });
+  const sameOriginRequest = isSameOriginRequest(req);
+  if (!sameOriginRequest && !isAuthorized(req)) return res.status(403).json({ error: "Unauthorized" });
   if (!checkRateLimit(req)) return res.status(429).json({ error: "Rate limit exceeded" });
 
   const token = process.env.GRAPH_QUERY_TOKEN;
