@@ -61,17 +61,10 @@ Set these in **Vercel Project Settings -> Environment Variables**:
 Important notes:
 - `SUBGRAPH_PROXY_TOKEN` is **not** your Graph key.
 - `GRAPH_QUERY_TOKEN` is the Graph key used server-side when proxying requests.
-- The proxy endpoints now require auth; set `VITE_SUBGRAPH_PROXY_TOKEN` on the frontend to the same value as `SUBGRAPH_PROXY_TOKEN`.
+- Keep `SUBGRAPH_PROXY_TOKEN` server-only. Do not expose it to the browser and do not set any `VITE_*` variant.
 - `ALLOWED_ORIGINS` narrows browser access for API handlers that enforce CORS; if unset, those handlers now reject browser-origin requests by default.
-- Requests from the same deployed origin are accepted by server-side same-origin checks, while cross-origin calls must include `SUBGRAPH_PROXY_TOKEN`.
-
-### Frontend Environment (for proxy auth header)
-
-Set in frontend env (local `.env` and Vercel frontend env):
-
-| Variable | Required | What to put |
-|----------|----------|-------------|
-| `VITE_SUBGRAPH_PROXY_TOKEN` | Yes (with protected proxy) | Same exact value as `SUBGRAPH_PROXY_TOKEN` |
+- Browser calls should use same-origin API routes (`/api/subgraph`, `/api/analytics-summary`) and rely on server-side checks.
+- For cross-origin or server-to-server access, forward `SUBGRAPH_PROXY_TOKEN` only from secure server middleware/headers (never from client code).
 
 ### Getting Required API Keys
 

@@ -38,6 +38,8 @@ const summaryCache = {
   expiresAt: 0,
 };
 const rankCache = new Map();
+let summaryRefreshPromise = null;
+const rankRefreshPromises = new Map();
 
 function normalizeOrigin(origin) {
   if (!origin) return "";
@@ -214,13 +216,15 @@ async function checkRateLimit(req) {
   return state.count <= RATE_LIMIT_MAX;
 }
 
-function getCachedSummary() {
-  if (Date.now() > summaryCache.expiresAt) {
-    summaryCache.value = null;
-    summaryCache.expiresAt = 0;
-    return null;
+function getCachedSummaryState() {
+  if (!summaryCache.value) {
+    return { value: null, fresh: false };
   }
-  return summaryCache.value;
+
+  return {
+    value: summaryCache.value,
+    fresh: Date.now() <= summaryCache.expiresAt,
+  };
 }
 
 function setCachedSummary(value) {
@@ -228,14 +232,17 @@ function setCachedSummary(value) {
   summaryCache.expiresAt = Date.now() + SUMMARY_CACHE_TTL_MS;
 }
 
-function getCachedRank(wallet) {
+function getCachedRankState(wallet) {
   const cached = rankCache.get(wallet);
-  if (!cached) return undefined;
-  if (Date.now() > cached.expiresAt) {
-    rankCache.delete(wallet);
-    return undefined;
+  if (!cached) {
+    return { exists: false, value: null, fresh: false };
   }
-  return cached.value;
+
+  return {
+    exists: true,
+    value: cached.value,
+    fresh: Date.now() <= cached.expiresAt,
+  };
 }
 
 function setCachedRank(wallet, rank) {
@@ -295,39 +302,116 @@ async function countEntityByPagination(token, entity, where = "") {
   return total;
 }
 
+async function buildAggregateSummary(token) {
+  const [totalUsersCount, swapUsersCount, rwaUsersCount, outlierPoolsCount] = await Promise.all([
+    countEntityByPagination(token, "users"),
+    countEntityByPagination(token, "users", "{ swapCount_gt: 0 }"),
+    countEntityByPagination(token, "users", "{ or: [{ rwaBuyCount_gt: 0 }, { rwaRedeemCount_gt: 0 }] }"),
+    countEntityByPagination(token, "pools", "{ flaggedLowLiquidityOutlier: true }"),
+  ]);
+
+  return {
+    totalUsersCount,
+    swapUsersCount,
+    rwaUsersCount,
+    outlierPoolsCount,
+  };
+}
+
+function triggerSummaryRefresh(token) {
+  if (summaryRefreshPromise) return summaryRefreshPromise;
+
+  summaryRefreshPromise = buildAggregateSummary(token)
+    .then((summary) => {
+      setCachedSummary(summary);
+      return summary;
+    })
+    .catch((err) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(`[analytics-summary] summary refresh failed: ${detail}`);
+      return null;
+    })
+    .finally(() => {
+      summaryRefreshPromise = null;
+    });
+
+  return summaryRefreshPromise;
+}
+
 async function getUserRankByEffectiveVolume(token, wallet) {
   if (!wallet) return null;
 
-  let rank = 1;
-  let skip = 0;
-
-  while (true) {
-    const query = `
-      query RankChunk {
-        users(first: 1000, skip: ${skip}, orderBy: totalEffectiveVolumeUsd, orderDirection: desc) {
-          id
-        }
+  const targetQuery = `
+    query TargetUserRank($wallet: String!) {
+      target: user(id: $wallet) {
+        id
+        totalEffectiveVolumeUsd
       }
-    `;
-    const { response: upstream, json: payload } = await fetchSubgraph(token, query, {});
-
-    if (!upstream.ok) {
-      throw new Error(payload?.errors?.[0]?.message || "Upstream rank query failed");
     }
-    if (payload?.errors?.length) {
-      throw new Error(payload.errors[0]?.message || "Rank query failed");
-    }
+  `;
+  const { response: targetResponse, json: targetPayload } = await fetchSubgraph(token, targetQuery, { wallet });
 
-    const users = payload?.data?.users || [];
-    if (!users.length) return null;
-
-    const foundIndex = users.findIndex((u) => String(u.id || "").toLowerCase() === wallet);
-    if (foundIndex >= 0) return rank + foundIndex;
-
-    rank += users.length;
-    if (users.length < 1000) return null;
-    skip += 1000;
+  if (!targetResponse.ok) {
+    throw new Error(targetPayload?.errors?.[0]?.message || "Upstream target rank query failed");
   }
+  if (targetPayload?.errors?.length) {
+    throw new Error(targetPayload.errors[0]?.message || "Target rank query failed");
+  }
+
+  const target = targetPayload?.data?.target;
+  if (!target?.id) return null;
+
+  const targetVolume = String(target.totalEffectiveVolumeUsd ?? "0");
+
+  const rankQuery = `
+    query ComputeUserRank($wallet: String!, $targetVolume: String!) {
+      higher: users(where: { totalEffectiveVolumeUsd_gt: $targetVolume }) {
+        id
+      }
+      tiedLowerId: users(where: { totalEffectiveVolumeUsd: $targetVolume, id_lt: $wallet }) {
+        id
+      }
+    }
+  `;
+
+  const { response: rankResponse, json: rankPayload } = await fetchSubgraph(token, rankQuery, {
+    wallet,
+    targetVolume,
+  });
+
+  if (!rankResponse.ok) {
+    throw new Error(rankPayload?.errors?.[0]?.message || "Upstream rank aggregation query failed");
+  }
+  if (rankPayload?.errors?.length) {
+    throw new Error(rankPayload.errors[0]?.message || "Rank aggregation query failed");
+  }
+
+  const higherCount = Array.isArray(rankPayload?.data?.higher) ? rankPayload.data.higher.length : 0;
+  const tiedLowerCount = Array.isArray(rankPayload?.data?.tiedLowerId) ? rankPayload.data.tiedLowerId.length : 0;
+
+  return higherCount + tiedLowerCount + 1;
+}
+
+function triggerRankRefresh(token, wallet) {
+  const existing = rankRefreshPromises.get(wallet);
+  if (existing) return existing;
+
+  const refresh = getUserRankByEffectiveVolume(token, wallet)
+    .then((rank) => {
+      setCachedRank(wallet, rank);
+      return rank;
+    })
+    .catch((err) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(`[analytics-summary] rank refresh failed for ${wallet}: ${detail}`);
+      return null;
+    })
+    .finally(() => {
+      rankRefreshPromises.delete(wallet);
+    });
+
+  rankRefreshPromises.set(wallet, refresh);
+  return refresh;
 }
 
 export default async function handler(req, res) {
@@ -356,33 +440,34 @@ export default async function handler(req, res) {
   const forceRefresh = req.body?.forceRefresh === true && isPrivileged(req);
 
   try {
-    let aggregateSummary = !forceRefresh ? getCachedSummary() : null;
+    const summaryState = forceRefresh
+      ? { value: null, fresh: false }
+      : getCachedSummaryState();
+
+    let aggregateSummary = summaryState.value;
+    if (!aggregateSummary) {
+      aggregateSummary = await triggerSummaryRefresh(token);
+    } else if (!summaryState.fresh || forceRefresh) {
+      void triggerSummaryRefresh(token);
+    }
 
     if (!aggregateSummary) {
-      const [totalUsersCount, swapUsersCount, rwaUsersCount, outlierPoolsCount] = await Promise.all([
-        countEntityByPagination(token, "users"),
-        countEntityByPagination(token, "users", "{ swapCount_gt: 0 }"),
-        countEntityByPagination(token, "users", "{ or: [{ rwaBuyCount_gt: 0 }, { rwaRedeemCount_gt: 0 }] }"),
-        countEntityByPagination(token, "pools", "{ flaggedLowLiquidityOutlier: true }"),
-      ]);
-
-      aggregateSummary = {
-        totalUsersCount,
-        swapUsersCount,
-        rwaUsersCount,
-        outlierPoolsCount,
-      };
-      setCachedSummary(aggregateSummary);
+      return res.status(503).json({ error: "Analytics summary is warming up. Please retry shortly." });
     }
 
     let targetUserRank = null;
     if (wallet) {
-      const cachedRank = !forceRefresh ? getCachedRank(wallet) : undefined;
-      if (cachedRank === undefined) {
-        targetUserRank = await getUserRankByEffectiveVolume(token, wallet);
-        setCachedRank(wallet, targetUserRank);
+      const rankState = forceRefresh
+        ? { exists: false, value: null, fresh: false }
+        : getCachedRankState(wallet);
+
+      if (!rankState.exists) {
+        targetUserRank = await triggerRankRefresh(token, wallet);
       } else {
-        targetUserRank = cachedRank;
+        targetUserRank = rankState.value;
+        if (!rankState.fresh || forceRefresh) {
+          void triggerRankRefresh(token, wallet);
+        }
       }
     }
 
