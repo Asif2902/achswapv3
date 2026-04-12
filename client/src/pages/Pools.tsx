@@ -17,12 +17,14 @@ import {
   ArrowUpRight,
   BarChart3,
   Coins,
+  Copy,
   DollarSign,
   Flame,
   Layers,
   Search,
   Sparkles,
   Users,
+  Wallet,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -288,6 +290,11 @@ function formatCompact(value: number): string {
   if (Math.abs(value) >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
   if (Math.abs(value) >= 1_000) return `${(value / 1_000).toFixed(2)}K`;
   return value.toFixed(0);
+}
+
+function formatPercent(value: number, digits = 1): string {
+  if (!Number.isFinite(value)) return "0%";
+  return `${value.toFixed(digits)}%`;
 }
 
 function parseNum(v: string | number | null | undefined): number {
@@ -641,6 +648,26 @@ function EmptyState({ text }: { text: string }) {
   );
 }
 
+function InsightRow({
+  label,
+  value,
+  detail,
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4 rounded-xl border border-border/60 bg-background/45 px-3 py-2.5">
+      <div>
+        <p className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">{label}</p>
+        {detail ? <p className="mt-1 text-xs text-muted-foreground">{detail}</p> : null}
+      </div>
+      <p className="text-right font-mono text-sm font-semibold text-foreground">{value}</p>
+    </div>
+  );
+}
+
 export default function Pools() {
   const { address } = useAccount();
   const lastAutoAppliedAddressRef = useRef("");
@@ -801,59 +828,212 @@ export default function Pools() {
     rwa: "var(--color-rwa)",
   };
 
+  const latestVolumePoint = volumeSeries[volumeSeries.length - 1] ?? null;
+  const previousVolumePoint = volumeSeries[volumeSeries.length - 2] ?? null;
+  const averageDailyVolume =
+    volumeSeries.length > 0 ? volumeSeries.reduce((sum, row) => sum + row.total, 0) / volumeSeries.length : 0;
+  const averageDailyFees =
+    volumeSeries.length > 0 ? volumeSeries.reduce((sum, row) => sum + row.fees, 0) / volumeSeries.length : 0;
+  const volumeDeltaPct =
+    latestVolumePoint && previousVolumePoint && previousVolumePoint.total > 0
+      ? ((latestVolumePoint.total - previousVolumePoint.total) / previousVolumePoint.total) * 100
+      : 0;
+  const activeUsersDeltaPct =
+    latestVolumePoint && previousVolumePoint && previousVolumePoint.activeUsers > 0
+      ? ((latestVolumePoint.activeUsers - previousVolumePoint.activeUsers) / previousVolumePoint.activeUsers) * 100
+      : 0;
+  const totalVolumeValue = parseNum(protocol?.totalVolumeUsd);
+  const totalFeesValue = parseNum(protocol?.totalFeesUsd);
+  const totalTvlValue = parseNum(protocol?.totalTvlUsd);
+  const dexVolumeValue = parseNum(protocol?.dexTotalVolumeUsd);
+  const rwaVolumeValue = parseNum(protocol?.rwaVolumeUsd);
+  const feeRatePct = totalVolumeValue > 0 ? (totalFeesValue / totalVolumeValue) * 100 : 0;
+  const rwaVolumeSharePct = totalVolumeValue > 0 ? (rwaVolumeValue / totalVolumeValue) * 100 : 0;
+  const dexVolumeSharePct = totalVolumeValue > 0 ? (dexVolumeValue / totalVolumeValue) * 100 : 0;
+  const averageTvlPerPool = totalPools > 0 ? totalTvlValue / totalPools : 0;
+  const outlierPoolSharePct = totalPools > 0 ? (data?.outlierPoolsCount ?? 0) / totalPools * 100 : 0;
+  const topPoolByTvl = data?.topPoolsByTvl[0] ?? null;
+  const topPoolByVolume = data?.topPoolsByVolume[0] ?? null;
+  const targetUser = data?.targetUser ?? null;
+  const targetUserRawDexVolume = targetUser ? parseNum(targetUser.totalVolumeUsd) - parseNum(targetUser.rwaVolumeUsd) : 0;
+  const targetUserEffectiveRatioPct =
+    targetUser && targetUserRawDexVolume > 0
+      ? (parseNum(targetUser.dexEffectiveVolumeUsd) / targetUserRawDexVolume) * 100
+      : 0;
+  const targetUserAverageSwapSize =
+    targetUser && parseNum(targetUser.swapCount) > 0
+      ? parseNum(targetUser.totalEffectiveVolumeUsd) / parseNum(targetUser.swapCount)
+      : 0;
+  const targetUserAverageFeePerSwap =
+    targetUser && parseNum(targetUser.swapCount) > 0
+      ? parseNum(targetUser.totalFeesPaidUsd) / parseNum(targetUser.swapCount)
+      : 0;
+  const targetUserNetLiquidity =
+    targetUser ? parseNum(targetUser.liquidityProvidedUsd) - parseNum(targetUser.liquidityRemovedUsd) : 0;
+  const selectedWalletLabel = appliedWallet || normalizeAddressInput(address ?? "");
+  const walletLooksValid = !walletInput.trim() || Boolean(normalizeAddressInput(walletInput));
+
+  const applyConnectedWallet = () => {
+    const normalized = normalizeAddressInput(address ?? "");
+    if (!normalized) return;
+    setWalletInput(normalized);
+    setAppliedWallet(normalized);
+    setError(null);
+  };
+
+  const clearWallet = () => {
+    setWalletInput("");
+    setAppliedWallet("");
+    setError(null);
+  };
+
+  const copyWallet = async () => {
+    if (!selectedWalletLabel || typeof navigator === "undefined" || !navigator.clipboard) return;
+    try {
+      await navigator.clipboard.writeText(selectedWalletLabel);
+    } catch {
+      // Silent no-op. Copy is convenience-only.
+    }
+  };
+
   return (
     <div className="container mx-auto max-w-7xl px-3 pb-16 pt-4 sm:px-4 sm:pt-8">
-      <div className="relative overflow-hidden rounded-[28px] border border-border/50 bg-[radial-gradient(circle_at_top_left,_rgba(20,184,166,0.16),_transparent_34%),radial-gradient(circle_at_top_right,_rgba(59,130,246,0.12),_transparent_30%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0))] p-4 shadow-2xl shadow-primary/5 sm:p-6">
-        <div className="absolute -left-12 top-0 h-40 w-40 rounded-full bg-primary/20 blur-3xl" />
-        <div className="absolute right-0 top-0 h-48 w-48 rounded-full bg-sky-400/10 blur-3xl" />
-        <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-primary/30 to-transparent" />
+      <div className="relative overflow-hidden rounded-[32px] border border-border/50 bg-[radial-gradient(circle_at_top_left,_rgba(34,197,94,0.14),_transparent_28%),radial-gradient(circle_at_80%_20%,_rgba(14,165,233,0.18),_transparent_24%),linear-gradient(135deg,rgba(8,15,32,0.94),rgba(17,24,39,0.9)_42%,rgba(7,12,24,0.95))] p-4 shadow-2xl shadow-primary/10 sm:p-6 lg:p-7">
+        <div className="absolute -left-12 top-0 h-40 w-40 rounded-full bg-emerald-400/20 blur-3xl" />
+        <div className="absolute right-0 top-0 h-48 w-48 rounded-full bg-sky-400/15 blur-3xl" />
+        <div className="absolute bottom-0 right-1/4 h-36 w-36 rounded-full bg-cyan-300/10 blur-3xl" />
+        <div className="absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-transparent via-cyan-300/40 to-transparent" />
 
-        <div className="relative flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-          <div className="max-w-3xl">
-            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-primary">
+        <div className="relative grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(340px,0.9fr)]">
+          <div className="max-w-4xl">
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-cyan-300/30 bg-cyan-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-100">
               <Sparkles className="h-3.5 w-3.5" />
               Achswap Intelligence Console
             </div>
-            <h1 className="text-3xl font-black tracking-tight text-foreground sm:text-4xl">Analytics</h1>
-            <p className="mt-3 text-sm text-muted-foreground sm:text-base">
-              Platform-wide TVL, volume, swaps, fees, outlier diagnostics, user leaderboard, and wallet-level behavior
+            <h1 className="text-3xl font-black tracking-tight text-white sm:text-5xl">Analytics That Actually Explains the Flow</h1>
+            <p className="mt-3 max-w-3xl text-sm text-slate-300 sm:text-base">
+              Platform-wide TVL, volume, swaps, fees, outlier diagnostics, leaderboard context, and wallet-level behavior
               (raw vs effective) powered by Arc analytics index data.
             </p>
-            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <div className="mt-5 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Latest Daily Volume</p>
+                <p className="mt-2 text-2xl font-bold text-white">
+                  {latestVolumePoint ? formatUsd(latestVolumePoint.total) : "--"}
+                </p>
+                <p className="mt-1 text-xs text-slate-300">
+                  {previousVolumePoint ? `${formatPercent(volumeDeltaPct)} vs previous day` : "Waiting for historical delta"}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">30D Avg Daily Fees</p>
+                <p className="mt-2 text-2xl font-bold text-white">{formatUsd(averageDailyFees)}</p>
+                <p className="mt-1 text-xs text-slate-300">Fee rate {formatPercent(feeRatePct, 2)} on cumulative volume</p>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Latest Active Users</p>
+                <p className="mt-2 text-2xl font-bold text-white">
+                  {latestVolumePoint ? formatCompact(latestVolumePoint.activeUsers) : "--"}
+                </p>
+                <p className="mt-1 text-xs text-slate-300">
+                  {previousVolumePoint ? `${formatPercent(activeUsersDeltaPct)} vs previous day` : "Waiting for historical delta"}
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-300">
               {data ? (
                 <>
-                  <Badge variant="outline" className="bg-background/60">Block {formatCompact(data.meta.blockNumber)}</Badge>
-                  <Badge variant={data.meta.hasIndexingErrors ? "destructive" : "secondary"}>
-                    {data.meta.hasIndexingErrors ? "Indexing Errors" : "Healthy"}
+                  <Badge variant="outline" className="border-white/15 bg-white/5 text-slate-100">
+                    Block {formatCompact(data.meta.blockNumber)}
+                  </Badge>
+                  <Badge className={data.meta.hasIndexingErrors ? "" : "border-emerald-400/20 bg-emerald-400/15 text-emerald-100"} variant={data.meta.hasIndexingErrors ? "destructive" : "outline"}>
+                    {data.meta.hasIndexingErrors ? "Indexing Errors" : "Indexer Healthy"}
+                  </Badge>
+                  <Badge variant="outline" className="border-white/15 bg-white/5 text-slate-200">
+                    30D avg volume {formatUsd(averageDailyVolume)}
                   </Badge>
                 </>
               ) : null}
+            </div>
+          </div>
+
+          <div className="w-full rounded-[28px] border border-white/10 bg-black/20 p-3 shadow-lg shadow-black/20 backdrop-blur sm:p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Wallet Lens</p>
+                <h2 className="mt-1 text-lg font-semibold text-white">Focus a specific trader</h2>
+              </div>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => setRefreshNonce((n) => n + 1)}
                 disabled={refreshing || loading}
-                className="ml-auto"
+                className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10"
               >
-                {refreshing ? "Refreshing..." : "Refresh Data"}
+                {refreshing ? "Refreshing..." : "Refresh"}
               </Button>
             </div>
-          </div>
 
-          <div className="w-full max-w-xl rounded-2xl border border-border/50 bg-background/75 p-3 shadow-lg shadow-black/5 backdrop-blur sm:p-4">
-            <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+            <label className="mt-4 block text-xs font-semibold uppercase tracking-[0.14em] text-slate-400">
               User analytics wallet
             </label>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <div className="relative flex-1">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <div className="mt-2 flex flex-col gap-2">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <Input
                   value={walletInput}
                   onChange={(e) => setWalletInput(e.target.value)}
                   placeholder="0x..."
-                  className="pl-9"
+                  className="border-white/10 bg-white/5 pl-9 text-white placeholder:text-slate-500"
                 />
               </div>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={applyConnectedWallet}
+                  disabled={!normalizeAddressInput(address ?? "")}
+                  className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10"
+                >
+                  <Wallet className="mr-2 h-4 w-4" />
+                  Use Connected
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={copyWallet}
+                  disabled={!selectedWalletLabel}
+                  className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10"
+                >
+                  <Copy className="mr-2 h-4 w-4" />
+                  Copy
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={clearWallet}
+                  className="border-white/15 bg-white/5 text-slate-100 hover:bg-white/10"
+                >
+                  Clear
+                </Button>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-2">
+              <InsightRow
+                label="Selection"
+                value={selectedWalletLabel ? shortenAddress(selectedWalletLabel) : "Platform View"}
+                detail={selectedWalletLabel ? "Wallet-specific charts and tables are active" : "No wallet filter applied"}
+              />
+              <InsightRow
+                label="Input State"
+                value={walletLooksValid ? "Ready" : "Invalid"}
+                detail={walletLooksValid ? "Valid addresses auto-apply to user analytics" : "Wallet must match a 42-char EVM address"}
+              />
+              <InsightRow
+                label="Connected Wallet"
+                value={address ? shortenAddress(address) : "Not connected"}
+                detail="Use this shortcut to inspect the active account immediately"
+              />
             </div>
           </div>
         </div>
@@ -924,6 +1104,44 @@ export default function Pools() {
               icon={<Sparkles className="h-4 w-4" />}
               tone={data.outlierPoolsCount > 0 ? "warn" : "neutral"}
             />
+          </section>
+
+          <section className="mt-6 grid gap-4 xl:grid-cols-3">
+            <Card className="overflow-hidden border-border/50 bg-[linear-gradient(135deg,rgba(20,184,166,0.12),rgba(15,23,42,0.8))] shadow-lg shadow-black/5">
+              <CardHeader>
+                <CardTitle className="text-lg text-white">Flow Momentum</CardTitle>
+                <CardDescription>Latest-day movement versus the prior daily snapshot.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 px-3 pb-4 sm:px-6">
+                <InsightRow label="Daily Volume" value={latestVolumePoint ? formatUsd(latestVolumePoint.total) : "--"} detail={previousVolumePoint ? `${formatPercent(volumeDeltaPct)} day-over-day` : "Need at least two indexed days"} />
+                <InsightRow label="Daily Fees" value={latestVolumePoint ? formatUsd(latestVolumePoint.fees) : "--"} detail={`30D average ${formatUsd(averageDailyFees)}`} />
+                <InsightRow label="Active Users" value={latestVolumePoint ? formatCompact(latestVolumePoint.activeUsers) : "--"} detail={previousVolumePoint ? `${formatPercent(activeUsersDeltaPct)} day-over-day` : "Need at least two indexed days"} />
+              </CardContent>
+            </Card>
+
+            <Card className="overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
+              <CardHeader>
+                <CardTitle className="text-lg">Protocol Efficiency</CardTitle>
+                <CardDescription>How the current liquidity base is converting into flow.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 px-3 pb-4 sm:px-6">
+                <InsightRow label="Fee Capture" value={formatPercent(feeRatePct, 2)} detail={`${formatUsd(totalFeesValue)} fees on ${formatUsd(totalVolumeValue)} volume`} />
+                <InsightRow label="Avg TVL / Pool" value={formatUsd(averageTvlPerPool)} detail={`${formatCompact(totalPools)} total V2 and V3 pools`} />
+                <InsightRow label="Latest TVL" value={latestVolumePoint ? formatUsd(latestVolumePoint.tvl) : formatUsd(totalTvlValue)} detail="Historical daily close from protocol day data" />
+              </CardContent>
+            </Card>
+
+            <Card className="overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
+              <CardHeader>
+                <CardTitle className="text-lg">Coverage Split</CardTitle>
+                <CardDescription>Execution mix across DEX and RWA rails plus anomaly density.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2 px-3 pb-4 sm:px-6">
+                <InsightRow label="DEX Share" value={formatPercent(dexVolumeSharePct)} detail={formatUsd(dexVolumeValue)} />
+                <InsightRow label="RWA Share" value={formatPercent(rwaVolumeSharePct)} detail={formatUsd(rwaVolumeValue)} />
+                <InsightRow label="Outlier Density" value={formatPercent(outlierPoolSharePct, 2)} detail={`${formatCompact(data.outlierPoolsCount)} pools flagged`} />
+              </CardContent>
+            </Card>
           </section>
 
           <Tabs defaultValue="platform" className="mt-8">
@@ -1171,6 +1389,37 @@ export default function Pools() {
               </div>
 
               <div className="grid gap-6 xl:grid-cols-2">
+                <Card className="overflow-hidden border-border/50 bg-[linear-gradient(135deg,rgba(14,165,233,0.14),rgba(2,6,23,0.82))] shadow-lg shadow-black/10">
+                  <CardHeader>
+                    <CardTitle className="text-lg text-white">Pool Spotlight</CardTitle>
+                    <CardDescription>Immediate read on the deepest and busiest pool right now.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="grid gap-4 px-3 pb-4 sm:px-6 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                      <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Deepest Pool</p>
+                      <p className="mt-2 text-xl font-bold text-white">
+                        {topPoolByTvl ? `${topPoolByTvl.token0.symbol}/${topPoolByTvl.token1.symbol}` : "--"}
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        <InsightRow label="TVL" value={topPoolByTvl ? formatUsd(parseNum(topPoolByTvl.tvlUsd)) : "--"} />
+                        <InsightRow label="Volume" value={topPoolByTvl ? formatUsd(parseNum(topPoolByTvl.volumeUsd)) : "--"} />
+                        <InsightRow label="Fee Tier" value={topPoolByTvl?.version === "V3" ? `${parseNum(topPoolByTvl.feeTier) / 10000}%` : "V2 Standard"} />
+                      </div>
+                    </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                      <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Highest Turnover</p>
+                      <p className="mt-2 text-xl font-bold text-white">
+                        {topPoolByVolume ? `${topPoolByVolume.token0.symbol}/${topPoolByVolume.token1.symbol}` : "--"}
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        <InsightRow label="Volume" value={topPoolByVolume ? formatUsd(parseNum(topPoolByVolume.volumeUsd)) : "--"} />
+                        <InsightRow label="Unique Swappers" value={topPoolByVolume ? formatCompact(parseNum(topPoolByVolume.uniqueSwapperCount)) : "--"} />
+                        <InsightRow label="Outlier Flag" value={topPoolByVolume?.flaggedLowLiquidityOutlier ? "Flagged" : "Clean"} detail="Low-liquidity abnormal-flow heuristic" />
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+
                 <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Top Pools by TVL</CardTitle>
@@ -1283,26 +1532,26 @@ export default function Pools() {
             </TabsContent>
 
             <TabsContent value="user" className="mt-4 space-y-6">
-              {data.targetUser ? (
+              {targetUser ? (
                 <>
                   <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                     <StatTile
                       title="Effective Total"
-                      value={formatUsd(parseNum(data.targetUser.totalEffectiveVolumeUsd))}
+                      value={formatUsd(parseNum(targetUser.totalEffectiveVolumeUsd))}
                       subValue="De-duplicated across multi-hop tx routes"
                       icon={<ArrowUpRight className="h-4 w-4" />}
                       tone="good"
                     />
                     <StatTile
                       title="Raw Total"
-                      value={formatUsd(parseNum(data.targetUser.totalVolumeUsd))}
+                      value={formatUsd(parseNum(targetUser.totalVolumeUsd))}
                       subValue="Includes all indexed swap-hop events"
                       icon={<ArrowDownRight className="h-4 w-4" />}
                     />
                     <StatTile
                       title="Swaps"
-                      value={formatCompact(parseNum(data.targetUser.swapCount))}
-                      subValue={`Tx tracked ${formatCompact(parseNum(data.targetUser.txCount))}`}
+                      value={formatCompact(parseNum(targetUser.swapCount))}
+                      subValue={`Tx tracked ${formatCompact(parseNum(targetUser.txCount))}`}
                       icon={<Activity className="h-4 w-4" />}
                     />
                     <StatTile
@@ -1313,10 +1562,48 @@ export default function Pools() {
                     />
                     <StatTile
                       title="Fees Paid"
-                      value={formatUsd(parseNum(data.targetUser.totalFeesPaidUsd))}
-                      subValue={`RWA ${formatUsd(parseNum(data.targetUser.rwaFeesPaidUsd))}`}
+                      value={formatUsd(parseNum(targetUser.totalFeesPaidUsd))}
+                      subValue={`RWA ${formatUsd(parseNum(targetUser.rwaFeesPaidUsd))}`}
                       icon={<Flame className="h-4 w-4" />}
                     />
+                  </div>
+
+                  <div className="grid gap-4 xl:grid-cols-3">
+                    <Card className="overflow-hidden border-border/50 bg-[linear-gradient(135deg,rgba(34,197,94,0.12),rgba(2,6,23,0.84))] shadow-lg shadow-black/10">
+                      <CardHeader>
+                        <CardTitle className="text-lg text-white">Wallet Quality</CardTitle>
+                        <CardDescription>How much raw routed flow survives effective accounting.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-2 px-3 pb-4 sm:px-6">
+                        <InsightRow label="Effective / Raw DEX" value={formatPercent(targetUserEffectiveRatioPct, 1)} detail={`${formatUsd(parseNum(targetUser.dexEffectiveVolumeUsd))} on ${formatUsd(targetUserRawDexVolume)}`} />
+                        <InsightRow label="Avg Effective Swap" value={formatUsd(targetUserAverageSwapSize)} detail={`${formatCompact(parseNum(targetUser.swapCount))} swaps indexed`} />
+                        <InsightRow label="Avg Fee / Swap" value={formatUsd(targetUserAverageFeePerSwap)} detail="Across DEX plus RWA fees paid" />
+                      </CardContent>
+                    </Card>
+
+                    <Card className="overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
+                      <CardHeader>
+                        <CardTitle className="text-lg">Wallet Allocation</CardTitle>
+                        <CardDescription>Capital usage split between trading and liquidity movement.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-2 px-3 pb-4 sm:px-6">
+                        <InsightRow label="RWA Volume" value={formatUsd(parseNum(targetUser.rwaVolumeUsd))} detail={`${formatCompact(parseNum(targetUser.rwaBuyCount) + parseNum(targetUser.rwaRedeemCount))} trades`} />
+                        <InsightRow label="Liquidity Added" value={formatUsd(parseNum(targetUser.liquidityProvidedUsd))} />
+                        <InsightRow label="Net Liquidity" value={formatUsd(targetUserNetLiquidity)} detail={targetUserNetLiquidity >= 0 ? "Net provider" : "Net remover"} />
+                      </CardContent>
+                    </Card>
+
+                    <Card className="overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
+                      <CardHeader>
+                        <CardTitle className="text-lg">Wallet Lifecycle</CardTitle>
+                        <CardDescription>Recency and ranking context for this address.</CardDescription>
+                      </CardHeader>
+                      <CardContent className="space-y-2 px-3 pb-4 sm:px-6">
+                        <InsightRow label="Leaderboard Rank" value={data.targetUserRank ? `#${formatCompact(data.targetUserRank)}` : "Unranked"} />
+                        <InsightRow label="First Seen" value={formatDate(parseNum(targetUser.firstSeenTimestamp))} />
+                        <InsightRow label="Last Seen" value={formatDate(parseNum(targetUser.lastSeenTimestamp))} />
+                      </CardContent>
+                    </Card>
                   </div>
 
                   <div className="grid gap-6 xl:grid-cols-[1.2fr_1fr]">
@@ -1350,7 +1637,7 @@ export default function Pools() {
                       <CardContent className="space-y-3 px-3 pb-4 text-sm sm:px-6">
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">Address</span>
-                          <span className="font-semibold text-foreground">{shortenAddress(data.targetUser.id)}</span>
+                          <span className="font-semibold text-foreground">{shortenAddress(targetUser.id)}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">Wallet Rank</span>
@@ -1360,23 +1647,23 @@ export default function Pools() {
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">Liquidity Provided</span>
-                          <span className="font-semibold">{formatUsd(parseNum(data.targetUser.liquidityProvidedUsd))}</span>
+                          <span className="font-semibold">{formatUsd(parseNum(targetUser.liquidityProvidedUsd))}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">Liquidity Removed</span>
-                          <span className="font-semibold">{formatUsd(parseNum(data.targetUser.liquidityRemovedUsd))}</span>
+                          <span className="font-semibold">{formatUsd(parseNum(targetUser.liquidityRemovedUsd))}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">RWA Trades</span>
-                          <span className="font-semibold">{formatCompact(parseNum(data.targetUser.rwaBuyCount) + parseNum(data.targetUser.rwaRedeemCount))}</span>
+                          <span className="font-semibold">{formatCompact(parseNum(targetUser.rwaBuyCount) + parseNum(targetUser.rwaRedeemCount))}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">First Seen</span>
-                          <span className="font-semibold">{formatDate(parseNum(data.targetUser.firstSeenTimestamp))}</span>
+                          <span className="font-semibold">{formatDate(parseNum(targetUser.firstSeenTimestamp))}</span>
                         </div>
                         <div className="flex items-center justify-between rounded-lg border border-border/60 px-3 py-2">
                           <span className="text-muted-foreground">Last Seen</span>
-                          <span className="font-semibold">{formatDate(parseNum(data.targetUser.lastSeenTimestamp))}</span>
+                          <span className="font-semibold">{formatDate(parseNum(targetUser.lastSeenTimestamp))}</span>
                         </div>
                       </CardContent>
                     </Card>
