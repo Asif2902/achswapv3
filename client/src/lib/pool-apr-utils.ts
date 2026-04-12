@@ -1,12 +1,9 @@
-const SUBGRAPH_URL  = "https://api.studio.thegraph.com/query/1742338/arcswaptvl/version/latest";
+const SUBGRAPH_PROXY_URL = "/api/subgraph";
+const SUBGRAPH_PROXY_APP_TOKEN = (import.meta.env.VITE_SUBGRAPH_PROXY_TOKEN as string | undefined)?.trim();
 const WUSDC_ADDRESS = "0xde5db9049a8dd344dc1b7bbb098f9da60930a6da";
-const Q96           = 2n ** 96n;
-
-// VOLUME_CORRECTION = 10
-// The subgraph indexes volume AND fees at 1/10th actual value due to a decimal
-// precision issue in the indexer. Multiply BOTH volumeUSD and feesUSD by 10
-// immediately after reading from the subgraph.
-const VOLUME_CORRECTION = 10;
+const USDC_ERC20_INTERFACE = "0x3600000000000000000000000000000000000000";
+const NATIVE_USDC = "0x0000000000000000000000000000000000000000";
+const Q96 = 2n ** 96n;
 
 export interface PoolStats {
   poolId: string
@@ -25,7 +22,7 @@ export interface PoolStats {
   activeTVLUSD: number
   currentTick: number
   liquidity: string
-  sqrtPrice: string
+  sqrtPriceX96: string
 
   aprConservative: number
   aprActive: number
@@ -35,15 +32,15 @@ export interface PoolStats {
 interface PoolMetaResponse {
   pool: {
     id: string;
-    feeTier: number;
+    feeTier: string;
     liquidity: string;
-    sqrtPrice: string;
+    sqrtPriceX96: string;
     tick: number;
     token0Price: string;
     token1Price: string;
-    totalValueLockedUSD: string;
-    volumeUSD: string;
-    feesUSD: string;
+    tvlUsd: string;
+    volumeUsd: string;
+    feesUsd: string;
     token0: { id: string; symbol: string; decimals: string };
     token1: { id: string; symbol: string; decimals: string };
   } | null;
@@ -52,12 +49,9 @@ interface PoolMetaResponse {
 interface PoolDayDataResponse {
   poolDayDatas: Array<{
     date: number;
-    volumeUSD: string;
-    feesUSD: string;
+    dailyVolumeUsd: string;
+    dailyFeesUsd: string;
     txCount: string;
-    liquidity: string;
-    token0Price: string;
-    token1Price: string;
   }>;
 }
 
@@ -65,28 +59,42 @@ interface TopPoolsResponse {
   pools: Array<{ id: string }>;
 }
 
-function getApiKey(): string {
-  const API_KEY = import.meta.env.VITE_SUBGRAPH_KEY;
-  if (!API_KEY) {
-    throw new Error("Missing VITE_SUBGRAPH_KEY environment variable");
-  }
-  return API_KEY;
-}
-
 async function subgraphFetch<T>(query: string, variables: Record<string, unknown>): Promise<T> {
-  const API_KEY = getApiKey();
-  
-  const response = await fetch(SUBGRAPH_URL, {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+
+  if (SUBGRAPH_PROXY_APP_TOKEN) {
+    headers["X-App-Token"] = SUBGRAPH_PROXY_APP_TOKEN;
+  }
+
+  const response = await fetch(SUBGRAPH_PROXY_URL, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-    },
+    headers,
     body: JSON.stringify({ query, variables }),
   });
 
   if (!response.ok) {
-    throw new Error(`Subgraph HTTP error: ${response.status}`);
+    let proxyErrorDetail = "";
+    try {
+      const errorJson = await response.json();
+      if (errorJson?.error) {
+        proxyErrorDetail = String(errorJson.error);
+      } else if (errorJson?.message) {
+        proxyErrorDetail = String(errorJson.message);
+      } else {
+        proxyErrorDetail = JSON.stringify(errorJson);
+      }
+    } catch {
+      try {
+        proxyErrorDetail = await response.text();
+      } catch {
+        proxyErrorDetail = "";
+      }
+    }
+
+    const suffix = proxyErrorDetail ? `: ${proxyErrorDetail}` : "";
+    throw new Error(`Subgraph HTTP error ${response.status}${suffix}`);
   }
 
   const json = await response.json();
@@ -100,37 +108,52 @@ async function subgraphFetch<T>(query: string, variables: Record<string, unknown
 
 function getActiveTVLUSD(
   pool: {
-    sqrtPrice: string;
+    sqrtPriceX96: string;
     liquidity: string;
     token0Price: string;
     token1Price: string;
-    totalValueLockedUSD: string;
+    tvlUsd: string;
     token0: { id: string; decimals: string };
     token1: { id: string; decimals: string };
   },
   debug = false
 ): number {
-  const sqrtPriceBI = BigInt(pool.sqrtPrice);
+  const sqrtPriceBI = BigInt(pool.sqrtPriceX96);
   const liquidityBI = BigInt(pool.liquidity);
-  const tvlUSD      = parseFloat(pool.totalValueLockedUSD);
+  const tvlUSD      = parseFloat(pool.tvlUsd);
 
   if (liquidityBI === 0n || sqrtPriceBI === 0n) return 0;
 
-  // Use BigInt division to preserve fractional precision
-  const sqrtP = Number(sqrtPriceBI / Q96) + Number(sqrtPriceBI % Q96) / Number(Q96);
   const dec0  = parseInt(pool.token0.decimals);
   const dec1  = parseInt(pool.token1.decimals);
 
-  const amount0Active = (Number(liquidityBI) / sqrtP)  / Math.pow(10, dec0);
-  const amount1Active = (Number(liquidityBI) * sqrtP)  / Math.pow(10, dec1);
+  // Keep intermediate V3 math in bigint fixed-point form to avoid precision loss.
+  const amount0RawBI = (liquidityBI * Q96) / sqrtPriceBI;
+  const amount1RawBI = (liquidityBI * sqrtPriceBI) / Q96;
+
+  const dec0Scale = 10n ** BigInt(dec0);
+  const dec1Scale = 10n ** BigInt(dec1);
+
+  const amount0WholeBI = amount0RawBI / dec0Scale;
+  const amount1WholeBI = amount1RawBI / dec1Scale;
+  const amount0FracBI = amount0RawBI % dec0Scale;
+  const amount1FracBI = amount1RawBI % dec1Scale;
+
+  const amount0Active = Number(amount0WholeBI) + Number(amount0FracBI) / Number(dec0Scale);
+  const amount1Active = Number(amount1WholeBI) + Number(amount1FracBI) / Number(dec1Scale);
 
   let token0USD: number;
   let token1USD: number;
 
-  if (pool.token0.id === WUSDC_ADDRESS) {
+  const token0Addr = pool.token0.id.toLowerCase();
+  const token1Addr = pool.token1.id.toLowerCase();
+  const token0Stable = token0Addr === WUSDC_ADDRESS || token0Addr === USDC_ERC20_INTERFACE || token0Addr === NATIVE_USDC;
+  const token1Stable = token1Addr === WUSDC_ADDRESS || token1Addr === USDC_ERC20_INTERFACE || token1Addr === NATIVE_USDC;
+
+  if (token0Stable) {
     token0USD = 1;
     token1USD = parseFloat(pool.token1Price);
-  } else if (pool.token1.id === WUSDC_ADDRESS) {
+  } else if (token1Stable) {
     token0USD = parseFloat(pool.token0Price);
     token1USD = 1;
   } else {
@@ -142,7 +165,7 @@ function getActiveTVLUSD(
 
   if (debug) {
     console.debug({
-      sqrtP,
+      sqrtPriceX96: sqrtPriceBI.toString(),
       amount0Active,
       amount1Active,
       activeTVLUSD: result,
@@ -166,13 +189,13 @@ export async function getPoolStats(
         id
         feeTier
         liquidity
-        sqrtPrice
+        sqrtPriceX96
         tick
         token0Price
         token1Price
-        totalValueLockedUSD
-        volumeUSD
-        feesUSD
+        tvlUsd
+        volumeUsd
+        feesUsd
         token0 {
           id
           symbol
@@ -206,12 +229,9 @@ export async function getPoolStats(
         first: 7
       ) {
         date
-        volumeUSD
-        feesUSD
+        dailyVolumeUsd
+        dailyFeesUsd
         txCount
-        liquidity
-        token0Price
-        token1Price
       }
     }
   `;
@@ -226,28 +246,23 @@ export async function getPoolStats(
 
   let rawVolume7dUSD = 0;
   for (const d of days) {
-    rawVolume7dUSD += parseFloat(d.volumeUSD);
+    rawVolume7dUSD += parseFloat(d.dailyVolumeUsd);
   }
-  const volume7dUSD = rawVolume7dUSD * VOLUME_CORRECTION;
+  const volume7dUSD = rawVolume7dUSD;
 
-  const rawFees7dUSD = days.reduce((s, d) => s + parseFloat(d.feesUSD), 0);
-  const fees7dUSD = rawFees7dUSD * VOLUME_CORRECTION;
+  const rawFees7dUSD = days.reduce((s, d) => s + parseFloat(d.dailyFeesUsd), 0);
+  const fees7dUSD = rawFees7dUSD;
   const txCount7d = days.reduce((s, d) => s + parseInt(d.txCount), 0);
 
   const avgDailyFees = daysWithData > 0 ? fees7dUSD / daysWithData : 0;
 
-  const tvlUSD = parseFloat(pool.totalValueLockedUSD);
+  const tvlUSD = parseFloat(pool.tvlUsd);
   const activeTVL = getActiveTVLUSD(pool, debug);
 
-  // Calculate APR
-  // When TVL data is unavailable (0), estimate from volume using fee tier
-  const feeTierNum = typeof pool.feeTier === 'string' ? parseInt(pool.feeTier) : pool.feeTier;
-  const feeTier = feeTierNum / 1_000_000; // e.g., 3000 -> 0.003
-  const estimatedTVLFromVolume = volume7dUSD * 30 * feeTier; // Monthly volume proxy for TVL
-
-  // Use actual TVL if available, otherwise estimate from volume
-  const useTVL = tvlUSD >= 1 ? tvlUSD : estimatedTVLFromVolume;
-  const useActiveTVL = activeTVL >= 1 ? activeTVL : estimatedTVLFromVolume;
+  // Calculate APR from observed fees and indexed TVL only.
+  // Do not synthesize TVL from fee tier/volume proxies, as that can produce misleading APR.
+  const useTVL = tvlUSD;
+  const useActiveTVL = activeTVL >= 1 ? activeTVL : tvlUSD;
 
   const aprConservative = useTVL >= 1
     ? (avgDailyFees / useTVL) * 365 * 100
@@ -271,6 +286,7 @@ export async function getPoolStats(
       avgDailyFees,
       tvlUSD,
       activeTVL,
+      useActiveTVL,
       aprConservative,
       aprActive,
     });
@@ -285,16 +301,16 @@ export async function getPoolStats(
     token1Symbol: pool.token1.symbol,
     token0Id: pool.token0.id,
     token1Id: pool.token1.id,
-    feeTier: pool.feeTier,
+    feeTier: parseInt(pool.feeTier),
     volume7dUSD,
     fees7dUSD,
     txCount7d,
     daysWithData,
     tvlUSD,
-    activeTVLUSD: activeTVL,
+    activeTVLUSD: useActiveTVL,
     currentTick: pool.tick,
     liquidity: pool.liquidity,
-    sqrtPrice: pool.sqrtPrice,
+    sqrtPriceX96: pool.sqrtPriceX96,
     aprConservative,
     aprActive,
     dailyFeeRate,
@@ -309,7 +325,7 @@ export async function getTopPoolsByAPR(
     query TopPools($n: Int!) {
       pools(
         first: $n,
-        orderBy: totalValueLockedUSD,
+        orderBy: tvlUsd,
         orderDirection: desc
       ) {
         id

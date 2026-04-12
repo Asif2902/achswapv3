@@ -42,6 +42,30 @@ VITE_WALLETCONNECT_PROJECT_ID=your_project_id_here
 VITE_ALCHEMY_KEY=your_alchemy_key_here
 ```
 
+### Server Environment (Vercel)
+
+Set these in **Vercel Project Settings -> Environment Variables**:
+
+| Variable | Required | What to put |
+|----------|----------|-------------|
+| `GRAPH_QUERY_TOKEN` | Yes | Your The Graph Studio query key (used by `/api/subgraph` and `/api/analytics-summary`) |
+| `SUBGRAPH_PROXY_TOKEN` | Recommended | Any strong random secret (for cross-origin proxy auth), e.g. `openssl rand -hex 32` |
+| `ALLOWED_ORIGINS` | Recommended | Comma-separated allowed browser origins for API CORS (e.g. `https://app.example.com,https://admin.example.com`) |
+| `UPSTASH_REDIS_REST_URL` | Optional | Upstash Redis REST URL for shared rate limiting across serverless instances |
+| `UPSTASH_REDIS_REST_TOKEN` | Optional | Upstash Redis REST token |
+| `SUBGRAPH_RATE_LIMIT_PER_MINUTE` | Optional | Integer request limit per minute (default `240` in `api/subgraph.js`, default `180` in `api/analytics-summary.js`) |
+| `UPSTREAM_TIMEOUT_MS` | Optional | Integer upstream timeout in milliseconds (default `5000`) |
+| `ANALYTICS_SUMMARY_CACHE_TTL_MS` | Optional | Cache TTL for analytics summary in milliseconds (default `60000` ms; controls freshness) |
+| `ANALYTICS_RANK_CACHE_MAX` | Optional | Maximum entries in in-memory rank cache (default `1000` entries; bounds memory usage) |
+
+Important notes:
+- `SUBGRAPH_PROXY_TOKEN` is **not** your Graph key.
+- `GRAPH_QUERY_TOKEN` is the Graph key used server-side when proxying requests.
+- Keep `SUBGRAPH_PROXY_TOKEN` server-only. Do not expose it to the browser and do not set any `VITE_*` variant.
+- `ALLOWED_ORIGINS` narrows browser access for API handlers that enforce CORS; if unset, those handlers now reject browser-origin requests by default.
+- Browser calls should use same-origin API routes (`/api/subgraph`, `/api/analytics-summary`) and rely on server-side checks.
+- For cross-origin or server-to-server access, forward `SUBGRAPH_PROXY_TOKEN` only from secure server middleware/headers (never from client code).
+
 ### Getting Required API Keys
 
 **WalletConnect Project ID:**

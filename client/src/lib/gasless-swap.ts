@@ -2,6 +2,8 @@ import { ethers, Contract, BrowserProvider, Interface, AbiCoder } from "ethers";
 import { GASLESS_CONFIG, ERC20_ABI, CHAIN_ID, NATIVE_TOKEN } from "./gasless-config";
 
 const abiCoder = new AbiCoder();
+const ARC_TESTNET_WSS = "wss://arc-testnet.drpc.org";
+const FAST_POLL_INTERVAL_MS = 400;
 
 async function assertGaslessChain(signer: any): Promise<void> {
   const network = await signer.provider.getNetwork();
@@ -139,43 +141,63 @@ export async function submitToRelayer(
     typeof value === "bigint" ? value.toString() : value
   );
   
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30000);
-  
-  try {
-    const response = await fetch(GASLESS_CONFIG.relayerUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: serializedRequest,
-      signal: controller.signal,
-    });
+  const timeoutMs = 45000;
+  const maxAttempts = 2;
+  let lastError: Error | null = null;
 
-    clearTimeout(timeout);
-
-    const text = await response.text();
-    if (!response.ok) {
-      let errorMessage = `Relayer failed (${response.status})`;
-      try {
-        const error = JSON.parse(text);
-        if (error.error) errorMessage = error.error;
-      } catch {
-        errorMessage = `Relayer error (${response.status}): ${text.slice(0, 200)}`;
-      }
-      throw new Error(errorMessage);
-    }
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      return JSON.parse(text);
-    } catch {
-      throw new Error(`Invalid relayer response: ${text.slice(0, 100)}`);
+      const response = await fetch(GASLESS_CONFIG.relayerUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: serializedRequest,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      const text = await response.text();
+      if (!response.ok) {
+        let errorMessage = `Relayer failed (${response.status})`;
+        try {
+          const error = JSON.parse(text);
+          if (error.error) errorMessage = error.error;
+        } catch {
+          errorMessage = `Relayer error (${response.status}): ${text.slice(0, 200)}`;
+        }
+        throw new Error(errorMessage);
+      }
+
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new Error(`Invalid relayer response: ${text.slice(0, 100)}`);
+      }
+    } catch (err: any) {
+      clearTimeout(timeout);
+      const normalizedError = err?.name === "AbortError"
+        ? new Error("Relayer request timed out")
+        : (err instanceof Error ? err : new Error(String(err)));
+      lastError = normalizedError;
+
+      const retryable =
+        normalizedError.message.toLowerCase().includes("timed out") ||
+        normalizedError.message.toLowerCase().includes("network") ||
+        normalizedError.message.toLowerCase().includes("failed to fetch") ||
+        normalizedError.message.toLowerCase().includes("502") ||
+        normalizedError.message.toLowerCase().includes("503") ||
+        normalizedError.message.toLowerCase().includes("504");
+
+      if (!retryable || attempt === maxAttempts - 1) {
+        break;
+      }
     }
-  } catch (err: any) {
-    clearTimeout(timeout);
-    if (err.name === "AbortError") {
-      throw new Error("Relayer request timed out");
-    }
-    throw err;
   }
+
+  throw lastError ?? new Error("Relayer request failed");
 }
 
 export async function waitForTransaction(
@@ -183,32 +205,82 @@ export async function waitForTransaction(
   txHash: string,
   timeout = 60000
 ): Promise<any> {
-  return new Promise((resolve, reject) => {
+  const network = await provider.getNetwork();
+  const chainId = Number(network.chainId);
+  const useArcWebSocket = chainId === 5042002;
+
+  if (!useArcWebSocket) {
+    const receipt = await provider.waitForTransaction(txHash, 1, timeout);
+    if (!receipt) throw new Error("Transaction wait timeout");
+    if (receipt.status === 0) throw new Error("Transaction reverted");
+    return receipt;
+  }
+
+  const controller = new AbortController();
+  let wsProvider: ethers.WebSocketProvider | null = new ethers.WebSocketProvider(ARC_TESTNET_WSS, chainId);
+
+  const waitByPolling = async (signal: AbortSignal): Promise<any> => {
     const startTime = Date.now();
-    
-    const check = async () => {
-      try {
-        const receipt = await provider.getTransactionReceipt(txHash);
-        if (receipt) {
-          if (receipt.status === 0) {
-            reject(new Error("Transaction reverted"));
-            return;
-          }
-          resolve(receipt);
-          return;
-        }
-        if (Date.now() - startTime > timeout) {
-          reject(new Error("Transaction wait timeout"));
-          return;
-        }
-        setTimeout(check, 2000);
-      } catch (e) {
-        reject(e);
+    while (!signal.aborted && Date.now() - startTime <= timeout) {
+      const receipt = await provider.getTransactionReceipt(txHash);
+      if (receipt) {
+        if (receipt.status === 0) throw new Error("Transaction reverted");
+        return receipt;
       }
+
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, FAST_POLL_INTERVAL_MS);
+        signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(timer);
+            resolve(null);
+          },
+          { once: true },
+        );
+      });
+    }
+
+    if (signal.aborted) {
+      throw new Error("Transaction wait aborted");
+    }
+
+    throw new Error("Transaction wait timeout");
+  };
+
+  const waitByWebSocket = async (signal: AbortSignal): Promise<any> => {
+    if (!wsProvider) throw new Error("WebSocket provider unavailable");
+    const handleAbort = () => {
+      wsProvider?.destroy();
+      wsProvider = null;
     };
-    
-    check();
-  });
+    signal.addEventListener("abort", handleAbort, { once: true });
+    try {
+      const receipt = await wsProvider.waitForTransaction(txHash, 1, timeout);
+      if (!receipt) throw new Error("Transaction wait timeout");
+      if (receipt.status === 0) throw new Error("Transaction reverted");
+      return receipt;
+    } finally {
+      signal.removeEventListener("abort", handleAbort);
+    }
+  };
+
+  try {
+    const result = await Promise.race([
+      waitByWebSocket(controller.signal),
+      waitByPolling(controller.signal),
+    ]);
+    controller.abort();
+    return result;
+  } catch (error) {
+    throw error;
+  } finally {
+    controller.abort();
+    if (wsProvider) {
+      wsProvider.destroy();
+      wsProvider = null;
+    }
+  }
 }
 
 export async function executeGaslessSwapV2(

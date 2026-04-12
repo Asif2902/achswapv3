@@ -232,6 +232,43 @@ export default function Swap() {
 
   const openExplorer = (txHash: string) => { if (contracts) window.open(`${contracts.explorer}${txHash}`, "_blank"); };
 
+  const getFastTxOverrides = async (provider: BrowserProvider): Promise<{
+    maxFeePerGas?: bigint;
+    maxPriorityFeePerGas?: bigint;
+    gasPrice?: bigint;
+  }> => {
+    try {
+      const feeData = await provider.getFeeData();
+      const bump = 150n;
+
+      if (feeData.maxFeePerGas !== null || feeData.maxPriorityFeePerGas !== null) {
+        const basePriority = feeData.maxPriorityFeePerGas ?? 1_500_000_000n;
+        const baseMax = feeData.maxFeePerGas ?? (feeData.gasPrice !== null ? feeData.gasPrice * 2n : basePriority * 2n);
+        const maxPriorityFeePerGas = (basePriority * bump) / 100n + 1n;
+        const bumpedMax = (baseMax * bump) / 100n + 1n;
+        const minMax = maxPriorityFeePerGas * 2n;
+        const maxFeePerGas = bumpedMax > minMax ? bumpedMax : minMax;
+        return { maxFeePerGas, maxPriorityFeePerGas };
+      }
+
+      if (feeData.gasPrice !== null) {
+        return { gasPrice: (feeData.gasPrice * bump) / 100n + 1n };
+      }
+    } catch {
+      // Fall back to wallet/provider defaults.
+    }
+
+    return {};
+  };
+
+  const ensureTxSucceeded = async (tx: { wait: () => Promise<any> }, context: string): Promise<any> => {
+    const receipt = await tx.wait();
+    if (!receipt || receipt.status === 0) {
+      throw new Error(`${context} transaction reverted`);
+    }
+    return receipt;
+  };
+
   useEffect(() => { loadTokens(); }, [chainId]);
 
   useEffect(() => {
@@ -593,8 +630,10 @@ export default function Swap() {
       maxAmountWeiRef.current = null;
       const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
       toast({ title: "Wrapping…" });
+      const feeOverrides = await getFastTxOverrides(provider);
       const g = await wc.deposit.estimateGas({ value: amountBigInt });
-      const receipt = await (await wc.deposit({ value: amountBigInt, gasLimit: g * 150n / 100n })).wait();
+      const tx = await wc.deposit({ value: amountBigInt, gasLimit: g * 150n / 100n, ...feeOverrides });
+      const receipt = await ensureTxSucceeded(tx, "Wrap");
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
       toast({ title: "Wrap successful!", description: (<div className="flex items-center gap-2"><span>Wrapped {amount} USDC → wUSDC</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
@@ -614,8 +653,10 @@ export default function Swap() {
       maxAmountWeiRef.current = null;
       const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
       toast({ title: "Unwrapping…" });
+      const feeOverrides = await getFastTxOverrides(provider);
       const g = await wc.withdraw.estimateGas(amountBigInt);
-      const receipt = await (await wc.withdraw(amountBigInt, { gasLimit: g * 150n / 100n })).wait();
+      const tx = await wc.withdraw(amountBigInt, { gasLimit: g * 150n / 100n, ...feeOverrides });
+      const receipt = await ensureTxSucceeded(tx, "Unwrap");
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
       toast({ title: "Unwrap successful!", description: (<div className="flex items-center gap-2"><span>Unwrapped {amount} wUSDC → USDC</span><Button size="sm" variant="ghost" className="h-6 px-2" onClick={() => openExplorer(receipt.hash)}><ExternalLink className="h-3 w-3" /></Button></div>) });
@@ -695,9 +736,10 @@ export default function Swap() {
           // USDC → RWA: vault.buy(pairId, minSynth) with msg.value
           const minSynth = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Buying RWA token…", description: `Buying ${toToken.symbol} with USDC` });
+          const feeOverrides = await getFastTxOverrides(provider);
           const g = await vault.buy.estimateGas(rwaQuoteResult.pairId, minSynth, { value: amountIn });
-          const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, gasLimit: g * 150n / 100n });
-          const receipt = await tx.wait();
+          const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, gasLimit: g * 150n / 100n, ...feeOverrides });
+          const receipt = await ensureTxSucceeded(tx, "RWA buy");
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
           setFromAmount(""); setToAmount(""); setRwaQuoteResult(null); setRouteHops([]);
@@ -714,9 +756,10 @@ export default function Swap() {
           // RWA → USDC: vault.redeem burns directly from balanceOf (no approve needed)
           const minUsdc = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Redeeming RWA token…", description: `Redeeming ${fromToken.symbol} for USDC` });
+          const feeOverrides = await getFastTxOverrides(provider);
           const g = await vault.redeem.estimateGas(rwaQuoteResult.pairId, amountIn, minUsdc);
-          const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { gasLimit: g * 150n / 100n });
-          const receipt = await tx.wait();
+          const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { gasLimit: g * 150n / 100n, ...feeOverrides });
+          const receipt = await ensureTxSucceeded(tx, "RWA redeem");
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
           setFromAmount(""); setToAmount(""); setRwaQuoteResult(null); setRouteHops([]);
@@ -930,7 +973,11 @@ export default function Swap() {
           if (await tc.allowance(address, contracts.v3.swapRouter) < amountIn) {
             toast({ title: "Approval needed" });
             const ag = await tc.approve.estimateGas(contracts.v3.swapRouter, amountIn);
-            await (await tc.approve(contracts.v3.swapRouter, amountIn, { gasLimit: ag * 150n / 100n })).wait();
+            const approvalFeeOverrides = await getFastTxOverrides(provider);
+            await ensureTxSucceeded(
+              await tc.approve(contracts.v3.swapRouter, amountIn, { gasLimit: ag * 150n / 100n, ...approvalFeeOverrides }),
+              "V3 approval",
+            );
           }
         }
 
@@ -962,8 +1009,9 @@ export default function Swap() {
             calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
           }
 
+          const swapFeeOverrides = await getFastTxOverrides(provider);
           const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
+          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue, ...swapFeeOverrides });
         } else {
           // Multi-hop V3 path
           const { encodePath } = await import("@/lib/v3-utils");
@@ -992,8 +1040,9 @@ export default function Swap() {
             calls.push(swapRouter.interface.encodeFunctionData("unwrapWETH9", [minAmountOut, recipient]));
           }
 
+          const swapFeeOverrides = await getFastTxOverrides(provider);
           const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue });
+          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue, ...swapFeeOverrides });
         }
       } else {
         // ── V2 path ────────────────────────────────────────────────────────
@@ -1015,22 +1064,39 @@ export default function Swap() {
           if (o !== path[path.length - 1]) path.push(o);
         }
         if (fromNative) {
+          const swapFeeOverrides = await getFastTxOverrides(provider);
           const g = await router.swapExactETHForTokens.estimateGas(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn });
-          tx = await router.swapExactETHForTokens(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn, gasLimit: g * 150n / 100n });
+          tx = await router.swapExactETHForTokens(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn, gasLimit: g * 150n / 100n, ...swapFeeOverrides });
         } else if (toNative) {
           const tc = new Contract(fromToken.address, ERC20_ABI, signer);
-          if (await tc.allowance(address, contracts.v2.router) < amountIn) { const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn); await (await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n })).wait(); }
+          if (await tc.allowance(address, contracts.v2.router) < amountIn) {
+            const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn);
+            const approvalFeeOverrides = await getFastTxOverrides(provider);
+            await ensureTxSucceeded(
+              await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n, ...approvalFeeOverrides }),
+              "V2 approval",
+            );
+          }
+          const swapFeeOverrides = await getFastTxOverrides(provider);
           const g = await router.swapExactTokensForETH.estimateGas(amountIn, minAmountOut, path, recipient, deadlineTimestamp);
-          tx = await router.swapExactTokensForETH(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
+          tx = await router.swapExactTokensForETH(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n, ...swapFeeOverrides });
         } else {
           const tc = new Contract(fromToken.address, ERC20_ABI, signer);
-          if (await tc.allowance(address, contracts.v2.router) < amountIn) { const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn); await (await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n })).wait(); }
+          if (await tc.allowance(address, contracts.v2.router) < amountIn) {
+            const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn);
+            const approvalFeeOverrides = await getFastTxOverrides(provider);
+            await ensureTxSucceeded(
+              await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n, ...approvalFeeOverrides }),
+              "V2 approval",
+            );
+          }
+          const swapFeeOverrides = await getFastTxOverrides(provider);
           const g = await router.swapExactTokensForTokens.estimateGas(amountIn, minAmountOut, path, recipient, deadlineTimestamp);
-          tx = await router.swapExactTokensForTokens(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n });
+          tx = await router.swapExactTokensForTokens(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n, ...swapFeeOverrides });
         }
       }
 
-      const receipt = await tx.wait();
+      const receipt = await ensureTxSucceeded(tx, "Swap");
       saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount(""); setSmartRoutingResult(null); setRouteHops([]);
