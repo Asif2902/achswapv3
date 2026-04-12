@@ -862,11 +862,6 @@ export default function Pools() {
     });
     return Array.from(deduped.values());
   }, [data?.topPoolsByTvl, data?.topPoolsByVolume]);
-  const spotlightOutlierPool = useMemo(() => {
-    return [...combinedSpotlightPools]
-      .filter((pool) => pool.flaggedLowLiquidityOutlier)
-      .sort((a, b) => parseNum(b.volumeUsd) - parseNum(a.volumeUsd))[0] ?? null;
-  }, [combinedSpotlightPools]);
   const spotlightHighestTradersPool = useMemo(() => {
     return [...combinedSpotlightPools]
       .sort((a, b) => parseNum(b.uniqueSwapperCount) - parseNum(a.uniqueSwapperCount))[0] ?? null;
@@ -1398,16 +1393,6 @@ export default function Pools() {
                           </div>
                         </div>
 
-                        <div className="grid gap-3 sm:grid-cols-3">
-                          {compositionLegendRows.map((row) => (
-                            <InsightRow
-                              key={`${row.key}-share`}
-                              label={`${row.label} Share`}
-                              value={formatPercent(row.share)}
-                              detail={`Cumulative volume ${formatUsd(row.value)}`}
-                            />
-                          ))}
-                        </div>
                       </div>
                     ) : (
                       <EmptyState text="No protocol composition data available." />
@@ -1459,35 +1444,6 @@ export default function Pools() {
                   </CardContent>
                 </Card>
 
-                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
-                  <CardHeader>
-                    <CardTitle className="text-lg">Outlier Spotlight</CardTitle>
-                    <CardDescription>Flagged low-liquidity abnormal-flow pool, if one is present in the current leaders.</CardDescription>
-                  </CardHeader>
-                  <CardContent className="px-3 pb-4 sm:px-6">
-                    {spotlightOutlierPool ? (
-                      <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 p-4">
-                        <div className="flex items-center gap-2">
-                          <Badge variant="destructive" className="text-[10px]">Outlier</Badge>
-                          <p className="text-xl font-bold text-foreground">
-                            {spotlightOutlierPool.token0.symbol}/{spotlightOutlierPool.token1.symbol}
-                          </p>
-                        </div>
-                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                          <InsightRow label="Volume" value={formatUsd(parseNum(spotlightOutlierPool.volumeUsd))} />
-                          <InsightRow label="TVL" value={formatUsd(parseNum(spotlightOutlierPool.tvlUsd))} />
-                          <InsightRow label="Unique Swappers" value={formatCompact(parseNum(spotlightOutlierPool.uniqueSwapperCount))} />
-                          <InsightRow label="Version" value={spotlightOutlierPool.version} detail={spotlightOutlierPool.version === "V3" ? `Fee tier ${parseNum(spotlightOutlierPool.feeTier) / 10000}%` : "Constant product"} />
-                        </div>
-                      </div>
-                    ) : (
-                      <EmptyState text="No flagged outlier pool appears in the current spotlight set." />
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-
-              <div className="grid gap-6 xl:grid-cols-2">
                 <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Top Pools by TVL</CardTitle>
