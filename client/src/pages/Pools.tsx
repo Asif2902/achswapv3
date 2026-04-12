@@ -854,6 +854,23 @@ export default function Pools() {
   const outlierPoolSharePct = totalPools > 0 ? (data?.outlierPoolsCount ?? 0) / totalPools * 100 : 0;
   const topPoolByTvl = data?.topPoolsByTvl[0] ?? null;
   const topPoolByVolume = data?.topPoolsByVolume[0] ?? null;
+  const combinedSpotlightPools = useMemo(() => {
+    const merged = [...(data?.topPoolsByVolume ?? []), ...(data?.topPoolsByTvl ?? [])];
+    const deduped = new Map<string, Pool>();
+    merged.forEach((pool) => {
+      if (!deduped.has(pool.id)) deduped.set(pool.id, pool);
+    });
+    return Array.from(deduped.values());
+  }, [data?.topPoolsByTvl, data?.topPoolsByVolume]);
+  const spotlightOutlierPool = useMemo(() => {
+    return [...combinedSpotlightPools]
+      .filter((pool) => pool.flaggedLowLiquidityOutlier)
+      .sort((a, b) => parseNum(b.volumeUsd) - parseNum(a.volumeUsd))[0] ?? null;
+  }, [combinedSpotlightPools]);
+  const spotlightHighestTradersPool = useMemo(() => {
+    return [...combinedSpotlightPools]
+      .sort((a, b) => parseNum(b.uniqueSwapperCount) - parseNum(a.uniqueSwapperCount))[0] ?? null;
+  }, [combinedSpotlightPools]);
   const targetUser = data?.targetUser ?? null;
   const targetUserRawDexVolume = targetUser ? parseNum(targetUser.totalVolumeUsd) - parseNum(targetUser.rwaVolumeUsd) : 0;
   const targetUserEffectiveRatioPct =
@@ -1322,62 +1339,73 @@ export default function Pools() {
                   </Card>
                 </div>
 
-                <Card className="min-w-0 max-w-[680px] overflow-hidden border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] shadow-lg shadow-black/5">
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03))] shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Volume Composition</CardTitle>
                     <CardDescription>Share of cumulative volume by execution stack.</CardDescription>
                   </CardHeader>
                   <CardContent className="min-w-0 px-3 pb-4 sm:px-6">
                     {compositionSeries.length ? (
-                      <div className="grid gap-4 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] sm:items-center">
-                        <ChartContainer config={compositionChartConfig} className="h-[185px] w-full sm:h-[240px]">
-                          <PieChart margin={{ left: 14, right: 14, top: 8, bottom: 8 }}>
-                            <ChartTooltip
-                              content={
-                                <ChartTooltipContent
-                                  nameKey="key"
-                                  formatter={(value, name) => {
-                                    const key = String(name ?? "") as keyof typeof compositionChartConfig;
-                                    const label = compositionChartConfig[key]?.label ?? key.toUpperCase();
-                                    return (
-                                      <div className="flex min-w-[9rem] items-center justify-between gap-3">
-                                        <span className="text-muted-foreground">{label}</span>
-                                        <span className="font-mono font-medium text-foreground">{formatUsd(Number(value))}</span>
-                                      </div>
-                                    );
-                                  }}
-                                />
-                              }
-                            />
-                            <Pie
-                              data={compositionSeries}
-                              dataKey="value"
-                              nameKey="key"
-                              cx="50%"
-                              cy="50%"
-                              innerRadius={48}
-                              outerRadius={78}
-                              stroke="none"
-                            >
-                              {compositionSeries.map((entry) => (
-                                <Cell key={entry.key} fill={`var(--color-${entry.key})`} />
-                              ))}
-                            </Pie>
-                          </PieChart>
-                        </ChartContainer>
+                      <div className="space-y-5">
+                        <div className="mx-auto flex max-w-3xl flex-col items-center justify-center gap-5">
+                          <ChartContainer config={compositionChartConfig} className="mx-auto h-[240px] w-full max-w-[340px]">
+                            <PieChart margin={{ left: 0, right: 0, top: 8, bottom: 8 }}>
+                              <ChartTooltip
+                                content={
+                                  <ChartTooltipContent
+                                    nameKey="key"
+                                    formatter={(value, name) => {
+                                      const key = String(name ?? "") as keyof typeof compositionChartConfig;
+                                      const label = compositionChartConfig[key]?.label ?? key.toUpperCase();
+                                      return (
+                                        <div className="flex min-w-[9rem] items-center justify-between gap-3">
+                                          <span className="text-muted-foreground">{label}</span>
+                                          <span className="font-mono font-medium text-foreground">{formatUsd(Number(value))}</span>
+                                        </div>
+                                      );
+                                    }}
+                                  />
+                                }
+                              />
+                              <Pie
+                                data={compositionSeries}
+                                dataKey="value"
+                                nameKey="key"
+                                cx="50%"
+                                cy="50%"
+                                innerRadius={56}
+                                outerRadius={88}
+                                stroke="none"
+                              >
+                                {compositionSeries.map((entry) => (
+                                  <Cell key={entry.key} fill={`var(--color-${entry.key})`} />
+                                ))}
+                              </Pie>
+                            </PieChart>
+                          </ChartContainer>
 
-                        <div className="grid gap-2">
+                          <div className="grid w-full gap-3 sm:grid-cols-3">
+                            {compositionLegendRows.map((row) => (
+                              <div key={row.key} className="rounded-xl border border-border/60 bg-background/40 px-4 py-3 text-center">
+                                <div className="flex items-center justify-center gap-2">
+                                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
+                                  <span className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{row.label}</span>
+                                </div>
+                                <p className="mt-3 font-mono text-sm font-semibold text-foreground">{formatUsd(row.value)}</p>
+                                <p className="mt-1 text-[11px] text-muted-foreground">{row.share.toFixed(1)}% of cumulative volume</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3 sm:grid-cols-3">
                           {compositionLegendRows.map((row) => (
-                            <div key={row.key} className="flex items-center justify-between rounded-lg border border-border/60 bg-background/40 px-3 py-2">
-                              <div className="flex items-center gap-2">
-                                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
-                                <span className="text-xs uppercase tracking-[0.12em] text-muted-foreground">{row.label}</span>
-                              </div>
-                              <div className="text-right">
-                                <p className="font-mono text-sm font-semibold text-foreground">{formatUsd(row.value)}</p>
-                                <p className="text-[11px] text-muted-foreground">{row.share.toFixed(1)}%</p>
-                              </div>
-                            </div>
+                            <InsightRow
+                              key={`${row.key}-share`}
+                              label={`${row.label} Share`}
+                              value={formatPercent(row.share)}
+                              detail={`Cumulative volume ${formatUsd(row.value)}`}
+                            />
                           ))}
                         </div>
                       </div>
@@ -1392,9 +1420,9 @@ export default function Pools() {
                 <Card className="overflow-hidden border-border/50 bg-[linear-gradient(135deg,rgba(14,165,233,0.14),rgba(2,6,23,0.82))] shadow-lg shadow-black/10">
                   <CardHeader>
                     <CardTitle className="text-lg text-white">Pool Spotlight</CardTitle>
-                    <CardDescription>Immediate read on the deepest and busiest pool right now.</CardDescription>
+                    <CardDescription>Immediate read on the deepest pool, the highest-turnover pool, and the highest-traders pool.</CardDescription>
                   </CardHeader>
-                  <CardContent className="grid gap-4 px-3 pb-4 sm:px-6 sm:grid-cols-2">
+                  <CardContent className="grid gap-4 px-3 pb-4 sm:px-6 lg:grid-cols-3">
                     <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
                       <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Deepest Pool</p>
                       <p className="mt-2 text-xl font-bold text-white">
@@ -1417,9 +1445,49 @@ export default function Pools() {
                         <InsightRow label="Outlier Flag" value={topPoolByVolume?.flaggedLowLiquidityOutlier ? "Flagged" : "Clean"} detail="Low-liquidity abnormal-flow heuristic" />
                       </div>
                     </div>
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                      <p className="text-[11px] uppercase tracking-[0.16em] text-slate-400">Highest Traders Pool</p>
+                      <p className="mt-2 text-xl font-bold text-white">
+                        {spotlightHighestTradersPool ? `${spotlightHighestTradersPool.token0.symbol}/${spotlightHighestTradersPool.token1.symbol}` : "--"}
+                      </p>
+                      <div className="mt-3 space-y-2">
+                        <InsightRow label="Unique Swappers" value={spotlightHighestTradersPool ? formatCompact(parseNum(spotlightHighestTradersPool.uniqueSwapperCount)) : "--"} />
+                        <InsightRow label="Volume" value={spotlightHighestTradersPool ? formatUsd(parseNum(spotlightHighestTradersPool.volumeUsd)) : "--"} />
+                        <InsightRow label="Outlier Flag" value={spotlightHighestTradersPool?.flaggedLowLiquidityOutlier ? "Flagged" : "Clean"} />
+                      </div>
+                    </div>
                   </CardContent>
                 </Card>
 
+                <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
+                  <CardHeader>
+                    <CardTitle className="text-lg">Outlier Spotlight</CardTitle>
+                    <CardDescription>Flagged low-liquidity abnormal-flow pool, if one is present in the current leaders.</CardDescription>
+                  </CardHeader>
+                  <CardContent className="px-3 pb-4 sm:px-6">
+                    {spotlightOutlierPool ? (
+                      <div className="rounded-2xl border border-amber-400/25 bg-amber-500/10 p-4">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="destructive" className="text-[10px]">Outlier</Badge>
+                          <p className="text-xl font-bold text-foreground">
+                            {spotlightOutlierPool.token0.symbol}/{spotlightOutlierPool.token1.symbol}
+                          </p>
+                        </div>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                          <InsightRow label="Volume" value={formatUsd(parseNum(spotlightOutlierPool.volumeUsd))} />
+                          <InsightRow label="TVL" value={formatUsd(parseNum(spotlightOutlierPool.tvlUsd))} />
+                          <InsightRow label="Unique Swappers" value={formatCompact(parseNum(spotlightOutlierPool.uniqueSwapperCount))} />
+                          <InsightRow label="Version" value={spotlightOutlierPool.version} detail={spotlightOutlierPool.version === "V3" ? `Fee tier ${parseNum(spotlightOutlierPool.feeTier) / 10000}%` : "Constant product"} />
+                        </div>
+                      </div>
+                    ) : (
+                      <EmptyState text="No flagged outlier pool appears in the current spotlight set." />
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+
+              <div className="grid gap-6 xl:grid-cols-2">
                 <Card className="min-w-0 overflow-hidden border-border/50 bg-card/70 shadow-lg shadow-black/5">
                   <CardHeader>
                     <CardTitle className="text-lg">Top Pools by TVL</CardTitle>
