@@ -1,3 +1,5 @@
+import { hexlify, toUtf8Bytes } from "ethers";
+
 /**
  * Bridge transfer persistence API client.
  *
@@ -163,7 +165,7 @@ export async function isBridgeTransferApiAvailable(userAddress: string): Promise
   }
 }
 
-async function createOwnershipProof(burnTxHash: string): Promise<{
+async function createOwnershipProof(burnTxHash: string, expectedOwner?: string): Promise<{
   signedMessage: string;
   signature: string;
   issuedAt: number;
@@ -194,7 +196,11 @@ async function createOwnershipProof(burnTxHash: string): Promise<{
       return null;
     }
     const signer = accounts[0];
-    const messageHex = "0x" + new TextEncoder().encode(signedMessage).reduce((hex, byte) => hex + byte.toString(16).padStart(2, "0"), "");
+    if (expectedOwner && canonicalAddress(signer) !== canonicalAddress(expectedOwner)) {
+      console.warn(`[bridge-transfers] Ownership proof: signer ${signer} does not match expected owner ${expectedOwner}`);
+      return null;
+    }
+    const messageHex = hexlify(toUtf8Bytes(signedMessage));
     const signature = await ethereumProvider.request({
       method: "personal_sign",
       params: [messageHex, signer],

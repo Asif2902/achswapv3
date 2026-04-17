@@ -808,7 +808,11 @@ async function getWorkingProvider(chain) {
 
     const fulfilled = probeResults.filter((r) => r.status === "fulfilled");
     const winner = fulfilled.find((r) => r.value)?.value;
-    if (!winner) throw new Error("All RPC probes failed");
+    if (!winner) {
+      const err = new Error("All RPC probes failed");
+      err.name = "RPCUnavailableError";
+      throw err;
+    }
 
     for (const result of fulfilled) {
       if (result.value.rpcUrl !== winner.rpcUrl) {
@@ -820,7 +824,15 @@ async function getWorkingProvider(chain) {
       }
     }
 
+    const previous = providerCacheByChainId.get(chain.chainId);
     providerCacheByChainId.set(chain.chainId, winner);
+    if (previous && previous.provider !== winner.provider) {
+      try {
+        previous.provider.destroy();
+      } catch {
+        // ignore destroy errors
+      }
+    }
     return winner.provider;
   })();
 
@@ -1398,12 +1410,16 @@ export default async function handler(req, res) {
     return res.status(200).end();
   }
 
-  if (!await checkRateLimit(req)) {
-    return res.status(429).json({ error: "Rate limit exceeded" });
+  if (req.headers.origin && !isAllowedBrowserOrigin(req)) {
+    return res.status(403).json({ error: "Origin not allowed" });
   }
 
   if (req.headers.origin && !isAllowedBrowserOrigin(req)) {
     return res.status(403).json({ error: "Origin not allowed" });
+  }
+
+  if (!await checkRateLimit(req)) {
+    return res.status(429).json({ error: "Rate limit exceeded" });
   }
 
   try {
@@ -1426,7 +1442,10 @@ export default async function handler(req, res) {
 
     return res.status(400).json({ error: "Unknown action" });
   } catch (err) {
-    if (err instanceof Error && err.name === "AggregateError") {
+    if (
+      (err instanceof Error && (err.name === "AggregateError" || err.name === "RPCUnavailableError"))
+      || (err instanceof Error && err.message === "All RPC probes failed")
+    ) {
       return res.status(502).json({ error: "All RPC endpoints failed" });
     }
     if (
