@@ -802,12 +802,26 @@ async function getWorkingProvider(chain) {
     const rpcUrls = uniqueRpcUrls(chain.rpcUrls);
     if (!rpcUrls.length) throw new Error(`No RPC URLs configured for chain ${chain.chainId}`);
 
-    const fastest = await Promise.any(
+    const probeResults = await Promise.allSettled(
       rpcUrls.map((url) => probeRpcUrl(url, RPC_PROBE_TIMEOUT_MS)),
     );
 
-    providerCacheByChainId.set(chain.chainId, fastest);
-    return fastest.provider;
+    const fulfilled = probeResults.filter((r) => r.status === "fulfilled");
+    const winner = fulfilled.find((r) => r.value)?.value;
+    if (!winner) throw new Error("All RPC probes failed");
+
+    for (const result of fulfilled) {
+      if (result.value.rpcUrl !== winner.rpcUrl) {
+        try {
+          result.value.provider.destroy();
+        } catch {
+          // ignore destroy errors
+        }
+      }
+    }
+
+    providerCacheByChainId.set(chain.chainId, winner);
+    return winner.provider;
   })();
 
   providerInFlightByChainId.set(chain.chainId, resolvePromise);
@@ -866,10 +880,6 @@ async function verifyBurnTransaction(transfer) {
   const decodedDestinationDomain = Number(parsed.args[1]);
   if (!Number.isFinite(decodedDestinationDomain) || decodedDestinationDomain !== Number(transfer.destDomain)) {
     throw new ValidationError("Burn transaction destination domain mismatch");
-  }
-
-  if (decodedDestinationDomain !== Number(destinationChain.domain)) {
-    throw new ValidationError("Burn transaction destination chain mismatch");
   }
 
   return true;
@@ -1257,7 +1267,7 @@ async function handleMarkMinting(req, res) {
   const updated = {
     ...transfer,
     status: "minting",
-    error: trimErrorMessage(req.body?.error) || null,
+    error: trimErrorMessage(req.body?.error),
     updatedAt: Date.now(),
   };
 

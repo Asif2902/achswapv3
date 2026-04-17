@@ -84,8 +84,21 @@ function mergeFallbackTransfersForWallet(
   const wallet = canonicalAddress(userAddress);
   const normalizedWalletTransfers = walletTransfers.map(normalizeTransfer);
   const existing = getFallbackTransfers();
+  const existingByHash = new Map(existing.map((tx) => [canonicalHash(tx.burnTxHash || tx.id), tx]));
   const others = existing.filter((tx) => canonicalAddress(tx.userAddress) !== wallet);
-  return [...normalizedWalletTransfers, ...others];
+  const merged = normalizedWalletTransfers.map((serverTx) => {
+    const serverHash = canonicalHash(serverTx.burnTxHash || serverTx.id);
+    const local = existingByHash.get(serverHash);
+    if (local) {
+      existingByHash.delete(serverHash);
+      return { ...local, ...serverTx, id: local.id, burnTxHash: local.burnTxHash, userAddress: local.userAddress };
+    }
+    return serverTx;
+  });
+  const unmatchedLocals = [...existingByHash.values()].filter(
+    (tx) => tx.status !== "complete" && tx.status !== "failed",
+  );
+  return [...merged, ...unmatchedLocals, ...others];
 }
 
 function isOwnershipAction(status: PendingBridgeTransfer["status"] | undefined): boolean {
@@ -181,7 +194,7 @@ async function createOwnershipProof(burnTxHash: string): Promise<{
       return null;
     }
     const signer = accounts[0];
-    const messageHex = "0x" + Buffer.from(signedMessage, "utf8").toString("hex");
+    const messageHex = "0x" + new TextEncoder().encode(signedMessage).reduce((hex, byte) => hex + byte.toString(16).padStart(2, "0"), "");
     const signature = await ethereumProvider.request({
       method: "personal_sign",
       params: [messageHex, signer],
@@ -378,22 +391,20 @@ export async function removeTransfer(id: string): Promise<boolean> {
     return false;
   }
 
-  let existsOnServer = true;
+  let serverConfirmedAbsent = false;
   try {
     const wallet = canonicalAddress(localRecord.userAddress);
     const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`);
     if (res.ok) {
       const data = await parseResponseJson(res);
       const serverTransfers = Array.isArray(data?.transfers) ? data.transfers : [];
-      existsOnServer = serverTransfers.some((t: any) => canonicalHash(t?.burnTxHash || t?.id) === burnTxHash);
-    } else {
-      existsOnServer = false;
+      serverConfirmedAbsent = !serverTransfers.some((t: any) => canonicalHash(t?.burnTxHash || t?.id) === burnTxHash);
     }
   } catch {
-    existsOnServer = false;
+    // Network error: cannot confirm server state, fall through to server dismiss
   }
 
-  if (!existsOnServer) {
+  if (serverConfirmedAbsent) {
     const filteredLocal = localTransfers.filter((t) => t.id !== burnTxHash);
     setFallbackTransfers(filteredLocal);
     dispatchTransfersUpdated();
