@@ -285,6 +285,7 @@ export async function updateTransferStatus(
   const status = updates.status;
   let ok = true;
   const requiresOwnership = isOwnershipAction(status);
+  let hasOwnershipProof = !requiresOwnership;
   let ownershipProof: { signedMessage: string; signature: string; issuedAt: number } | null = null;
 
   if (requiresOwnership) {
@@ -295,7 +296,11 @@ export async function updateTransferStatus(
 
     if (!ownershipProof) {
       console.warn(`[bridge-transfers] ${status} skipped: missing ownership proof`);
-      ok = false;
+      hasOwnershipProof = false;
+    }
+
+    if (!hasOwnershipProof) {
+      return false;
     }
   }
 
@@ -355,13 +360,49 @@ export async function updateTransferStatus(
 
 export async function removeTransfer(id: string): Promise<boolean> {
   const burnTxHash = canonicalHash(id);
+
+  const localTransfers = getFallbackTransfers();
+  const localRecord = localTransfers.find((t) => t.id === burnTxHash);
+  if (!localRecord) {
+    return false;
+  }
+
+  if (localRecord.status !== "failed" && localRecord.status !== "complete") {
+    return false;
+  }
+
+  let existsOnServer = true;
+  try {
+    const wallet = canonicalAddress(localRecord.userAddress);
+    const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`);
+    if (res.ok) {
+      const data = await parseResponseJson(res);
+      const serverTransfers = Array.isArray(data?.transfers) ? data.transfers : [];
+      existsOnServer = serverTransfers.some((t: any) => canonicalHash(t?.burnTxHash || t?.id) === burnTxHash);
+    } else {
+      existsOnServer = false;
+    }
+  } catch {
+    existsOnServer = false;
+  }
+
+  if (!existsOnServer) {
+    const filteredLocal = localTransfers.filter((t) => t.id !== burnTxHash);
+    setFallbackTransfers(filteredLocal);
+    dispatchTransfersUpdated();
+    return true;
+  }
+
   let ownershipProof = getCachedOwnershipProof(burnTxHash);
   if (!ownershipProof) {
     ownershipProof = await createOwnershipProof(burnTxHash);
   }
 
   if (!ownershipProof) {
-    return false;
+    const filteredLocal = localTransfers.filter((t) => t.id !== burnTxHash);
+    setFallbackTransfers(filteredLocal);
+    dispatchTransfersUpdated();
+    return true;
   }
 
   const ok = await postBridgeTransfer("dismiss", { burnTxHash, ownershipProof });

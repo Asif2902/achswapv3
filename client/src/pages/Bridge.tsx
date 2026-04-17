@@ -1207,7 +1207,7 @@ export default function Bridge() {
         throw new Error("Burn transaction destination chain is not supported");
       }
 
-      let destChain: CCTPChain | undefined = decodedDestinationChain;
+      let resolvedDestChain: CCTPChain | undefined = decodedDestinationChain;
       let attestation: { message: string; attestation: string } | undefined;
 
       try {
@@ -1260,11 +1260,11 @@ export default function Bridge() {
         console.log("API fetch failed, will poll for attestation:", apiErr);
       }
 
-      if (!destChain) throw new Error("Could not resolve destination chain from burn transaction");
+      if (!resolvedDestChain) throw new Error("Could not resolve destination chain from burn transaction");
 
       // Update UI like resume system does - IMMEDIATELY
       setSourceChain(manualClaimSourceChain);
-      setDestChain(destChain);
+      setDestChain(resolvedDestChain);
       setAmount(amount);
       abortRef.current = false;
 
@@ -1283,18 +1283,18 @@ export default function Bridge() {
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
           sourceChainId: manualClaimSourceChain.chainId,
-          destDomain: destChain.domain,
-          destChainId: destChain.chainId,
+          destDomain: resolvedDestChain.domain,
+          destChainId: resolvedDestChain.chainId,
           amount,
           userAddress: address,
           timestamp: Date.now(),
           status: "ready_to_mint",
           attestation,
-        });
+        }, { strict: isBridgeDbAvailable });
 
         currentTransferIdRef.current = txHash;
 
-        await executeMint(destChain, attestation, txHash, amount);
+        await executeMint(resolvedDestChain, attestation, txHash, amount);
       } else {
         // No attestation yet - go to attesting and poll
         setTransfer({
@@ -1310,13 +1310,13 @@ export default function Bridge() {
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
           sourceChainId: manualClaimSourceChain.chainId,
-          destDomain: destChain.domain,
-          destChainId: destChain.chainId,
+          destDomain: resolvedDestChain.domain,
+          destChainId: resolvedDestChain.chainId,
           amount,
           userAddress: address,
           timestamp: Date.now(),
           status: "attesting",
-        });
+        }, { strict: isBridgeDbAvailable });
 
         currentTransferIdRef.current = txHash;
 
@@ -1343,9 +1343,9 @@ export default function Bridge() {
           return;
         }
 
-        const resolvedDestChain = resolveDestinationChain(
+        resolvedDestChain = resolveDestinationChain(
           decodedDestinationDomain,
-          destChain,
+          resolvedDestChain,
         );
 
       if (!resolvedDestChain) {

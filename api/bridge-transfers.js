@@ -26,6 +26,9 @@ let memoryRateLimitRequestCount = 0;
 const providerCacheByChainId = new Map();
 const providerInFlightByChainId = new Map();
 
+const MEMORY_TRANSFER_PRUNE_INTERVAL = 64;
+let memoryTransferOperationCount = 0;
+
 const inMemoryTransfersByHash = new Map();
 const inMemoryWalletIndex = new Map();
 
@@ -382,8 +385,118 @@ function normalizeTransferRecord(input) {
     status,
     mintTxHash: isHash(input.mintTxHash) ? canonicalHash(input.mintTxHash) : undefined,
     error: trimErrorMessage(input.error),
+    expiresAt: Number.isFinite(Number(input.expiresAt)) ? Math.trunc(Number(input.expiresAt)) : undefined,
     updatedAt: Date.now(),
   };
+}
+
+const TRANSFER_STATUS_ORDER = {
+  attesting: 1,
+  ready_to_mint: 2,
+  minting: 3,
+  complete: 4,
+};
+
+function normalizeTransferStatus(value) {
+  const normalized = String(value || "").toLowerCase();
+  if (normalized === "failed") return "failed";
+  if (normalized in TRANSFER_STATUS_ORDER) return normalized;
+  return "attesting";
+}
+
+function selectProgressStatus(existingStatus, incomingStatus, incomingHasAttestation) {
+  const existing = normalizeTransferStatus(existingStatus);
+  let incoming = normalizeTransferStatus(incomingStatus);
+
+  if (existing === "failed") return "failed";
+  if (incoming === "failed") incoming = "attesting";
+
+  if (incomingHasAttestation && incoming === "attesting") {
+    incoming = "ready_to_mint";
+  }
+
+  const existingRank = TRANSFER_STATUS_ORDER[existing] || 0;
+  const incomingRank = TRANSFER_STATUS_ORDER[incoming] || 0;
+  return incomingRank >= existingRank ? incoming : existing;
+}
+
+function pruneMemoryTransferState() {
+  const now = Date.now();
+  const expiredHashes = [];
+
+  for (const [hash, record] of inMemoryTransfersByHash) {
+    if (!record || typeof record !== "object") {
+      expiredHashes.push(hash);
+      continue;
+    }
+
+    const expiresAt = Number(record.expiresAt);
+    if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= now) {
+      expiredHashes.push(hash);
+    }
+  }
+
+  for (const hash of expiredHashes) {
+    const existing = inMemoryTransfersByHash.get(hash);
+    inMemoryTransfersByHash.delete(hash);
+
+    const wallet = existing?.userAddress;
+    if (!wallet) continue;
+
+    const index = inMemoryWalletIndex.get(wallet);
+    if (!index) continue;
+    index.delete(hash);
+    if (index.size === 0) {
+      inMemoryWalletIndex.delete(wallet);
+    }
+  }
+
+  for (const [wallet, index] of inMemoryWalletIndex) {
+    if (!index || index.size === 0) {
+      inMemoryWalletIndex.delete(wallet);
+      continue;
+    }
+
+    for (const hash of index.keys()) {
+      if (!inMemoryTransfersByHash.has(hash)) {
+        index.delete(hash);
+      }
+    }
+
+    if (index.size === 0) {
+      inMemoryWalletIndex.delete(wallet);
+    }
+  }
+}
+
+function touchMemoryTransferPrune() {
+  memoryTransferOperationCount += 1;
+  if (memoryTransferOperationCount % MEMORY_TRANSFER_PRUNE_INTERVAL === 0) {
+    pruneMemoryTransferState();
+  }
+}
+
+function trimMemoryWalletIndex(wallet) {
+  const existing = inMemoryWalletIndex.get(wallet);
+  if (!existing) return;
+  if (existing.size <= MAX_TRANSFERS_PER_WALLET) return;
+
+  const ordered = [...existing.entries()]
+    .sort((a, b) => Number(b[1]) - Number(a[1]));
+
+  for (let i = MAX_TRANSFERS_PER_WALLET; i < ordered.length; i += 1) {
+    const [hash] = ordered[i];
+    existing.delete(hash);
+    inMemoryTransfersByHash.delete(hash);
+  }
+
+  if (existing.size === 0) {
+    inMemoryWalletIndex.delete(wallet);
+  }
+}
+
+function mergeTransferField(existingValue, incomingValue) {
+  return incomingValue !== undefined && incomingValue !== null ? incomingValue : existingValue;
 }
 
 function txKey(burnTxHash) {
@@ -430,12 +543,26 @@ async function upstashPipeline(commands) {
 }
 
 function setMemoryTransfer(record) {
-  inMemoryTransfersByHash.set(record.burnTxHash, record);
-  const wallet = record.userAddress;
-  const score = Number(record.timestamp) || Date.now();
+  const now = Date.now();
+  const expiresAt = Number(record?.expiresAt);
+  const resolvedExpiresAt = Number.isFinite(expiresAt) && expiresAt > now
+    ? Math.trunc(expiresAt)
+    : now + TRANSFER_TTL_SECONDS * 1000;
+
+  const normalizedRecord = {
+    ...record,
+    expiresAt: resolvedExpiresAt,
+  };
+
+  inMemoryTransfersByHash.set(normalizedRecord.burnTxHash, normalizedRecord);
+  const wallet = normalizedRecord.userAddress;
+  const score = Number(normalizedRecord.timestamp) || now;
   const existing = inMemoryWalletIndex.get(wallet) || new Map();
-  existing.set(record.burnTxHash, score);
+  existing.set(normalizedRecord.burnTxHash, score);
   inMemoryWalletIndex.set(wallet, existing);
+
+  trimMemoryWalletIndex(wallet);
+  touchMemoryTransferPrune();
 }
 
 function deleteMemoryTransfer(burnTxHash, wallet) {
@@ -445,6 +572,8 @@ function deleteMemoryTransfer(burnTxHash, wallet) {
   if (!existing) return;
   existing.delete(burnTxHash);
   if (existing.size === 0) inMemoryWalletIndex.delete(wallet);
+
+  touchMemoryTransferPrune();
 }
 
 async function saveTransferRecord(record) {
@@ -470,6 +599,8 @@ async function getTransferRecord(burnTxHash) {
       return null;
     }
   }
+
+  touchMemoryTransferPrune();
 
   const record = inMemoryTransfersByHash.get(burnTxHash);
   return record ? normalizeTransferRecord(record) : null;
@@ -500,6 +631,8 @@ async function listWalletHashes(wallet) {
     return hashes.map(canonicalHash).filter((hash) => isHash(hash));
   }
 
+  touchMemoryTransferPrune();
+
   const existing = inMemoryWalletIndex.get(wallet);
   if (!existing) return [];
   return [...existing.entries()]
@@ -524,6 +657,8 @@ async function getManyTransferRecords(hashes) {
       }
     });
   }
+
+  touchMemoryTransferPrune();
 
   return hashes.map((hash) => {
     const record = inMemoryTransfersByHash.get(hash);
@@ -884,10 +1019,24 @@ async function handleUpsertBurn(req, res) {
   await verifyBurnTransaction(record);
 
   const existing = await getTransferRecord(record.burnTxHash);
+  const recordHasAttestation = Boolean(record.attestation?.message && record.attestation?.attestation);
+  const mergedStatus = selectProgressStatus(existing?.status, record.status, recordHasAttestation);
+
   const merged = {
-    ...(existing || {}),
-    ...record,
-    status: record.attestation ? "ready_to_mint" : (record.status === "ready_to_mint" ? "ready_to_mint" : "attesting"),
+    id: record.burnTxHash,
+    burnTxHash: record.burnTxHash,
+    sourceDomain: record.sourceDomain,
+    sourceChainId: record.sourceChainId,
+    destDomain: record.destDomain,
+    destChainId: record.destChainId,
+    amount: record.amount,
+    userAddress: record.userAddress,
+    timestamp: existing?.timestamp || record.timestamp,
+    attestation: mergeTransferField(existing?.attestation, record.attestation),
+    mintTxHash: mergeTransferField(existing?.mintTxHash, record.mintTxHash),
+    error: mergeTransferField(existing?.error, record.error),
+    status: mergedStatus,
+    expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
     updatedAt: Date.now(),
   };
 
