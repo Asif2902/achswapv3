@@ -17,14 +17,16 @@ const CLAIM_RECONCILE_LIMIT = 6;
 const OWNERSHIP_PROOF_MAX_TTL_MS = 10 * 60_000;
 const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
 
-const RPC_PROBE_TIMEOUT_MS = 1_800;
+const RPC_PROBE_TIMEOUT_MS = 4_500;
 const RPC_CACHE_REVALIDATE_MS = 30_000;
+const CLAIM_RECONCILE_CACHE_TTL_MS = 45_000;
 
 const memoryRateLimitByKey = new Map();
 let memoryRateLimitRequestCount = 0;
 
 const providerCacheByChainId = new Map();
 const providerInFlightByChainId = new Map();
+const claimReconcileCacheByHash = new Map();
 
 const MEMORY_TRANSFER_PRUNE_INTERVAL = 64;
 let memoryTransferOperationCount = 0;
@@ -41,7 +43,13 @@ const MESSAGE_TRANSMITTER_V2_ABI = [
   "function NONCE_USED() view returns (uint256)",
 ];
 
+const MESSAGE_TRANSMITTER_EVENTS_ABI = [
+  "event MessageReceived(address indexed caller, uint32 sourceDomain, uint64 nonce, bytes32 sender, bytes messageBody)",
+  "event MessageReceived(address indexed caller, uint32 sourceDomain, bytes32 nonce, bytes32 sender, bytes messageBody)",
+];
+
 const tokenMessengerInterface = new ethers.Interface(TOKEN_MESSENGER_V2_ABI);
+const messageTransmitterEventsInterface = new ethers.Interface(MESSAGE_TRANSMITTER_EVENTS_ABI);
 
 const TESTNET_TOKEN_MESSENGER_V2 = "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA";
 const TESTNET_MESSAGE_TRANSMITTER_V2 = "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275";
@@ -250,6 +258,69 @@ function pruneMemoryRateLimitBuckets(now) {
   for (const [key, state] of memoryRateLimitByKey) {
     if (!state || typeof state.resetAt !== "number" || state.resetAt <= now) {
       memoryRateLimitByKey.delete(key);
+    }
+  }
+}
+
+function normalizeNonceHex(value) {
+  if (value == null) return null;
+
+  try {
+    if (typeof value === "bigint" || typeof value === "number") {
+      const asBigInt = BigInt(value);
+      if (asBigInt < 0n) return null;
+      return `0x${asBigInt.toString(16).padStart(64, "0")}`;
+    }
+
+    if (typeof value === "string") {
+      const normalized = value.trim().toLowerCase();
+      if (!normalized) return null;
+      if (/^0x[0-9a-f]+$/.test(normalized)) {
+        const body = normalized.slice(2);
+        if (body.length > 64) return null;
+        return `0x${body.padStart(64, "0")}`;
+      }
+      if (/^[0-9]+$/.test(normalized)) {
+        const asBigInt = BigInt(normalized);
+        return `0x${asBigInt.toString(16).padStart(64, "0")}`;
+      }
+      return null;
+    }
+
+    if (typeof value === "object" && value !== null && "toString" in value) {
+      const maybe = String(value);
+      return normalizeNonceHex(maybe);
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function getCachedClaimReconcileResult(burnTxHash) {
+  const now = Date.now();
+  const cached = claimReconcileCacheByHash.get(burnTxHash);
+  if (!cached) return null;
+  if (!Number.isFinite(cached.expiresAt) || cached.expiresAt <= now) {
+    claimReconcileCacheByHash.delete(burnTxHash);
+    return null;
+  }
+  return Boolean(cached.claimed);
+}
+
+function setCachedClaimReconcileResult(burnTxHash, claimed) {
+  claimReconcileCacheByHash.set(burnTxHash, {
+    claimed: Boolean(claimed),
+    expiresAt: Date.now() + CLAIM_RECONCILE_CACHE_TTL_MS,
+  });
+
+  if (claimReconcileCacheByHash.size > 1024) {
+    const now = Date.now();
+    for (const [hash, entry] of claimReconcileCacheByHash) {
+      if (!entry || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= now) {
+        claimReconcileCacheByHash.delete(hash);
+      }
     }
   }
 }
@@ -831,6 +902,9 @@ async function verifyMintTransaction(transfer, mintTxHash) {
   const chain = chainById.get(Number(transfer.destChainId));
   if (!chain) return false;
 
+  const expectedNonce = normalizeNonceHex(extractCctpMessageNonce(transfer?.attestation?.message));
+  if (!expectedNonce) return false;
+
   const provider = await getWorkingProvider(chain);
   const [tx, receipt] = await Promise.all([
     provider.getTransaction(mintTxHash),
@@ -841,10 +915,34 @@ async function verifyMintTransaction(transfer, mintTxHash) {
   const txTo = canonicalAddress(tx.to || "");
   const txFrom = canonicalAddress(tx.from || "");
 
-  return (
-    txTo === canonicalAddress(chain.messageTransmitterV2)
-    && txFrom === canonicalAddress(transfer.userAddress)
-  );
+  if (
+    txTo !== canonicalAddress(chain.messageTransmitterV2)
+    || txFrom !== canonicalAddress(transfer.userAddress)
+  ) {
+    return false;
+  }
+
+  const targetAddress = canonicalAddress(chain.messageTransmitterV2);
+  for (const log of receipt.logs || []) {
+    if (!log || canonicalAddress(log.address || "") !== targetAddress) continue;
+
+    let parsed;
+    try {
+      parsed = messageTransmitterEventsInterface.parseLog({
+        topics: log.topics,
+        data: log.data,
+      });
+    } catch {
+      continue;
+    }
+
+    if (!parsed || parsed.name !== "MessageReceived") continue;
+    const eventNonce = normalizeNonceHex(parsed.args?.nonce);
+    if (!eventNonce) continue;
+    if (eventNonce === expectedNonce) return true;
+  }
+
+  return false;
 }
 
 function sanitizeForResponse(transfer) {
@@ -952,21 +1050,21 @@ async function handleGet(req, res) {
   }
 
   const entries = await getManyTransferRecords(hashes);
-  const staleHashes = [];
+  const staleHashSet = new Set();
   const transfers = [];
 
   for (const entry of entries) {
     if (!entry || !entry.hash || !entry.transfer) {
-      if (entry?.hash) staleHashes.push(entry.hash);
+      if (entry?.hash) staleHashSet.add(entry.hash);
       continue;
     }
     const transfer = normalizeTransferRecord(entry.transfer);
     if (!transfer) {
-      staleHashes.push(entry ? entry.hash : "");
+      staleHashSet.add(entry ? entry.hash : "");
       continue;
     }
     if (canonicalAddress(transfer.userAddress) !== wallet) {
-      staleHashes.push(entry.hash);
+      staleHashSet.add(entry.hash);
       continue;
     }
     transfers.push(transfer);
@@ -976,23 +1074,42 @@ async function handleGet(req, res) {
     .filter((t) => (t.status === "minting" || t.status === "ready_to_mint") && t.attestation?.message)
     .slice(0, CLAIM_RECONCILE_LIMIT);
 
-  for (const transfer of reconcileCandidates) {
-    try {
-      const claimed = await isTransferClaimed(transfer, transfer.attestation?.message);
-      if (!claimed) continue;
-      await deleteTransferRecord(transfer.burnTxHash, transfer.userAddress);
-      staleHashes.push(transfer.burnTxHash);
-    } catch {
-      // Ignore reconciliation errors; return current state.
+  const reconcileChecks = reconcileCandidates.map(async (transfer) => {
+    const cachedClaimed = getCachedClaimReconcileResult(transfer.burnTxHash);
+    if (cachedClaimed != null) {
+      return { transfer, claimed: cachedClaimed };
     }
+
+    const claimed = await isTransferClaimed(transfer, transfer.attestation?.message);
+    setCachedClaimReconcileResult(transfer.burnTxHash, claimed);
+    return { transfer, claimed };
+  });
+
+  const reconcileResults = await Promise.allSettled(reconcileChecks);
+  const claimedTransfers = [];
+
+  for (const result of reconcileResults) {
+    if (result.status !== "fulfilled") continue;
+    if (!result.value.claimed) continue;
+    claimedTransfers.push(result.value.transfer);
   }
 
+  if (claimedTransfers.length) {
+    await Promise.allSettled(
+      claimedTransfers.map(async (transfer) => {
+        await deleteTransferRecord(transfer.burnTxHash, transfer.userAddress);
+        staleHashSet.add(transfer.burnTxHash);
+      }),
+    );
+  }
+
+  const staleHashes = [...staleHashSet].filter(Boolean);
   if (staleHashes.length) {
-    await removeWalletIndexEntries(wallet, staleHashes.filter(Boolean));
+    await removeWalletIndexEntries(wallet, staleHashes);
   }
 
   const active = transfers
-    .filter((t) => !staleHashes.includes(t.burnTxHash))
+    .filter((t) => !staleHashSet.has(t.burnTxHash))
     .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
     .slice(0, MAX_TRANSFERS_PER_WALLET)
     .map(sanitizeForResponse);
@@ -1112,6 +1229,7 @@ async function handleMarkMinting(req, res) {
   const updated = {
     ...transfer,
     status: "minting",
+    error: trimErrorMessage(req.body?.error) || null,
     updatedAt: Date.now(),
   };
 

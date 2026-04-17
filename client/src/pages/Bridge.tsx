@@ -164,13 +164,14 @@ const CHAIN_SWITCH_VERIFY_POLL_MS = 120;
 
 async function waitForWalletChain(chainId: number): Promise<boolean> {
   if (!window.ethereum) return false;
-
-  const provider = new BrowserProvider(window.ethereum);
   const startedAt = Date.now();
 
   while (Date.now() - startedAt < CHAIN_SWITCH_VERIFY_TIMEOUT_MS) {
     try {
-      const currentChainId = await provider.getNetwork().then((n) => Number(n.chainId));
+      const rawChainId = await window.ethereum.request({ method: "eth_chainId" });
+      const currentChainId = typeof rawChainId === "string"
+        ? Number.parseInt(rawChainId, 16)
+        : Number(rawChainId);
       if (currentChainId === chainId) {
         return true;
       }
@@ -600,7 +601,8 @@ export default function Bridge() {
     try {
       const transfers = await fetchPendingTransfers(address);
       setAllTransfers(transfers);
-    } catch {
+    } catch (e) {
+      console.error("[bridge] Failed to fetch pending transfers; using cached fallback", e);
       setAllTransfers(
         getCachedPendingTransfersForWallet(address),
       );
@@ -617,12 +619,41 @@ export default function Bridge() {
   }, [refreshPendingTransfers]);
 
   useEffect(() => {
-    if (!address) return;
-    const interval = setInterval(() => {
-      void refreshPendingTransfers();
-    }, 12000);
-    return () => clearInterval(interval);
-  }, [address, refreshPendingTransfers]);
+    if (!address || !isBridgeDbAvailable) return;
+
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const clearPoll = () => {
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+    };
+
+    const startPollIfVisible = () => {
+      if (document.visibilityState !== "visible") {
+        clearPoll();
+        return;
+      }
+      if (interval) return;
+      interval = setInterval(() => {
+        void refreshPendingTransfers();
+      }, 12000);
+    };
+
+    startPollIfVisible();
+
+    const onVisibilityChange = () => {
+      startPollIfVisible();
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      clearPoll();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [address, isBridgeDbAvailable, refreshPendingTransfers]);
 
   useEffect(() => {
     if (!address) {
@@ -1259,8 +1290,6 @@ export default function Bridge() {
       } catch (apiErr) {
         console.log("API fetch failed, will poll for attestation:", apiErr);
       }
-
-      if (!resolvedDestChain) throw new Error("Could not resolve destination chain from burn transaction");
 
       // Update UI like resume system does - IMMEDIATELY
       setSourceChain(manualClaimSourceChain);
