@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
-import { Contract, JsonRpcProvider, BrowserProvider, zeroPadValue, getAddress, parseUnits, Interface } from "ethers";
+import { Contract, BrowserProvider, zeroPadValue, parseUnits, formatUnits, Interface } from "ethers";
 import {
   CCTP_TESTNET_CHAINS,
   CCTP_ATTESTATION_API,
@@ -21,8 +21,9 @@ import {
 import {
   savePendingTransfer,
   updateTransferStatus,
-  getPendingTransfers,
-  getResumableTransfers,
+  fetchPendingTransfers,
+  getCachedPendingTransfersForWallet,
+  isBridgeTransferApiAvailable,
   removeTransfer,
   type PendingBridgeTransfer,
 } from "@/lib/bridge-transfers";
@@ -47,6 +48,213 @@ interface AttestationPollResult {
   message: string;
   attestation: string;
   destinationDomain?: number;
+}
+
+const CCTP_MESSAGE_NONCE_OFFSET_BYTES = 12;
+const CCTP_MESSAGE_NONCE_LENGTH_BYTES = 32;
+
+function extractCCTPMessageNonce(message: string): `0x${string}` | null {
+  const normalized = message.trim().toLowerCase();
+  if (!/^0x[0-9a-f]+$/.test(normalized)) return null;
+
+  const start = 2 + CCTP_MESSAGE_NONCE_OFFSET_BYTES * 2;
+  const end = start + CCTP_MESSAGE_NONCE_LENGTH_BYTES * 2;
+  if (normalized.length < end) return null;
+
+  return `0x${normalized.slice(start, end)}` as `0x${string}`;
+}
+
+function extractErrorCode(error: unknown): number | string | null {
+  if (!error || typeof error !== "object") return null;
+
+  const maybeError = error as {
+    code?: unknown;
+    error?: { code?: unknown };
+    data?: { originalError?: { code?: unknown } };
+    info?: { error?: { code?: unknown } };
+  };
+
+  const rawCode =
+    maybeError.code ??
+    maybeError.error?.code ??
+    maybeError.data?.originalError?.code ??
+    maybeError.info?.error?.code;
+
+  return typeof rawCode === "number" || typeof rawCode === "string" ? rawCode : null;
+}
+
+function extractErrorText(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (!error || typeof error !== "object") return "";
+
+  const maybeError = error as {
+    message?: unknown;
+    reason?: unknown;
+    shortMessage?: unknown;
+    details?: unknown;
+    data?: unknown;
+    error?: { message?: unknown; reason?: unknown; data?: unknown };
+    info?: { error?: { message?: unknown; reason?: unknown; data?: unknown } };
+  };
+
+  return [
+    maybeError.message,
+    maybeError.reason,
+    maybeError.shortMessage,
+    maybeError.details,
+    maybeError.error?.message,
+    maybeError.error?.reason,
+    maybeError.info?.error?.message,
+    maybeError.info?.error?.reason,
+    maybeError.data,
+    maybeError.error?.data,
+    maybeError.info?.error?.data,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join(" ");
+}
+
+function isUserRejectedRequestError(error: unknown): boolean {
+  const code = extractErrorCode(error);
+  if (code === 4001 || code === "4001" || code === "ACTION_REJECTED") return true;
+
+  const normalized = extractErrorText(error).toLowerCase();
+  return (
+    normalized.includes("user rejected") ||
+    normalized.includes("user denied") ||
+    normalized.includes("request rejected") ||
+    normalized.includes("rejected by user")
+  );
+}
+
+function isChainNotAddedError(error: unknown): boolean {
+  const code = extractErrorCode(error);
+  if (code === 4902 || code === "4902") return true;
+
+  const normalized = extractErrorText(error).toLowerCase();
+  return (
+    normalized.includes("unrecognized chain") ||
+    normalized.includes("unknown chain") ||
+    normalized.includes("chain not added") ||
+    normalized.includes("unsupported chain") ||
+    normalized.includes("wallet_addethereumchain") ||
+    normalized.includes("does not exist")
+  );
+}
+
+function isAlreadyClaimedError(error: unknown): boolean {
+  const errorText = extractErrorText(error);
+
+  if (!errorText) return false;
+
+  const normalized = errorText.toLowerCase();
+  return (
+    normalized.includes("already claimed") ||
+    normalized.includes("already received") ||
+    normalized.includes("already processed") ||
+    normalized.includes("message already") ||
+    normalized.includes("nonce already used") ||
+    normalized.includes("nonce was already used") ||
+    (normalized.includes("nonce") && normalized.includes("used"))
+  );
+}
+
+const CHAIN_SWITCH_VERIFY_TIMEOUT_MS = 6000;
+const CHAIN_SWITCH_VERIFY_POLL_MS = 120;
+
+async function waitForWalletChain(chainId: number): Promise<boolean> {
+  if (!window.ethereum) return false;
+
+  const provider = new BrowserProvider(window.ethereum);
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < CHAIN_SWITCH_VERIFY_TIMEOUT_MS) {
+    try {
+      const currentChainId = await provider.getNetwork().then((n) => Number(n.chainId));
+      if (currentChainId === chainId) {
+        return true;
+      }
+    } catch {
+      // wallet/provider may still be switching
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, CHAIN_SWITCH_VERIFY_POLL_MS));
+  }
+
+  return false;
+}
+
+async function switchToChain(targetChain: CCTPChain, purposeLabel: string): Promise<void> {
+  if (!window.ethereum) throw new Error("No wallet connected");
+
+  const targetChainHex = `0x${targetChain.chainId.toString(16)}`;
+
+  try {
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: targetChainHex }],
+    });
+  } catch (switchErr) {
+    if (isUserRejectedRequestError(switchErr)) {
+      throw new Error(`Chain switch cancelled. Please switch to ${targetChain.name} to ${purposeLabel}.`);
+    }
+
+    if (isChainNotAddedError(switchErr)) {
+      try {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: targetChainHex,
+            chainName: targetChain.name,
+            nativeCurrency: targetChain.nativeCurrency,
+            rpcUrls: targetChain.rpcUrls,
+            blockExplorerUrls: [targetChain.explorerUrl],
+          }],
+        });
+      } catch (addErr) {
+        if (isUserRejectedRequestError(addErr)) {
+          throw new Error(`Network add cancelled. Please add ${targetChain.name} in your wallet, then try again.`);
+        }
+
+        const addErrorText = extractErrorText(addErr);
+        throw new Error(
+          addErrorText
+            ? `Failed to add ${targetChain.name}: ${addErrorText}`
+            : `Failed to add ${targetChain.name}. Please add it in your wallet, then try again.`
+        );
+      }
+
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: targetChainHex }],
+        });
+      } catch (switchAfterAddErr) {
+        if (isUserRejectedRequestError(switchAfterAddErr)) {
+          throw new Error(`Chain switch cancelled. Please switch to ${targetChain.name} to ${purposeLabel}.`);
+        }
+
+        const switchErrorText = extractErrorText(switchAfterAddErr);
+        throw new Error(
+          switchErrorText
+            ? `Failed to switch to ${targetChain.name}: ${switchErrorText}`
+            : `Failed to switch to ${targetChain.name}. Please switch manually in your wallet and retry.`
+        );
+      }
+    } else {
+      const switchErrorText = extractErrorText(switchErr);
+      throw new Error(
+        switchErrorText
+          ? `Failed to switch to ${targetChain.name}: ${switchErrorText}`
+          : `Please switch to ${targetChain.name} to ${purposeLabel}`
+      );
+    }
+  }
+
+  const switched = await waitForWalletChain(targetChain.chainId);
+  if (!switched) {
+    throw new Error(`Chain switch to ${targetChain.name} did not complete. Please try again.`);
+  }
 }
 
 function resolveDestinationChain(
@@ -355,7 +563,8 @@ export default function Bridge() {
   const [sourceBalanceRaw, setSourceBalanceRaw] = useState<bigint | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [useFastTransfer, setUseFastTransfer] = useState(true);
-  const [balanceRefreshKey, setBalanceRefreshKey] = useState(0);
+  const balanceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const balanceFetchVersionRef = useRef(0);
 
   // Transfer state
   const [transfer, setTransfer] = useState<TransferState>(INITIAL_STATE);
@@ -377,30 +586,60 @@ export default function Bridge() {
   const [manualClaimDestChain, setManualClaimDestChain] = useState<CCTPChain | null>(null);
   const [manualClaimAttestation, setManualClaimAttestation] = useState<{ message: string; attestation: string } | null>(null);
   const [manualClaimStatus, setManualClaimStatus] = useState<"idle" | "fetching" | "ready" | "not_found" | "error">("idle");
+  const [isBridgeDbAvailable, setIsBridgeDbAvailable] = useState(true);
 
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
 
   // ── Load resumable transfers ───────────────────────────────────────────────
-  const refreshPendingTransfers = useCallback(() => {
-    if (address) {
-      setAllTransfers(
-        getPendingTransfers().filter(
-          t => t.userAddress.toLowerCase() === address.toLowerCase()
-        )
-      );
-    } else {
+  const refreshPendingTransfers = useCallback(async () => {
+    if (!address) {
       setAllTransfers([]);
+      return;
+    }
+
+    try {
+      const transfers = await fetchPendingTransfers(address);
+      setAllTransfers(transfers);
+    } catch {
+      setAllTransfers(
+        getCachedPendingTransfersForWallet(address),
+      );
     }
   }, [address]);
 
-  useEffect(() => { refreshPendingTransfers(); }, [refreshPendingTransfers]);
+  useEffect(() => { void refreshPendingTransfers(); }, [refreshPendingTransfers]);
 
   // Listen for bridge-transfers-updated events (from persistence layer)
   useEffect(() => {
-    const handler = () => refreshPendingTransfers();
+    const handler = () => { void refreshPendingTransfers(); };
     window.addEventListener("bridge-transfers-updated", handler);
     return () => window.removeEventListener("bridge-transfers-updated", handler);
   }, [refreshPendingTransfers]);
+
+  useEffect(() => {
+    if (!address) return;
+    const interval = setInterval(() => {
+      void refreshPendingTransfers();
+    }, 12000);
+    return () => clearInterval(interval);
+  }, [address, refreshPendingTransfers]);
+
+  useEffect(() => {
+    if (!address) {
+      setIsBridgeDbAvailable(true);
+      return;
+    }
+
+    let mounted = true;
+    void (async () => {
+      const ok = await isBridgeTransferApiAvailable(address);
+      if (mounted) setIsBridgeDbAvailable(ok);
+    })();
+
+    return () => {
+      mounted = false;
+    };
+  }, [address]);
 
   // Animate notification panel in/out (same pattern as TransactionHistory)
   useEffect(() => {
@@ -439,11 +678,21 @@ export default function Bridge() {
     return () => window.removeEventListener("bridge-resume-transfer", handler);
   }, []); // handler is stable; ref gives it access to the latest resumeTransfer
 
-  const resumableCount = address ? getResumableTransfers(address).length : 0;
+  const resumableCount = allTransfers.filter(
+    (tx) => tx.status === "attesting" || tx.status === "ready_to_mint",
+  ).length;
 
-  const handleDismiss = (id: string) => {
-    removeTransfer(id);
-    refreshPendingTransfers();
+  const handleDismiss = async (id: string) => {
+    const removed = await removeTransfer(id);
+    if (!removed) {
+      toast({
+        title: "Unable to dismiss",
+        description: "Only failed or completed transfers can be dismissed.",
+        variant: "warning",
+      });
+      return;
+    }
+    void refreshPendingTransfers();
   };
 
   const getStatusInfo = (status: PendingBridgeTransfer["status"]) => {
@@ -459,6 +708,8 @@ export default function Bridge() {
 
   // ── Fetch USDC balance on source chain ──────────────────────────────────────
   const fetchBalance = useCallback(async () => {
+    const fetchVersion = ++balanceFetchVersionRef.current;
+
     if (!address || !sourceChain) {
       setSourceBalance(null);
       setSourceBalanceRaw(null);
@@ -470,39 +721,61 @@ export default function Bridge() {
       const provider = await getWorkingProvider(sourceChain);
 
       if (sourceChain.isNativeUSDC) {
-        // Arc Testnet: USDC is the native gas token (18 decimals for native balance)
+        // Arc Testnet: USDC is the native gas token
         const nativeBal = await provider.getBalance(address);
-        const formatted = (Number(nativeBal) / 1e18).toFixed(4);
+        if (fetchVersion !== balanceFetchVersionRef.current) return;
+        const formatted = Number(formatUnits(nativeBal, sourceChain.nativeCurrency.decimals)).toFixed(4);
         setSourceBalance(formatted);
         setSourceBalanceRaw(nativeBal);
       } else {
         // Standard ERC-20 USDC (6 decimals)
         const usdc = new Contract(sourceChain.usdcAddress, ERC20_ABI, provider);
         const bal: bigint = await usdc.balanceOf(address);
+        if (fetchVersion !== balanceFetchVersionRef.current) return;
         const decimals = sourceChain.usdcDecimals;
-        const formatted = (Number(bal) / 10 ** decimals).toFixed(decimals > 4 ? 4 : decimals);
+        const formatted = Number(formatUnits(bal, decimals)).toFixed(decimals > 4 ? 4 : decimals);
         setSourceBalance(formatted);
         setSourceBalanceRaw(bal);
       }
     } catch (e) {
+      if (fetchVersion !== balanceFetchVersionRef.current) return;
       console.error("Balance fetch error:", e);
       setSourceBalance(null);
       setSourceBalanceRaw(null);
     } finally {
-      setIsLoadingBalance(false);
+      if (fetchVersion === balanceFetchVersionRef.current) {
+        setIsLoadingBalance(false);
+      }
     }
-  }, [address, sourceChain, balanceRefreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => { fetchBalance(); }, [fetchBalance]);
-
-  // Poll balance every 20 seconds when wallet is connected
-  useEffect(() => {
-    if (!address || !sourceChain) return;
-    const interval = setInterval(() => {
-      setBalanceRefreshKey(k => k + 1);
-    }, 20000);
-    return () => clearInterval(interval);
   }, [address, sourceChain]);
+
+  // Poll balance every 8 seconds while connected
+  useEffect(() => {
+    if (!address || !sourceChain) {
+      if (balanceIntervalRef.current) {
+        clearInterval(balanceIntervalRef.current);
+        balanceIntervalRef.current = null;
+      }
+      return;
+    }
+
+    fetchBalance();
+
+    if (balanceIntervalRef.current) {
+      clearInterval(balanceIntervalRef.current);
+    }
+
+    balanceIntervalRef.current = setInterval(() => {
+      fetchBalance();
+    }, 8000);
+
+    return () => {
+      if (balanceIntervalRef.current) {
+        clearInterval(balanceIntervalRef.current);
+        balanceIntervalRef.current = null;
+      }
+    };
+  }, [address, sourceChain, fetchBalance]);
 
   // ── Swap source/dest ────────────────────────────────────────────────────────
   const handleSwapChains = () => {
@@ -554,7 +827,7 @@ export default function Bridge() {
           throw new Error("Could not resolve destination chain from attestation");
         }
 
-        updateTransferStatus(pendingTx.id, {
+        await updateTransferStatus(pendingTx.id, {
           status: "ready_to_mint",
           attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
           destDomain: resolvedDst.domain,
@@ -593,10 +866,10 @@ export default function Bridge() {
       const isTimeout = /timeout/i.test(message);
       if (isTimeout) {
         // Keep transfer resumable — don't mark as failed
-        updateTransferStatus(pendingTx.id, { status: "attesting", error: message });
+        await updateTransferStatus(pendingTx.id, { status: "attesting", error: message });
         setTransfer(prev => ({ ...prev, step: "error", error: message }));
       } else {
-        updateTransferStatus(pendingTx.id, { status: "failed", error: message });
+        await updateTransferStatus(pendingTx.id, { status: "failed", error: message });
         setTransfer(prev => ({ ...prev, step: "error", error: message }));
       }
       toast({
@@ -617,41 +890,10 @@ export default function Bridge() {
   ) => {
     if (!window.ethereum) throw new Error("No wallet connected");
 
-    updateTransferStatus(transferId, { status: "minting" });
+    await updateTransferStatus(transferId, { status: "minting" });
 
     try {
-      // Switch to destination chain
-      try {
-        await window.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x" + dstChain.chainId.toString(16) }],
-        });
-      } catch (switchErr: any) {
-        if (switchErr.code === 4902) {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: "0x" + dstChain.chainId.toString(16),
-              chainName: dstChain.name,
-              nativeCurrency: dstChain.nativeCurrency,
-              rpcUrls: [dstChain.rpcUrls[0]],
-              blockExplorerUrls: [dstChain.explorerUrl],
-            }],
-          });
-        } else {
-          throw new Error(`Please switch to ${dstChain.name} to receive USDC`);
-        }
-      }
-
-      // Wait for chain switch to stabilize
-      await new Promise(r => setTimeout(r, 1500));
-
-      // Verify the chain actually switched
-      const verifyProvider = new BrowserProvider(window.ethereum);
-      const verifiedChainId = await verifyProvider.getNetwork().then(n => Number(n.chainId));
-      if (verifiedChainId !== dstChain.chainId) {
-        throw new Error(`Chain switch to ${dstChain.name} did not complete. Please try again.`);
-      }
+      await switchToChain(dstChain, "receive USDC");
 
       const destProvider = new BrowserProvider(window.ethereum);
       const destSigner = await destProvider.getSigner();
@@ -662,6 +904,41 @@ export default function Bridge() {
         MESSAGE_TRANSMITTER_V2_ABI,
         destSigner
       );
+
+      const messageNonce = extractCCTPMessageNonce(attestation.message);
+      if (messageNonce) {
+        try {
+          const [nonceState, nonceUsedValue] = await Promise.all([
+            messageTransmitter.usedNonces(messageNonce) as Promise<bigint>,
+            messageTransmitter.NONCE_USED() as Promise<bigint>,
+          ]);
+
+          const nonceAlreadyUsed = nonceUsedValue > 0n
+            ? nonceState === nonceUsedValue
+            : nonceState > 0n;
+
+          if (nonceAlreadyUsed) {
+            await updateTransferStatus(transferId, {
+              status: "complete",
+              attestation,
+              error: undefined,
+            });
+            setTransfer(prev => ({
+              ...prev,
+              step: "complete",
+              error: null,
+            }));
+            toast({
+              title: "Already Claimed",
+              description: "This transfer was already claimed on the destination chain.",
+            });
+            fetchBalance();
+            return;
+          }
+        } catch (nonceCheckErr) {
+          console.warn("CCTP nonce pre-check failed; continuing with mint attempt", nonceCheckErr);
+        }
+      }
 
       // Estimate gas and apply 150% boost for slow chains
       const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
@@ -679,13 +956,17 @@ export default function Bridge() {
 
       if (!mintReceipt || mintReceipt.status !== 1) {
         const errorMsg = mintReceipt ? "Mint transaction failed" : "Failed to get mint receipt";
-        updateTransferStatus(transferId, { status: "failed", mintTxHash: mintReceipt?.hash });
+        await updateTransferStatus(transferId, { status: "failed", mintTxHash: mintReceipt?.hash });
         setTransfer(prev => ({ ...prev, step: "error", error: errorMsg }));
         toast({ title: "Mint Failed", description: errorMsg, variant: "destructive" });
         return;
       }
 
-      updateTransferStatus(transferId, { status: "complete", mintTxHash: mintReceipt.hash });
+      await updateTransferStatus(transferId, {
+        status: "complete",
+        mintTxHash: mintReceipt.hash,
+        attestation,
+      });
       setTransfer(prev => ({
         ...prev,
         step: "complete",
@@ -700,9 +981,28 @@ export default function Bridge() {
       fetchBalance();
 
     } catch (mintErr: any) {
+      if (isAlreadyClaimedError(mintErr)) {
+        await updateTransferStatus(transferId, {
+          status: "complete",
+          attestation,
+          error: undefined,
+        });
+        setTransfer(prev => ({
+          ...prev,
+          step: "complete",
+          error: null,
+        }));
+        toast({
+          title: "Already Claimed",
+          description: "This transfer was already claimed on the destination chain.",
+        });
+        fetchBalance();
+        return;
+      }
+
       // Mint failed or was cancelled — keep transfer resumable with attestation intact
       const msg = mintErr?.message || mintErr?.reason || "Mint failed";
-      updateTransferStatus(transferId, { status: "ready_to_mint", attestation, error: msg });
+      await updateTransferStatus(transferId, { status: "ready_to_mint", attestation, error: msg });
       setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({
         title: "Mint Failed — Your Funds Are Safe",
@@ -977,7 +1277,7 @@ export default function Bridge() {
           error: null,
         });
 
-        savePendingTransfer({
+        await savePendingTransfer({
           id: txHash,
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
@@ -1002,7 +1302,7 @@ export default function Bridge() {
           error: null,
         });
 
-        savePendingTransfer({
+        await savePendingTransfer({
           id: txHash,
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
@@ -1025,7 +1325,7 @@ export default function Bridge() {
           typeof fetchedAttestationResult.destinationDomain === "number" &&
           fetchedAttestationResult.destinationDomain !== decodedDestinationDomain
         ) {
-          updateTransferStatus(txHash, {
+          await updateTransferStatus(txHash, {
             status: "attesting",
             error: "Attestation destination does not match burn transaction",
           });
@@ -1044,7 +1344,7 @@ export default function Bridge() {
         );
 
       if (!resolvedDestChain) {
-        updateTransferStatus(txHash, {
+        await updateTransferStatus(txHash, {
             status: "attesting",
             error: "Attestation did not provide a valid destination chain",
           });
@@ -1058,7 +1358,7 @@ export default function Bridge() {
           return;
         }
         
-        updateTransferStatus(txHash, {
+        await updateTransferStatus(txHash, {
           status: "ready_to_mint",
           attestation: {
             message: fetchedAttestationResult.message,
@@ -1091,9 +1391,11 @@ export default function Bridge() {
         );
       }
 
+      fetchBalance();
+
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
-      updateTransferStatus(txHash, {
+      await updateTransferStatus(txHash, {
         status: "attesting",
         error: msg,
       });
@@ -1138,38 +1440,7 @@ export default function Bridge() {
       const preProvider = new BrowserProvider(window.ethereum);
       const currentChainId = await preProvider.getNetwork().then(n => Number(n.chainId));
       if (currentChainId !== sourceChain.chainId) {
-        try {
-          await window.ethereum.request({
-            method: "wallet_switchEthereumChain",
-            params: [{ chainId: "0x" + sourceChain.chainId.toString(16) }],
-          });
-        } catch (switchErr: any) {
-          // If chain not added, try adding it
-          if (switchErr.code === 4902) {
-            await window.ethereum.request({
-              method: "wallet_addEthereumChain",
-              params: [{
-                chainId: "0x" + sourceChain.chainId.toString(16),
-                chainName: sourceChain.name,
-                nativeCurrency: sourceChain.nativeCurrency,
-                rpcUrls: [sourceChain.rpcUrls[0]],
-                blockExplorerUrls: [sourceChain.explorerUrl],
-              }],
-            });
-          } else {
-            throw new Error(`Please switch to ${sourceChain.name} to continue`);
-          }
-        }
-
-        // Wait for chain switch to stabilize before creating provider/signer
-        await new Promise(r => setTimeout(r, 1500));
-
-        // Verify the chain actually switched
-        const verifyProvider = new BrowserProvider(window.ethereum);
-        const newChainId = await verifyProvider.getNetwork().then(n => Number(n.chainId));
-        if (newChainId !== sourceChain.chainId) {
-          throw new Error(`Chain switch to ${sourceChain.name} did not complete. Please try again.`);
-        }
+        await switchToChain(sourceChain, "continue");
       }
 
       // ── Create fresh provider/signer AFTER chain switch ─────────────────
@@ -1229,7 +1500,7 @@ export default function Bridge() {
       // ── Persist the transfer after successful burn ──────────────────────
       const transferId = burnTxHash;
       currentTransferIdRef.current = transferId;
-      savePendingTransfer({
+      await savePendingTransfer({
         id: transferId,
         burnTxHash,
         sourceDomain: sourceChain.domain,
@@ -1240,7 +1511,9 @@ export default function Bridge() {
         userAddress: address,
         timestamp: Date.now(),
         status: "attesting",
-      });
+      }, { strict: isBridgeDbAvailable });
+
+      fetchBalance();
 
       // ── Step 3: Poll for attestation ────────────────────────────────────
       toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
@@ -1257,7 +1530,7 @@ export default function Bridge() {
         throw new Error("Could not resolve destination chain from attestation");
       }
 
-      updateTransferStatus(transferId, {
+      await updateTransferStatus(transferId, {
         status: "ready_to_mint",
         attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
         destDomain: resolvedDestChain.domain,
@@ -1286,9 +1559,9 @@ export default function Bridge() {
       if (currentTransferIdRef.current) {
         if (isTimeout) {
           // Keep transfer resumable — don't mark as failed
-          updateTransferStatus(currentTransferIdRef.current, { status: "attesting", error: message });
+          await updateTransferStatus(currentTransferIdRef.current, { status: "attesting", error: message });
         } else {
-          updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message });
+          await updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message });
         }
       }
       setTransfer(prev => ({ ...prev, step: "error", error: message }));
@@ -1795,9 +2068,20 @@ export default function Bridge() {
                   </button>
                   {allTransfers.length > 0 && (
                     <button
-                      onClick={() => {
-                        allTransfers.forEach(tx => { removeTransfer(tx.id); });
-                        refreshPendingTransfers();
+                      onClick={async () => {
+                        const results = await Promise.all(
+                          allTransfers.map(async (tx) => removeTransfer(tx.id)),
+                        );
+                        const removedCount = results.filter(Boolean).length;
+                        const total = allTransfers.length;
+                        if (removedCount !== total) {
+                          toast({
+                            title: "Some transfers were kept",
+                            description: `${removedCount}/${total} dismissed. Pending transfers stay until completion.`,
+                            variant: "warning",
+                          });
+                        }
+                        void refreshPendingTransfers();
                       }}
                       title="Clear all"
                       className="w-8 h-8 rounded-xl flex items-center justify-center text-white/30 hover:text-red-400 hover:bg-red-500/10 transition-all"
@@ -1959,7 +2243,7 @@ export default function Bridge() {
                               )}
                               {canDismiss && (
                                 <button
-                                  onClick={() => handleDismiss(tx.id)}
+                                  onClick={async () => handleDismiss(tx.id)}
                                   className="text-[11px] text-white/30 px-2 py-1 rounded-lg hover:text-white/50 hover:bg-white/5 transition-all"
                                   style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.06)" }}
                                 >

@@ -57,6 +57,15 @@ Set these in **Vercel Project Settings -> Environment Variables**:
 | `UPSTREAM_TIMEOUT_MS` | Optional | Integer upstream timeout in milliseconds (default `5000`) |
 | `ANALYTICS_SUMMARY_CACHE_TTL_MS` | Optional | Cache TTL for analytics summary in milliseconds (default `60000` ms; controls freshness) |
 | `ANALYTICS_RANK_CACHE_MAX` | Optional | Maximum entries in in-memory rank cache (default `1000` entries; bounds memory usage) |
+| `BRIDGE_TRANSFER_RATE_LIMIT_PER_MINUTE` | Optional | Rate limit for `/api/bridge-transfers` (default `240`) |
+| `BRIDGE_TRANSFER_TTL_SECONDS` | Optional | Retention for pending bridge records in Redis (default `604800` = 7 days) |
+
+### Bridge Pending Transfer Persistence
+
+- Pending bridge records are stored server-side through `/api/bridge-transfers` (Redis when `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` are set).
+- A transfer is persisted after burn confirmation and then updated across attestation/mint states.
+- Completion is verified on-chain before deletion (nonce consumed / mint verified).
+- If Redis/env is unavailable, the handler falls back to process memory and the client still keeps a local fallback cache.
 
 Important notes:
 - `SUBGRAPH_PROXY_TOKEN` is **not** your Graph key.
