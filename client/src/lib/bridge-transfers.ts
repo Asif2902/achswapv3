@@ -328,6 +328,7 @@ export async function updateTransferStatus(
   } else if (status === "failed") {
     ok = ok && await postBridgeTransfer("mark_failed", {
       burnTxHash,
+      mintTxHash: updates.mintTxHash,
       error: updates.error,
       ownershipProof,
     });

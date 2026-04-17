@@ -159,6 +159,24 @@ function isAlreadyClaimedError(error: unknown): boolean {
   );
 }
 
+function getTransferStatusRank(status: string | null | undefined): number {
+  switch (String(status || "").toLowerCase()) {
+    case "attesting":
+      return 1;
+    case "ready_to_mint":
+      return 2;
+    case "minting":
+      return 3;
+    case "complete":
+    case "completed":
+      return 4;
+    case "failed":
+      return 5;
+    default:
+      return 0;
+  }
+}
+
 const CHAIN_SWITCH_VERIFY_TIMEOUT_MS = 6000;
 const CHAIN_SWITCH_VERIFY_POLL_MS = 120;
 
@@ -609,6 +627,39 @@ export default function Bridge() {
     }
   }, [address]);
 
+  const probeBridgeAvailability = useCallback(async (): Promise<boolean> => {
+    if (!address) {
+      setIsBridgeDbAvailable(true);
+      return true;
+    }
+
+    try {
+      const ok = await isBridgeTransferApiAvailable(address);
+      setIsBridgeDbAvailable(ok);
+      return ok;
+    } catch (e) {
+      console.error("[bridge] Bridge DB availability probe failed", e);
+      setIsBridgeDbAvailable(false);
+      return false;
+    }
+  }, [address]);
+
+  const savePendingTransferWithProbe = useCallback(async (
+    transfer: PendingBridgeTransfer,
+    options?: { strict?: boolean },
+  ): Promise<boolean> => {
+    try {
+      const ok = await savePendingTransfer(transfer, options);
+      if (!ok) {
+        void probeBridgeAvailability();
+      }
+      return ok;
+    } catch (err) {
+      void probeBridgeAvailability();
+      throw err;
+    }
+  }, [probeBridgeAvailability]);
+
   useEffect(() => { void refreshPendingTransfers(); }, [refreshPendingTransfers]);
 
   // Listen for bridge-transfers-updated events (from persistence layer)
@@ -656,21 +707,32 @@ export default function Bridge() {
   }, [address, isBridgeDbAvailable, refreshPendingTransfers]);
 
   useEffect(() => {
-    if (!address) {
-      setIsBridgeDbAvailable(true);
-      return;
-    }
-
     let mounted = true;
-    void (async () => {
-      const ok = await isBridgeTransferApiAvailable(address);
-      if (mounted) setIsBridgeDbAvailable(ok);
-    })();
+
+    const runProbe = async () => {
+      const ok = await probeBridgeAvailability();
+      if (!mounted) return;
+      setIsBridgeDbAvailable(ok);
+    };
+
+    void runProbe();
+
+    const onFocus = () => { void runProbe(); };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void runProbe();
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
       mounted = false;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [address]);
+  }, [probeBridgeAvailability]);
 
   // Animate notification panel in/out (same pattern as TransactionHistory)
   useEffect(() => {
@@ -1307,7 +1369,7 @@ export default function Bridge() {
           error: null,
         });
 
-        await savePendingTransfer({
+        await savePendingTransferWithProbe({
           id: txHash,
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
@@ -1334,7 +1396,7 @@ export default function Bridge() {
           error: null,
         });
 
-        await savePendingTransfer({
+        await savePendingTransferWithProbe({
           id: txHash,
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
@@ -1430,10 +1492,27 @@ export default function Bridge() {
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
       if (currentTransferIdRef.current === txHash) {
-        await updateTransferStatus(currentTransferIdRef.current, {
-          status: "attesting",
-          error: msg,
-        });
+        let shouldDowngradeToAttesting = true;
+        try {
+          const latestTransfers = await fetchPendingTransfers(address);
+          const persisted = latestTransfers.find((t) => t.id === currentTransferIdRef.current);
+          if (persisted && getTransferStatusRank(persisted.status) > getTransferStatusRank("attesting")) {
+            shouldDowngradeToAttesting = false;
+          }
+        } catch {
+          const cached = getCachedPendingTransfersForWallet(address)
+            .find((t) => t.id === currentTransferIdRef.current);
+          if (cached && getTransferStatusRank(cached.status) > getTransferStatusRank("attesting")) {
+            shouldDowngradeToAttesting = false;
+          }
+        }
+
+        if (shouldDowngradeToAttesting) {
+          await updateTransferStatus(currentTransferIdRef.current, {
+            status: "attesting",
+            error: msg,
+          });
+        }
       }
       setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({ title: "Claim Failed", description: msg, variant: "destructive" });
@@ -1536,7 +1615,7 @@ export default function Bridge() {
       // ── Persist the transfer after successful burn ──────────────────────
       const transferId = burnTxHash;
       currentTransferIdRef.current = transferId;
-      await savePendingTransfer({
+      await savePendingTransferWithProbe({
         id: transferId,
         burnTxHash,
         sourceDomain: sourceChain.domain,

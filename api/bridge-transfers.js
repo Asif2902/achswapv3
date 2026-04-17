@@ -160,6 +160,15 @@ const CCTP_TESTNET_CHAINS = [
 const chainById = new Map(CCTP_TESTNET_CHAINS.map((chain) => [chain.chainId, chain]));
 const chainByDomain = new Map(CCTP_TESTNET_CHAINS.map((chain) => [chain.domain, chain]));
 
+class ValidationError extends Error {
+  constructor(message, status = 400) {
+    super(message);
+    this.name = "ValidationError";
+    this.status = status;
+    this.statusCode = status;
+  }
+}
+
 function readPositiveEnvNumber(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const raw = process.env[name];
   if (raw == null || raw === "") return fallback;
@@ -811,15 +820,15 @@ async function getWorkingProvider(chain) {
 
 async function verifyBurnTransaction(transfer) {
   const chain = chainById.get(Number(transfer.sourceChainId));
-  if (!chain) throw new Error("Unsupported source chain");
+  if (!chain) throw new ValidationError("Unsupported source chain");
   if (Number(chain.domain) !== Number(transfer.sourceDomain)) {
-    throw new Error("Source domain does not match source chain");
+    throw new ValidationError("Source domain does not match source chain");
   }
 
   const destinationChain = chainById.get(Number(transfer.destChainId));
-  if (!destinationChain) throw new Error("Unsupported destination chain");
+  if (!destinationChain) throw new ValidationError("Unsupported destination chain");
   if (Number(destinationChain.domain) !== Number(transfer.destDomain)) {
-    throw new Error("Destination domain does not match destination chain");
+    throw new ValidationError("Destination domain does not match destination chain");
   }
 
   const provider = await getWorkingProvider(chain);
@@ -829,18 +838,18 @@ async function verifyBurnTransaction(transfer) {
   ]);
 
   if (!tx || !receipt || receipt.status !== 1) {
-    throw new Error("Burn transaction not confirmed on-chain");
+    throw new ValidationError("Burn transaction not confirmed on-chain");
   }
 
   const txTo = canonicalAddress(tx.to || "");
   const expectedTokenMessenger = canonicalAddress(chain.tokenMessengerV2);
   if (!txTo || txTo !== expectedTokenMessenger) {
-    throw new Error("Burn transaction was not sent to TokenMessengerV2");
+    throw new ValidationError("Burn transaction was not sent to TokenMessengerV2");
   }
 
   const txFrom = canonicalAddress(tx.from || "");
   if (!txFrom || txFrom !== canonicalAddress(transfer.userAddress)) {
-    throw new Error("Burn transaction sender mismatch");
+    throw new ValidationError("Burn transaction sender mismatch");
   }
 
   let parsed;
@@ -851,16 +860,16 @@ async function verifyBurnTransaction(transfer) {
   }
 
   if (!parsed || parsed.name !== "depositForBurn") {
-    throw new Error("Burn transaction is not depositForBurn");
+    throw new ValidationError("Burn transaction is not depositForBurn");
   }
 
   const decodedDestinationDomain = Number(parsed.args[1]);
   if (!Number.isFinite(decodedDestinationDomain) || decodedDestinationDomain !== Number(transfer.destDomain)) {
-    throw new Error("Burn transaction destination domain mismatch");
+    throw new ValidationError("Burn transaction destination domain mismatch");
   }
 
   if (decodedDestinationDomain !== Number(destinationChain.domain)) {
-    throw new Error("Burn transaction destination chain mismatch");
+    throw new ValidationError("Burn transaction destination chain mismatch");
   }
 
   return true;
@@ -1072,6 +1081,11 @@ async function handleGet(req, res) {
 
   const reconcileCandidates = transfers
     .filter((t) => (t.status === "minting" || t.status === "ready_to_mint") && t.attestation?.message)
+    .sort((a, b) => {
+      const aTime = Number(a.timestamp || 0);
+      const bTime = Number(b.timestamp || 0);
+      return aTime - bTime;
+    })
     .slice(0, CLAIM_RECONCILE_LIMIT);
 
   const reconcileChecks = reconcileCandidates.map(async (transfer) => {
@@ -1180,6 +1194,20 @@ async function handleUpdateAttestation(req, res) {
   const destDomainInput = toInt(req.body?.destDomain);
   const destChainIdInput = toInt(req.body?.destChainId);
 
+  if (
+    Number.isInteger(destDomainInput)
+    && destDomainInput !== Number(transfer.destDomain)
+  ) {
+    return res.status(400).json({ error: "Destination domain does not match burn transaction" });
+  }
+
+  if (
+    Number.isInteger(destChainIdInput)
+    && destChainIdInput !== Number(transfer.destChainId)
+  ) {
+    return res.status(400).json({ error: "Destination chain does not match burn transaction" });
+  }
+
   let nextDestination = chainById.get(Number(transfer.destChainId)) || chainByDomain.get(Number(transfer.destDomain)) || null;
 
   if (Number.isInteger(destChainIdInput)) {
@@ -1264,6 +1292,8 @@ async function handleMarkAttesting(req, res) {
 async function handleMarkFailed(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   if (!isHash(burnTxHash)) return res.status(400).json({ error: "Invalid burnTxHash" });
+  const mintTxHashInput = canonicalHash(req.body?.mintTxHash || "");
+  const mintTxHash = isHash(mintTxHashInput) ? mintTxHashInput : undefined;
 
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(404).json({ error: "Transfer not found" });
@@ -1277,6 +1307,7 @@ async function handleMarkFailed(req, res) {
   const updated = {
     ...transfer,
     status: "failed",
+    mintTxHash: mergeTransferField(transfer.mintTxHash, mintTxHash),
     error: trimErrorMessage(req.body?.error),
     updatedAt: Date.now(),
   };
@@ -1388,7 +1419,14 @@ export default async function handler(req, res) {
     if (err instanceof Error && err.name === "AggregateError") {
       return res.status(502).json({ error: "All RPC endpoints failed" });
     }
-    const message = err instanceof Error ? err.message : "Unexpected bridge transfer error";
-    return res.status(500).json({ error: message });
+    if (
+      err instanceof ValidationError
+      || (err && typeof err === "object" && (Number.isInteger(err.status) || Number.isInteger(err.statusCode)))
+    ) {
+      const status = Number(err?.status || err?.statusCode || 400);
+      const message = err instanceof Error ? err.message : "Validation failed";
+      return res.status(status).json({ error: message });
+    }
+    return res.status(500).json({ error: "Unexpected bridge transfer error" });
   }
 }
