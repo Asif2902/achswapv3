@@ -14,12 +14,14 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_TRANSFER_TTL_SECONDS = 7 * 24 * 60 * 60;
 const MAX_TRANSFERS_PER_WALLET = 100;
 const CLAIM_RECONCILE_LIMIT = 6;
+const OWNERSHIP_PROOF_MAX_TTL_MS = 10 * 60_000;
+const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
 
 const RPC_PROBE_TIMEOUT_MS = 1_800;
 const RPC_CACHE_REVALIDATE_MS = 30_000;
 
-const rateLimitByKey = new Map();
-let rateLimitRequestCount = 0;
+const memoryRateLimitByKey = new Map();
+let memoryRateLimitRequestCount = 0;
 
 const providerCacheByChainId = new Map();
 const providerInFlightByChainId = new Map();
@@ -237,30 +239,59 @@ function getClientIp(req) {
   return req.socket?.remoteAddress || "unknown";
 }
 
-function pruneRateLimitBuckets(now) {
-  for (const [key, state] of rateLimitByKey) {
+function rateLimitRedisKey(clientKey) {
+  return `bridge:ratelimit:${clientKey}`;
+}
+
+function pruneMemoryRateLimitBuckets(now) {
+  for (const [key, state] of memoryRateLimitByKey) {
     if (!state || typeof state.resetAt !== "number" || state.resetAt <= now) {
-      rateLimitByKey.delete(key);
+      memoryRateLimitByKey.delete(key);
     }
   }
 }
 
-function checkRateLimit(req) {
-  const key = getClientIp(req);
+function checkRateLimitInMemory(clientKey) {
   const now = Date.now();
 
-  rateLimitRequestCount += 1;
-  if (rateLimitRequestCount % 64 === 0) pruneRateLimitBuckets(now);
+  memoryRateLimitRequestCount += 1;
+  if (memoryRateLimitRequestCount % 64 === 0) pruneMemoryRateLimitBuckets(now);
 
-  const state = rateLimitByKey.get(key) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
+  const state = memoryRateLimitByKey.get(clientKey) || { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
   if (now > state.resetAt) {
     state.count = 0;
     state.resetAt = now + RATE_LIMIT_WINDOW_MS;
   }
 
   state.count += 1;
-  rateLimitByKey.set(key, state);
+  memoryRateLimitByKey.set(clientKey, state);
   return state.count <= RATE_LIMIT_PER_MINUTE;
+}
+
+async function checkRateLimit(req) {
+  const clientKey = getClientIp(req);
+
+  if (!HAS_REDIS) {
+    return checkRateLimitInMemory(clientKey);
+  }
+
+  try {
+    const ttlSeconds = Math.max(1, Math.ceil(RATE_LIMIT_WINDOW_MS / 1000));
+    const [countRaw] = await upstashPipeline([
+      ["INCR", rateLimitRedisKey(clientKey)],
+      ["EXPIRE", rateLimitRedisKey(clientKey), String(ttlSeconds), "NX"],
+    ]);
+
+    const count = Number(countRaw);
+    if (!Number.isFinite(count)) {
+      return false;
+    }
+
+    return count <= RATE_LIMIT_PER_MINUTE;
+  } catch (err) {
+    console.warn("[bridge-transfers] Redis rate limit failed; falling back to memory", err);
+    return checkRateLimitInMemory(clientKey);
+  }
 }
 
 function canonicalHash(value) {
@@ -286,6 +317,15 @@ function isWallet(value) {
 function toInt(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? Math.trunc(parsed) : null;
+}
+
+function isTruthyFlag(value) {
+  if (Array.isArray(value)) {
+    return value.some((entry) => isTruthyFlag(entry));
+  }
+
+  const normalized = String(value || "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
 function trimErrorMessage(value) {
@@ -365,10 +405,20 @@ async function upstashPipeline(commands) {
     body: JSON.stringify(commands),
   });
 
-  const payload = await response.json();
+  const rawBody = await response.text();
   if (!response.ok) {
-    throw new Error(`Redis pipeline failed: ${response.status}`);
+    const bodySnippet = rawBody.length > 500 ? `${rawBody.slice(0, 500)}...` : rawBody;
+    throw new Error(`Redis pipeline failed: ${response.status} ${bodySnippet}`);
   }
+
+  let payload;
+  try {
+    payload = rawBody ? JSON.parse(rawBody) : null;
+  } catch {
+    const bodySnippet = rawBody.length > 500 ? `${rawBody.slice(0, 500)}...` : rawBody;
+    throw new Error(`Redis pipeline returned non-JSON payload: ${bodySnippet}`);
+  }
+
   if (!Array.isArray(payload)) {
     throw new Error("Redis pipeline returned invalid response");
   }
@@ -680,7 +730,82 @@ function sanitizeForResponse(transfer) {
   };
 }
 
+function getOwnershipProof(req) {
+  const rawProof = req.body?.ownershipProof;
+  if (!rawProof || typeof rawProof !== "object") return null;
+
+  const signedMessage = typeof rawProof.signedMessage === "string" ? rawProof.signedMessage : "";
+  const signature = typeof rawProof.signature === "string" ? rawProof.signature : "";
+  const issuedAtRaw = Number(rawProof.issuedAt);
+
+  if (!signedMessage || !signature || !Number.isFinite(issuedAtRaw)) return null;
+  const issuedAt = Math.trunc(issuedAtRaw);
+  if (issuedAt <= 0) return null;
+
+  return { signedMessage, signature, issuedAt };
+}
+
+async function requireSignedOwnership(req, transfer) {
+  const proof = getOwnershipProof(req);
+  if (!proof) {
+    throw new Error("Missing ownership proof");
+  }
+
+  const now = Date.now();
+  if (proof.issuedAt > now + OWNERSHIP_PROOF_CLOCK_SKEW_MS) {
+    throw new Error("Ownership proof timestamp is in the future");
+  }
+
+  if (now - proof.issuedAt > OWNERSHIP_PROOF_MAX_TTL_MS) {
+    throw new Error("Ownership proof expired");
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(proof.signedMessage);
+  } catch {
+    throw new Error("Invalid ownership proof message");
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Invalid ownership proof payload");
+  }
+
+  if (String(parsed.intent || "") !== "bridge_transfer_mutation") {
+    throw new Error("Invalid ownership proof intent");
+  }
+
+  const expectedBurnTxHash = canonicalHash(transfer.burnTxHash);
+  const signedBurnTxHash = canonicalHash(parsed.burnTxHash);
+  if (!isHash(signedBurnTxHash) || signedBurnTxHash !== expectedBurnTxHash) {
+    throw new Error("Ownership proof burn hash mismatch");
+  }
+
+  const signedIssuedAt = Number(parsed.issuedAt);
+  if (!Number.isFinite(signedIssuedAt) || Math.trunc(signedIssuedAt) !== proof.issuedAt) {
+    throw new Error("Ownership proof timestamp mismatch");
+  }
+
+  let recovered;
+  try {
+    recovered = canonicalAddress(ethers.verifyMessage(proof.signedMessage, proof.signature));
+  } catch {
+    throw new Error("Invalid ownership signature");
+  }
+
+  const expectedWallet = canonicalAddress(transfer.userAddress);
+  if (!expectedWallet || recovered !== expectedWallet) {
+    throw new Error("Ownership signature does not match transfer owner");
+  }
+
+  return true;
+}
+
 async function handleGet(req, res) {
+  if (isTruthyFlag(req.query?.probe)) {
+    return res.status(200).json({ ok: true, storage: HAS_REDIS ? "redis" : "memory" });
+  }
+
   const wallet = canonicalAddress(req.query?.wallet || "");
   if (!isWallet(wallet)) {
     return res.status(400).json({ error: "Invalid wallet" });
@@ -780,6 +905,12 @@ async function handleUpdateAttestation(req, res) {
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(404).json({ error: "Transfer not found" });
 
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+  }
+
   const destDomainInput = toInt(req.body?.destDomain);
   const destChainIdInput = toInt(req.body?.destChainId);
 
@@ -823,6 +954,12 @@ async function handleMarkMinting(req, res) {
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(404).json({ error: "Transfer not found" });
 
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+  }
+
   const updated = {
     ...transfer,
     status: "minting",
@@ -839,6 +976,12 @@ async function handleMarkAttesting(req, res) {
 
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(404).json({ error: "Transfer not found" });
+
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+  }
 
   const updated = {
     ...transfer,
@@ -857,6 +1000,12 @@ async function handleMarkFailed(req, res) {
 
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(404).json({ error: "Transfer not found" });
+
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+  }
 
   const updated = {
     ...transfer,
@@ -878,6 +1027,12 @@ async function handleMarkComplete(req, res) {
 
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(200).json({ ok: true });
+
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+  }
 
   let verified = false;
   try {
@@ -909,6 +1064,12 @@ async function handleDismiss(req, res) {
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(200).json({ ok: true });
 
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+  }
+
   if (transfer.status !== "failed" && transfer.status !== "complete") {
     return res.status(409).json({ error: "Only failed or completed transfers can be dismissed" });
   }
@@ -920,12 +1081,16 @@ async function handleDismiss(req, res) {
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
 
+  if (req.method === "HEAD") {
+    return res.status(200).end();
+  }
+
   if (req.method === "OPTIONS") {
     if (req.headers.origin && !isAllowedBrowserOrigin(req)) return res.status(403).json({ error: "Origin not allowed" });
     return res.status(200).end();
   }
 
-  if (!checkRateLimit(req)) {
+  if (!await checkRateLimit(req)) {
     return res.status(429).json({ error: "Rate limit exceeded" });
   }
 

@@ -1027,6 +1027,8 @@ export default function Bridge() {
 
     setManualClaimLoading(true);
     try {
+      currentTransferIdRef.current = null;
+
       if (!manualClaimSourceChain) {
         throw new Error("Please select the source chain where the burn transaction was made");
       }
@@ -1264,7 +1266,6 @@ export default function Bridge() {
       setSourceChain(manualClaimSourceChain);
       setDestChain(destChain);
       setAmount(amount);
-      currentTransferIdRef.current = txHash;
       abortRef.current = false;
 
       if (attestation) {
@@ -1291,6 +1292,8 @@ export default function Bridge() {
           attestation,
         });
 
+        currentTransferIdRef.current = txHash;
+
         await executeMint(destChain, attestation, txHash, amount);
       } else {
         // No attestation yet - go to attesting and poll
@@ -1314,6 +1317,8 @@ export default function Bridge() {
           timestamp: Date.now(),
           status: "attesting",
         });
+
+        currentTransferIdRef.current = txHash;
 
         toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
         
@@ -1395,10 +1400,12 @@ export default function Bridge() {
 
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
-      await updateTransferStatus(txHash, {
-        status: "attesting",
-        error: msg,
-      });
+      if (currentTransferIdRef.current === txHash) {
+        await updateTransferStatus(currentTransferIdRef.current, {
+          status: "attesting",
+          error: msg,
+        });
+      }
       setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({ title: "Claim Failed", description: msg, variant: "destructive" });
     } finally {

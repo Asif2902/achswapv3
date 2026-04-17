@@ -25,6 +25,16 @@ export interface PendingBridgeTransfer {
 }
 
 const FALLBACK_STORAGE_KEY = "achswap_bridge_pending_transfers_fallback";
+const OWNERSHIP_INTENT = "bridge_transfer_mutation";
+const OWNERSHIP_PROOF_TTL_MS = 10 * 60_000;
+const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
+
+const ownershipProofCacheByTransferId = new Map<string, {
+  signedMessage: string;
+  signature: string;
+  issuedAt: number;
+  expiresAt: number;
+}>();
 
 function canonicalHash(value: string): string {
   return String(value || "").trim().toLowerCase();
@@ -67,6 +77,49 @@ function setFallbackTransfers(transfers: PendingBridgeTransfer[]): void {
   }
 }
 
+function mergeFallbackTransfersForWallet(
+  userAddress: string,
+  walletTransfers: PendingBridgeTransfer[],
+): PendingBridgeTransfer[] {
+  const wallet = canonicalAddress(userAddress);
+  const normalizedWalletTransfers = walletTransfers.map(normalizeTransfer);
+  const existing = getFallbackTransfers();
+  const others = existing.filter((tx) => canonicalAddress(tx.userAddress) !== wallet);
+  return [...normalizedWalletTransfers, ...others];
+}
+
+function isOwnershipAction(status: PendingBridgeTransfer["status"] | undefined): boolean {
+  return (
+    status === "ready_to_mint"
+    || status === "minting"
+    || status === "attesting"
+    || status === "failed"
+    || status === "complete"
+  );
+}
+
+function getCachedOwnershipProof(burnTxHash: string): {
+  signedMessage: string;
+  signature: string;
+  issuedAt: number;
+} | null {
+  const transferKey = canonicalHash(burnTxHash);
+  const cached = ownershipProofCacheByTransferId.get(transferKey);
+  if (!cached) return null;
+
+  const now = Date.now();
+  if (cached.expiresAt <= now + OWNERSHIP_PROOF_CLOCK_SKEW_MS) {
+    ownershipProofCacheByTransferId.delete(transferKey);
+    return null;
+  }
+
+  return {
+    signedMessage: cached.signedMessage,
+    signature: cached.signature,
+    issuedAt: cached.issuedAt,
+  };
+}
+
 export function getPendingTransfers(): PendingBridgeTransfer[] {
   return getFallbackTransfers();
 }
@@ -90,10 +143,61 @@ export async function isBridgeTransferApiAvailable(userAddress: string): Promise
   if (!wallet) return false;
 
   try {
-    const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`);
+    const res = await fetch(`/api/bridge-transfers?probe=1&wallet=${encodeURIComponent(wallet)}`);
     return res.ok;
   } catch {
     return false;
+  }
+}
+
+async function createOwnershipProof(burnTxHash: string): Promise<{
+  signedMessage: string;
+  signature: string;
+  issuedAt: number;
+} | null> {
+  const ethereumProvider = (window as Window & {
+    ethereum?: { request: (args: { method: string; params?: unknown[] | Record<string, unknown> }) => Promise<unknown> };
+  }).ethereum;
+
+  if (!ethereumProvider) return null;
+
+  const now = Date.now();
+  const transferKey = canonicalHash(burnTxHash);
+  const cached = getCachedOwnershipProof(transferKey);
+  if (cached) return cached;
+
+  const issuedAt = now;
+  const payload = {
+    intent: OWNERSHIP_INTENT,
+    burnTxHash: canonicalHash(burnTxHash),
+    issuedAt,
+    expiresAt: issuedAt + OWNERSHIP_PROOF_TTL_MS,
+  };
+  const signedMessage = JSON.stringify(payload);
+
+  try {
+    const signature = await ethereumProvider.request({
+      method: "personal_sign",
+      params: [signedMessage],
+    });
+
+    if (typeof signature !== "string" || !signature) return null;
+
+    const expiresAt = issuedAt + OWNERSHIP_PROOF_TTL_MS;
+    ownershipProofCacheByTransferId.set(transferKey, {
+      signedMessage,
+      signature,
+      issuedAt,
+      expiresAt,
+    });
+
+    return {
+      signedMessage,
+      signature,
+      issuedAt,
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -144,7 +248,8 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
     ? (data.transfers as PendingBridgeTransfer[]).map(normalizeTransfer)
     : [];
 
-  setFallbackTransfers(transfers);
+  const merged = mergeFallbackTransfersForWallet(wallet, transfers);
+  setFallbackTransfers(merged);
   return transfers;
 }
 
@@ -154,6 +259,13 @@ export async function savePendingTransfer(
 ): Promise<boolean> {
   const normalized = normalizeTransfer(transfer);
 
+  const existing = getFallbackTransfers();
+  const idx = existing.findIndex((t) => t.id === normalized.id);
+  if (idx >= 0) existing[idx] = normalized;
+  else existing.unshift(normalized);
+  setFallbackTransfers(existing);
+  dispatchTransfersUpdated();
+
   const ok = await postBridgeTransfer("upsert_burn", {
     transfer: normalized,
   });
@@ -161,13 +273,6 @@ export async function savePendingTransfer(
   if (!ok && options?.strict) {
     throw new Error("Failed to persist transfer to database");
   }
-
-  const existing = getFallbackTransfers();
-  const idx = existing.findIndex((t) => t.id === normalized.id);
-  if (idx >= 0) existing[idx] = normalized;
-  else existing.unshift(normalized);
-  setFallbackTransfers(existing);
-  dispatchTransfersUpdated();
 
   return ok;
 }
@@ -179,34 +284,53 @@ export async function updateTransferStatus(
   const burnTxHash = canonicalHash(id);
   const status = updates.status;
   let ok = true;
+  const requiresOwnership = isOwnershipAction(status);
+  let ownershipProof: { signedMessage: string; signature: string; issuedAt: number } | null = null;
+
+  if (requiresOwnership) {
+    ownershipProof = getCachedOwnershipProof(burnTxHash);
+    if (!ownershipProof) {
+      ownershipProof = await createOwnershipProof(burnTxHash);
+    }
+
+    if (!ownershipProof) {
+      console.warn(`[bridge-transfers] ${status} skipped: missing ownership proof`);
+      ok = false;
+    }
+  }
 
   if (status === "ready_to_mint") {
-    ok = await postBridgeTransfer("update_attestation", {
+    ok = ok && await postBridgeTransfer("update_attestation", {
       burnTxHash,
       attestation: updates.attestation,
       destDomain: updates.destDomain,
       destChainId: updates.destChainId,
       error: updates.error,
+      ownershipProof,
     });
   } else if (status === "minting") {
-    ok = await postBridgeTransfer("mark_minting", {
+    ok = ok && await postBridgeTransfer("mark_minting", {
       burnTxHash,
+      ownershipProof,
     });
   } else if (status === "complete") {
-    ok = await postBridgeTransfer("mark_complete", {
+    ok = ok && await postBridgeTransfer("mark_complete", {
       burnTxHash,
       mintTxHash: updates.mintTxHash,
       message: updates.attestation?.message,
+      ownershipProof,
     });
   } else if (status === "failed") {
-    ok = await postBridgeTransfer("mark_failed", {
+    ok = ok && await postBridgeTransfer("mark_failed", {
       burnTxHash,
       error: updates.error,
+      ownershipProof,
     });
   } else if (status === "attesting") {
-    ok = await postBridgeTransfer("mark_attesting", {
+    ok = ok && await postBridgeTransfer("mark_attesting", {
       burnTxHash,
       error: updates.error,
+      ownershipProof,
     });
   }
 
@@ -231,7 +355,16 @@ export async function updateTransferStatus(
 
 export async function removeTransfer(id: string): Promise<boolean> {
   const burnTxHash = canonicalHash(id);
-  const ok = await postBridgeTransfer("dismiss", { burnTxHash });
+  let ownershipProof = getCachedOwnershipProof(burnTxHash);
+  if (!ownershipProof) {
+    ownershipProof = await createOwnershipProof(burnTxHash);
+  }
+
+  if (!ownershipProof) {
+    return false;
+  }
+
+  const ok = await postBridgeTransfer("dismiss", { burnTxHash, ownershipProof });
 
   if (!ok) {
     return false;
