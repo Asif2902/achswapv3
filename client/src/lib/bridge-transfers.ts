@@ -176,9 +176,15 @@ async function createOwnershipProof(burnTxHash: string): Promise<{
   const signedMessage = JSON.stringify(payload);
 
   try {
+    const accounts = await ethereumProvider.request({ method: "eth_accounts" }) as string[];
+    if (!Array.isArray(accounts) || accounts.length === 0 || !accounts[0]) {
+      return null;
+    }
+    const signer = accounts[0];
+    const messageHex = "0x" + Buffer.from(signedMessage, "utf8").toString("hex");
     const signature = await ethereumProvider.request({
       method: "personal_sign",
-      params: [signedMessage],
+      params: [messageHex, signer],
     });
 
     if (typeof signature !== "string" || !signature) return null;
@@ -400,10 +406,7 @@ export async function removeTransfer(id: string): Promise<boolean> {
   }
 
   if (!ownershipProof) {
-    const filteredLocal = localTransfers.filter((t) => t.id !== burnTxHash);
-    setFallbackTransfers(filteredLocal);
-    dispatchTransfersUpdated();
-    return true;
+    return false;
   }
 
   const ok = await postBridgeTransfer("dismiss", { burnTxHash, ownershipProof });
