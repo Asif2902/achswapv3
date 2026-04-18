@@ -86,8 +86,9 @@ function mergeFallbackTransfersForWallet(
   const wallet = canonicalAddress(userAddress);
   const normalizedWalletTransfers = walletTransfers.map(normalizeTransfer);
   const existing = getFallbackTransfers();
-  const existingByHash = new Map(existing.map((tx) => [canonicalHash(tx.burnTxHash || tx.id), tx]));
   const others = existing.filter((tx) => canonicalAddress(tx.userAddress) !== wallet);
+  const walletsExisting = existing.filter((tx) => canonicalAddress(tx.userAddress) === wallet);
+  const existingByHash = new Map(walletsExisting.map((tx) => [canonicalHash(tx.burnTxHash || tx.id), tx]));
   const merged = normalizedWalletTransfers.map((serverTx) => {
     const serverHash = canonicalHash(serverTx.burnTxHash || serverTx.id);
     const local = existingByHash.get(serverHash);
@@ -178,11 +179,8 @@ async function createOwnershipProof(burnTxHash: string, expectedOwner?: string):
 
   if (!ethereumProvider) return null;
 
-  const now = Date.now();
   const transferKey = canonicalHash(burnTxHash);
-  const cached = getCachedOwnershipProof(transferKey);
-  if (cached) return cached;
-
+  const now = Date.now();
   const issuedAt = now;
   const payload = {
     intent: OWNERSHIP_INTENT,
@@ -242,6 +240,7 @@ async function postBridgeTransfer(action: string, payload: Record<string, unknow
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, ...payload }),
+      signal: AbortSignal.timeout(15000),
     });
 
     if (!res.ok) {
@@ -279,7 +278,7 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
 
   const merged = mergeFallbackTransfersForWallet(wallet, transfers);
   setFallbackTransfers(merged);
-  return transfers;
+  return merged;
 }
 
 export async function savePendingTransfer(
@@ -405,7 +404,9 @@ export async function removeTransfer(id: string): Promise<boolean> {
   let serverConfirmedAbsent = false;
   try {
     const wallet = canonicalAddress(localRecord.userAddress);
-    const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`);
+    const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`, {
+      signal: AbortSignal.timeout(10000),
+    });
     if (res.ok) {
       const data = await parseResponseJson(res);
       const serverTransfers = Array.isArray(data?.transfers) ? data.transfers : [];
