@@ -314,9 +314,12 @@ export async function updateTransferStatus(
   let ownershipProof: { signedMessage: string; signature: string; issuedAt: number } | null = null;
 
   if (requiresOwnership) {
+    const existing = getFallbackTransfers();
+    const localRecord = existing.find((t) => t.id === burnTxHash);
+    const expectedOwner = localRecord?.userAddress;
     ownershipProof = getCachedOwnershipProof(burnTxHash);
     if (!ownershipProof) {
-      ownershipProof = await createOwnershipProof(burnTxHash);
+      ownershipProof = await createOwnershipProof(burnTxHash, expectedOwner);
     }
 
     if (!ownershipProof) {
@@ -377,8 +380,6 @@ export async function updateTransferStatus(
       userAddress: existing[idx].userAddress,
     };
     setFallbackTransfers(existing);
-  }
-  if (idx >= 0 && canApplyLocal) {
     dispatchTransfersUpdated();
   }
   return ok;
@@ -419,7 +420,7 @@ export async function removeTransfer(id: string): Promise<boolean> {
 
   let ownershipProof = getCachedOwnershipProof(burnTxHash);
   if (!ownershipProof) {
-    ownershipProof = await createOwnershipProof(burnTxHash);
+    ownershipProof = await createOwnershipProof(burnTxHash, localRecord?.userAddress);
   }
 
   if (!ownershipProof) {

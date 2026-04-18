@@ -1414,10 +1414,6 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: "Origin not allowed" });
   }
 
-  if (req.headers.origin && !isAllowedBrowserOrigin(req)) {
-    return res.status(403).json({ error: "Origin not allowed" });
-  }
-
   if (!await checkRateLimit(req)) {
     return res.status(429).json({ error: "Rate limit exceeded" });
   }
