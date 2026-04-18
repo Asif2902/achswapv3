@@ -158,7 +158,9 @@ export async function isBridgeTransferApiAvailable(userAddress: string): Promise
   if (!wallet) return false;
 
   try {
-    const res = await fetch(`/api/bridge-transfers?probe=1&wallet=${encodeURIComponent(wallet)}`);
+    const res = await fetch(`/api/bridge-transfers?probe=1&wallet=${encodeURIComponent(wallet)}`, {
+      signal: AbortSignal.timeout(4000),
+    });
     return res.ok;
   } catch {
     return false;
@@ -261,7 +263,9 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
   const wallet = canonicalAddress(userAddress);
   if (!wallet) return [];
 
-  const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`);
+  const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`, {
+    signal: AbortSignal.timeout(10000),
+  });
   if (!res.ok) {
     const data = await parseResponseJson(res);
     const message = data?.error || `Bridge transfer API error ${res.status}`;
@@ -333,7 +337,7 @@ export async function updateTransferStatus(
   }
 
   if (status === "ready_to_mint") {
-    ok = ok && await postBridgeTransfer("update_attestation", {
+    ok = await postBridgeTransfer("update_attestation", {
       burnTxHash,
       attestation: updates.attestation,
       destDomain: updates.destDomain,
@@ -342,26 +346,26 @@ export async function updateTransferStatus(
       ownershipProof,
     });
   } else if (status === "minting") {
-    ok = ok && await postBridgeTransfer("mark_minting", {
+    ok = await postBridgeTransfer("mark_minting", {
       burnTxHash,
       ownershipProof,
     });
   } else if (status === "complete") {
-    ok = ok && await postBridgeTransfer("mark_complete", {
+    ok = await postBridgeTransfer("mark_complete", {
       burnTxHash,
       mintTxHash: updates.mintTxHash,
       message: updates.attestation?.message,
       ownershipProof,
     });
   } else if (status === "failed") {
-    ok = ok && await postBridgeTransfer("mark_failed", {
+    ok = await postBridgeTransfer("mark_failed", {
       burnTxHash,
       mintTxHash: updates.mintTxHash,
       error: updates.error,
       ownershipProof,
     });
   } else if (status === "attesting") {
-    ok = ok && await postBridgeTransfer("mark_attesting", {
+    ok = await postBridgeTransfer("mark_attesting", {
       burnTxHash,
       error: updates.error,
       ownershipProof,

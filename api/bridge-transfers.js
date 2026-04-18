@@ -785,8 +785,17 @@ function uniqueRpcUrls(urls) {
 
 async function probeRpcUrl(rpcUrl, timeoutMs) {
   const provider = new ethers.JsonRpcProvider(rpcUrl);
-  await withTimeout(provider.getBlockNumber(), timeoutMs, `RPC probe timed out: ${rpcUrl}`);
-  return { provider, rpcUrl, validatedAt: Date.now() };
+  try {
+    await withTimeout(provider.getBlockNumber(), timeoutMs, `RPC probe timed out: ${rpcUrl}`);
+    return { provider, rpcUrl, validatedAt: Date.now() };
+  } catch (err) {
+    try {
+      provider.destroy();
+    } catch {
+      // ignore destroy errors
+    }
+    throw err;
+  }
 }
 
 async function getWorkingProvider(chain) {
