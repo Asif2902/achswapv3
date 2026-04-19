@@ -104,6 +104,16 @@ function mergeFallbackTransfersForWallet(
   return [...merged, ...unmatchedLocals, ...others];
 }
 
+function isOwnershipAction(status: PendingBridgeTransfer["status"] | undefined): boolean {
+  return (
+    status === "ready_to_mint"
+    || status === "minting"
+    || status === "attesting"
+    || status === "failed"
+    || status === "complete"
+  );
+}
+
 function getCachedOwnershipProof(burnTxHash: string): {
   signedMessage: string;
   signature: string;
@@ -302,6 +312,28 @@ export async function updateTransferStatus(
   const burnTxHash = canonicalHash(id);
   const status = updates.status;
   let ok = true;
+  const requiresOwnership = isOwnershipAction(status);
+  let hasOwnershipProof = !requiresOwnership;
+  let ownershipProof: { signedMessage: string; signature: string; issuedAt: number } | null = null;
+
+  if (requiresOwnership) {
+    const existing = getFallbackTransfers();
+    const localRecord = existing.find((t) => t.id === burnTxHash);
+    const expectedOwner = localRecord?.userAddress;
+    ownershipProof = getCachedOwnershipProof(burnTxHash);
+    if (!ownershipProof) {
+      ownershipProof = await createOwnershipProof(burnTxHash, expectedOwner);
+    }
+
+    if (!ownershipProof) {
+      console.warn(`[bridge-transfers] ${status} skipped: missing ownership proof`);
+      hasOwnershipProof = false;
+    }
+
+    if (!hasOwnershipProof) {
+      return false;
+    }
+  }
 
   if (status === "ready_to_mint") {
     ok = await postBridgeTransfer("update_attestation", {
@@ -310,27 +342,32 @@ export async function updateTransferStatus(
       destDomain: updates.destDomain,
       destChainId: updates.destChainId,
       error: updates.error,
+      ownershipProof,
     });
   } else if (status === "minting") {
     ok = await postBridgeTransfer("mark_minting", {
       burnTxHash,
+      ownershipProof,
     });
   } else if (status === "complete") {
     ok = await postBridgeTransfer("mark_complete", {
       burnTxHash,
       mintTxHash: updates.mintTxHash,
       message: updates.attestation?.message,
+      ownershipProof,
     });
   } else if (status === "failed") {
     ok = await postBridgeTransfer("mark_failed", {
       burnTxHash,
       mintTxHash: updates.mintTxHash,
       error: updates.error,
+      ownershipProof,
     });
   } else if (status === "attesting") {
     ok = await postBridgeTransfer("mark_attesting", {
       burnTxHash,
       error: updates.error,
+      ownershipProof,
     });
   }
 
