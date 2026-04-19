@@ -5,7 +5,8 @@
   "functions": {
     "api/relay.js": { "maxDuration": 60 },
     "api/subgraph.js": { "maxDuration": 30 },
-    "api/analytics-summary.js": { "maxDuration": 30 }
+    "api/analytics-summary.js": { "maxDuration": 30 },
+    "api/bridge-transfers.js": { "maxDuration": 60 }
   },
   "rewrites": [
     { "source": "/((?!api/).*)", "destination": "/index.html" }

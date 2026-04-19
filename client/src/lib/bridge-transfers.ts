@@ -1,126 +1,445 @@
+import { hexlify, toUtf8Bytes } from "ethers";
+
 /**
- * Bridge Transfer Persistence
- * Saves incomplete bridge transfers to localStorage so users can resume them.
- * Transfers are saved after the burn tx succeeds, and removed after mint completes.
+ * Bridge transfer persistence API client.
+ *
+ * Source of truth is server-side Redis via `/api/bridge-transfers`.
+ * We keep a tiny local fallback cache only for degraded/offline scenarios.
  */
 
 export interface PendingBridgeTransfer {
-  id: string; // unique identifier (burnTxHash)
+  id: string; // canonical burn tx hash (lowercase)
   burnTxHash: string;
   sourceDomain: number;
   sourceChainId: number;
   destDomain: number;
   destChainId: number;
-  amount: string; // human-readable
+  amount: string;
   userAddress: string;
-  timestamp: number; // when the burn was submitted
-  // attestation data (populated once attestation is received)
+  timestamp: number;
   attestation?: {
     message: string;
     attestation: string;
   };
-  // status
   status: "attesting" | "ready_to_mint" | "minting" | "complete" | "failed";
   mintTxHash?: string;
   error?: string;
 }
 
-const STORAGE_KEY = "achswap_bridge_pending_transfers";
+const FALLBACK_STORAGE_KEY = "achswap_bridge_pending_transfers_fallback";
+const OWNERSHIP_INTENT = "bridge_transfer_mutation";
+const OWNERSHIP_PROOF_TTL_MS = 10 * 60_000;
+const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
 
-function canonicalTransferId(id: string): string {
-  return id.trim().toLowerCase();
+const ownershipProofCacheByTransferId = new Map<string, {
+  signedMessage: string;
+  signature: string;
+  issuedAt: number;
+  expiresAt: number;
+}>();
+
+function canonicalHash(value: string): string {
+  return String(value || "").trim().toLowerCase();
 }
 
-export function getPendingTransfers(): PendingBridgeTransfer[] {
+function canonicalAddress(value: string): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeTransfer(transfer: PendingBridgeTransfer): PendingBridgeTransfer {
+  return {
+    ...transfer,
+    id: canonicalHash(transfer.id || transfer.burnTxHash),
+    burnTxHash: canonicalHash(transfer.burnTxHash),
+    userAddress: canonicalAddress(transfer.userAddress),
+  };
+}
+
+function dispatchTransfersUpdated(): void {
+  window.dispatchEvent(new CustomEvent("bridge-transfers-updated"));
+}
+
+function getFallbackTransfers(): PendingBridgeTransfer[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = localStorage.getItem(FALLBACK_STORAGE_KEY);
     if (!raw) return [];
-    const transfers: PendingBridgeTransfer[] = JSON.parse(raw);
-    // Filter out completed transfers older than 24 hours, keep pending ones indefinitely
-    const now = Date.now();
-    const filtered = transfers.filter(t => {
-      if (t.status === "complete") return now - t.timestamp < 24 * 60 * 60 * 1000;
-      return true;
-    });
-    // Write the pruned list back so stale entries don't accumulate
-    if (filtered.length !== transfers.length) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
-    }
-    return filtered;
+    const parsed = JSON.parse(raw) as PendingBridgeTransfer[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(normalizeTransfer);
   } catch {
     return [];
   }
 }
 
-export function savePendingTransfer(transfer: PendingBridgeTransfer): void {
-  const existing = getPendingTransfers();
-  const normalizedId = canonicalTransferId(transfer.id);
-  const idx = existing.findIndex(t => canonicalTransferId(t.id) === normalizedId);
-  const normalizedTransfer: PendingBridgeTransfer = {
-    ...transfer,
-    id: normalizedId,
-    burnTxHash: canonicalTransferId(transfer.burnTxHash),
-  };
-  if (idx >= 0) {
-    existing[idx] = normalizedTransfer;
-  } else {
-    existing.unshift(normalizedTransfer); // newest first
-  }
+function setFallbackTransfers(transfers: PendingBridgeTransfer[]): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
-  } catch (e) {
-    console.warn(`[${STORAGE_KEY}] localStorage write failed:`, e);
+    localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(transfers.map(normalizeTransfer)));
+  } catch {
+    // ignore fallback storage write errors
   }
-  // Dispatch a custom event so other components (Header) can react
-  window.dispatchEvent(new CustomEvent("bridge-transfers-updated"));
 }
 
-export function updateTransferStatus(
+function mergeFallbackTransfersForWallet(
+  userAddress: string,
+  walletTransfers: PendingBridgeTransfer[],
+): PendingBridgeTransfer[] {
+  const wallet = canonicalAddress(userAddress);
+  const normalizedWalletTransfers = walletTransfers.map(normalizeTransfer);
+  const existing = getFallbackTransfers();
+  const others = existing.filter((tx) => canonicalAddress(tx.userAddress) !== wallet);
+  const walletsExisting = existing.filter((tx) => canonicalAddress(tx.userAddress) === wallet);
+  const existingByHash = new Map(walletsExisting.map((tx) => [canonicalHash(tx.burnTxHash || tx.id), tx]));
+  const merged = normalizedWalletTransfers.map((serverTx) => {
+    const serverHash = canonicalHash(serverTx.burnTxHash || serverTx.id);
+    const local = existingByHash.get(serverHash);
+    if (local) {
+      existingByHash.delete(serverHash);
+      return { ...local, ...serverTx, id: local.id, burnTxHash: local.burnTxHash, userAddress: local.userAddress };
+    }
+    return serverTx;
+  });
+  const unmatchedLocals = [...existingByHash.values()].filter(
+    (tx) => tx.status !== "complete" && tx.status !== "failed",
+  );
+  return [...merged, ...unmatchedLocals, ...others];
+}
+
+function isOwnershipAction(status: PendingBridgeTransfer["status"] | undefined): boolean {
+  return (
+    status === "ready_to_mint"
+    || status === "minting"
+    || status === "attesting"
+    || status === "failed"
+    || status === "complete"
+  );
+}
+
+function getCachedOwnershipProof(burnTxHash: string): {
+  signedMessage: string;
+  signature: string;
+  issuedAt: number;
+} | null {
+  const transferKey = canonicalHash(burnTxHash);
+  const cached = ownershipProofCacheByTransferId.get(transferKey);
+  if (!cached) return null;
+
+  const now = Date.now();
+  if (cached.expiresAt <= now + OWNERSHIP_PROOF_CLOCK_SKEW_MS) {
+    ownershipProofCacheByTransferId.delete(transferKey);
+    return null;
+  }
+
+  return {
+    signedMessage: cached.signedMessage,
+    signature: cached.signature,
+    issuedAt: cached.issuedAt,
+  };
+}
+
+export function getPendingTransfers(): PendingBridgeTransfer[] {
+  return getFallbackTransfers();
+}
+
+export function getResumableTransfers(userAddress?: string): PendingBridgeTransfer[] {
+  const wallet = canonicalAddress(userAddress || "");
+  return getFallbackTransfers().filter((tx) => {
+    if (wallet && canonicalAddress(tx.userAddress) !== wallet) return false;
+    return tx.status === "attesting" || tx.status === "ready_to_mint";
+  });
+}
+
+export function getCachedPendingTransfersForWallet(userAddress: string): PendingBridgeTransfer[] {
+  const wallet = canonicalAddress(userAddress);
+  if (!wallet) return [];
+  return getFallbackTransfers().filter((tx) => canonicalAddress(tx.userAddress) === wallet);
+}
+
+export async function isBridgeTransferApiAvailable(userAddress: string): Promise<boolean> {
+  const wallet = canonicalAddress(userAddress);
+  if (!wallet) return false;
+
+  try {
+    const res = await fetch(`/api/bridge-transfers?probe=1&wallet=${encodeURIComponent(wallet)}`, {
+      signal: AbortSignal.timeout(4000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function createOwnershipProof(burnTxHash: string, expectedOwner?: string): Promise<{
+  signedMessage: string;
+  signature: string;
+  issuedAt: number;
+} | null> {
+  const ethereumProvider = (window as Window & {
+    ethereum?: { request: (args: { method: string; params?: unknown[] | Record<string, unknown> }) => Promise<unknown> };
+  }).ethereum;
+
+  if (!ethereumProvider) return null;
+
+  const transferKey = canonicalHash(burnTxHash);
+  const now = Date.now();
+  const issuedAt = now;
+  const payload = {
+    intent: OWNERSHIP_INTENT,
+    burnTxHash: canonicalHash(burnTxHash),
+    issuedAt,
+    expiresAt: issuedAt + OWNERSHIP_PROOF_TTL_MS,
+  };
+  const signedMessage = JSON.stringify(payload);
+
+  try {
+    const accounts = await ethereumProvider.request({ method: "eth_accounts" }) as string[];
+    if (!Array.isArray(accounts) || accounts.length === 0 || !accounts[0]) {
+      return null;
+    }
+    const signer = accounts[0];
+    if (expectedOwner && canonicalAddress(signer) !== canonicalAddress(expectedOwner)) {
+      console.warn(`[bridge-transfers] Ownership proof: signer ${signer} does not match expected owner ${expectedOwner}`);
+      return null;
+    }
+    const messageHex = hexlify(toUtf8Bytes(signedMessage));
+    const signature = await ethereumProvider.request({
+      method: "personal_sign",
+      params: [messageHex, signer],
+    });
+
+    if (typeof signature !== "string" || !signature) return null;
+
+    const expiresAt = issuedAt + OWNERSHIP_PROOF_TTL_MS;
+    ownershipProofCacheByTransferId.set(transferKey, {
+      signedMessage,
+      signature,
+      issuedAt,
+      expiresAt,
+    });
+
+    return {
+      signedMessage,
+      signature,
+      issuedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function parseResponseJson(res: Response): Promise<any> {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function postBridgeTransfer(action: string, payload: Record<string, unknown>): Promise<boolean> {
+  try {
+    const res = await fetch("/api/bridge-transfers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ...payload }),
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!res.ok) {
+      const data = await parseResponseJson(res);
+      const message = data?.error || `Bridge transfer API error ${res.status}`;
+      console.warn(`[bridge-transfers] ${action} failed: ${message}`);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[bridge-transfers] ${action} request failed: ${message}`);
+    return false;
+  }
+}
+
+export async function fetchPendingTransfers(userAddress: string): Promise<PendingBridgeTransfer[]> {
+  const wallet = canonicalAddress(userAddress);
+  if (!wallet) return [];
+
+  const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`, {
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) {
+    const data = await parseResponseJson(res);
+    const message = data?.error || `Bridge transfer API error ${res.status}`;
+    throw new Error(message);
+  }
+
+  const data = await parseResponseJson(res);
+  const transfers = Array.isArray(data?.transfers)
+    ? (data.transfers as PendingBridgeTransfer[]).map(normalizeTransfer)
+    : [];
+
+  const merged = mergeFallbackTransfersForWallet(wallet, transfers);
+  setFallbackTransfers(merged);
+  return merged;
+}
+
+export async function savePendingTransfer(
+  transfer: PendingBridgeTransfer,
+  options?: { strict?: boolean },
+): Promise<boolean> {
+  const normalized = normalizeTransfer(transfer);
+
+  const existing = getFallbackTransfers();
+  const idx = existing.findIndex((t) => t.id === normalized.id);
+  if (idx >= 0) existing[idx] = normalized;
+  else existing.unshift(normalized);
+  setFallbackTransfers(existing);
+  dispatchTransfersUpdated();
+
+  const ok = await postBridgeTransfer("upsert_burn", {
+    transfer: normalized,
+  });
+
+  if (!ok && options?.strict) {
+    throw new Error("Failed to persist transfer to database");
+  }
+
+  return ok;
+}
+
+export async function updateTransferStatus(
   id: string,
-  updates: Partial<PendingBridgeTransfer>
-): void {
-  const existing = getPendingTransfers();
-  const normalizedId = canonicalTransferId(id);
-  const idx = existing.findIndex(t => canonicalTransferId(t.id) === normalizedId);
-  if (idx >= 0) {
+  updates: Partial<PendingBridgeTransfer>,
+): Promise<boolean> {
+  const burnTxHash = canonicalHash(id);
+  const status = updates.status;
+  let ok = true;
+  const requiresOwnership = isOwnershipAction(status);
+  let hasOwnershipProof = !requiresOwnership;
+  let ownershipProof: { signedMessage: string; signature: string; issuedAt: number } | null = null;
+
+  if (requiresOwnership) {
+    const existing = getFallbackTransfers();
+    const localRecord = existing.find((t) => t.id === burnTxHash);
+    const expectedOwner = localRecord?.userAddress;
+    ownershipProof = getCachedOwnershipProof(burnTxHash);
+    if (!ownershipProof) {
+      ownershipProof = await createOwnershipProof(burnTxHash, expectedOwner);
+    }
+
+    if (!ownershipProof) {
+      console.warn(`[bridge-transfers] ${status} skipped: missing ownership proof`);
+      hasOwnershipProof = false;
+    }
+
+    if (!hasOwnershipProof) {
+      return false;
+    }
+  }
+
+  if (status === "ready_to_mint") {
+    ok = await postBridgeTransfer("update_attestation", {
+      burnTxHash,
+      attestation: updates.attestation,
+      destDomain: updates.destDomain,
+      destChainId: updates.destChainId,
+      error: updates.error,
+      ownershipProof,
+    });
+  } else if (status === "minting") {
+    ok = await postBridgeTransfer("mark_minting", {
+      burnTxHash,
+      ownershipProof,
+    });
+  } else if (status === "complete") {
+    ok = await postBridgeTransfer("mark_complete", {
+      burnTxHash,
+      mintTxHash: updates.mintTxHash,
+      message: updates.attestation?.message,
+      ownershipProof,
+    });
+  } else if (status === "failed") {
+    ok = await postBridgeTransfer("mark_failed", {
+      burnTxHash,
+      mintTxHash: updates.mintTxHash,
+      error: updates.error,
+      ownershipProof,
+    });
+  } else if (status === "attesting") {
+    ok = await postBridgeTransfer("mark_attesting", {
+      burnTxHash,
+      error: updates.error,
+      ownershipProof,
+    });
+  }
+
+  const existing = getFallbackTransfers();
+  const idx = existing.findIndex((t) => t.id === burnTxHash);
+  const canApplyLocal = status !== "complete" || ok;
+  if (idx >= 0 && canApplyLocal) {
     existing[idx] = {
       ...existing[idx],
       ...updates,
       id: existing[idx].id,
-      burnTxHash:
-        updates.burnTxHash !== undefined
-          ? canonicalTransferId(updates.burnTxHash)
-          : existing[idx].burnTxHash,
+      burnTxHash: existing[idx].burnTxHash,
+      userAddress: existing[idx].userAddress,
     };
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(existing));
-    } catch (e) {
-      console.warn(`[${STORAGE_KEY}] localStorage write failed:`, e);
-    }
-    window.dispatchEvent(new CustomEvent("bridge-transfers-updated"));
+    setFallbackTransfers(existing);
+    dispatchTransfersUpdated();
   }
+  return ok;
 }
 
-export function removeTransfer(id: string): void {
-  const existing = getPendingTransfers();
-  const normalizedId = canonicalTransferId(id);
-  const filtered = existing.filter(t => canonicalTransferId(t.id) !== normalizedId);
+export async function removeTransfer(id: string): Promise<boolean> {
+  const burnTxHash = canonicalHash(id);
+
+  const localTransfers = getFallbackTransfers();
+  const localRecord = localTransfers.find((t) => t.id === burnTxHash);
+  if (!localRecord) {
+    return false;
+  }
+
+  if (localRecord.status !== "failed" && localRecord.status !== "complete") {
+    return false;
+  }
+
+  let serverConfirmedAbsent = false;
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
-  } catch (e) {
-    console.warn(`[${STORAGE_KEY}] localStorage write failed:`, e);
-  }
-  window.dispatchEvent(new CustomEvent("bridge-transfers-updated"));
-}
-
-export function getResumableTransfers(userAddress?: string): PendingBridgeTransfer[] {
-  const all = getPendingTransfers();
-  return all.filter(t => {
-    if (userAddress) {
-      // Defensively skip records with missing or malformed userAddress
-      if (typeof t.userAddress !== "string" || t.userAddress.length === 0) return false;
-      if (t.userAddress.toLowerCase() !== userAddress.toLowerCase()) return false;
+    const wallet = canonicalAddress(localRecord.userAddress);
+    const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      const data = await parseResponseJson(res);
+      const serverTransfers = Array.isArray(data?.transfers) ? data.transfers : [];
+      serverConfirmedAbsent = !serverTransfers.some((t: any) => canonicalHash(t?.burnTxHash || t?.id) === burnTxHash);
     }
-    return t.status === "attesting" || t.status === "ready_to_mint";
-  });
+  } catch {
+    // Network error: cannot confirm server state, fall through to server dismiss
+  }
+
+  if (serverConfirmedAbsent) {
+    const filteredLocal = localTransfers.filter((t) => t.id !== burnTxHash);
+    setFallbackTransfers(filteredLocal);
+    dispatchTransfersUpdated();
+    return true;
+  }
+
+  let ownershipProof = getCachedOwnershipProof(burnTxHash);
+  if (!ownershipProof) {
+    ownershipProof = await createOwnershipProof(burnTxHash, localRecord?.userAddress);
+  }
+
+  if (!ownershipProof) {
+    return false;
+  }
+
+  const ok = await postBridgeTransfer("dismiss", { burnTxHash, ownershipProof });
+
+  if (!ok) {
+    return false;
+  }
+
+  const filtered = getFallbackTransfers().filter((t) => t.id !== burnTxHash);
+  setFallbackTransfers(filtered);
+  dispatchTransfersUpdated();
+  return ok;
 }

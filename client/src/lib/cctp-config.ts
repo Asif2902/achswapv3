@@ -8,6 +8,46 @@
 
 import { JsonRpcProvider } from "ethers";
 
+const RPC_PROBE_TIMEOUT_MS = 1800;
+const RPC_CACHED_PROVIDER_TIMEOUT_MS = 1200;
+const RPC_FALLBACK_TIMEOUT_MS = 4000;
+const RPC_CACHE_REVALIDATE_MS = 30_000;
+
+const providerCacheByChainId = new Map<
+  number,
+  { provider: JsonRpcProvider; rpcUrl: string; lastValidatedAt: number }
+>();
+const providerResolutionInFlightByChainId = new Map<number, Promise<JsonRpcProvider>>();
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => reject(new Error(errorMessage)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function probeRpcUrl(
+  rpcUrl: string,
+  timeoutMs: number,
+): Promise<{ provider: JsonRpcProvider; rpcUrl: string; lastValidatedAt: number }> {
+  const provider = new JsonRpcProvider(rpcUrl);
+  await withTimeout(provider.getBlockNumber(), timeoutMs, `RPC probe timed out: ${rpcUrl}`);
+  return { provider, rpcUrl, lastValidatedAt: Date.now() };
+}
+
+function uniqueRpcUrls(urls: string[]): string[] {
+  return Array.from(new Set(urls.filter((url) => typeof url === "string" && url.length > 0)));
+}
+
 export interface CCTPChain {
   name: string;
   shortName: string;
@@ -42,7 +82,9 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     domain: 26,
     rpcUrls: [
       "https://rpc.testnet.arc.network",
-      "https://rpc-testnet.arc.network",
+      "https://arc-testnet.drpc.org",
+      "https://rpc.quicknode.testnet.arc.network",
+      "https://rpc.blockdaemon.testnet.arc.network",
     ],
     explorerUrl: "https://testnet.arcscan.app",
     explorerTxPath: "/tx/",
@@ -62,10 +104,10 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     chainId: 11155111,
     domain: 0,
     rpcUrls: [
-      "https://rpc.sepolia.org",
       "https://ethereum-sepolia-rpc.publicnode.com",
       "https://sepolia.drpc.org",
-      "https://rpc2.sepolia.org",
+      "https://rpc.sepolia.org",
+      "https://sepolia.gateway.tenderly.co",
     ],
     explorerUrl: "https://sepolia.etherscan.io",
     explorerTxPath: "/tx/",
@@ -87,7 +129,7 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     rpcUrls: [
       "https://api.avax-test.network/ext/bc/C/rpc",
       "https://avalanche-fuji-c-chain-rpc.publicnode.com",
-      "https://rpc.ankr.com/avalanche_fuji",
+      "https://avalanche-fuji.drpc.org",
     ],
     explorerUrl: "https://testnet.snowtrace.io",
     explorerTxPath: "/tx/",
@@ -174,8 +216,8 @@ export const CCTP_TESTNET_CHAINS: CCTPChain[] = [
     domain: 7,
     rpcUrls: [
       "https://rpc-amoy.polygon.technology",
-      "https://polygon-amoy-bor-rpc.publicnode.com",
-      "https://polygon-amoy.drpc.org",
+      "https://polygon-amoy.gateway.tenderly.co",
+      "https://polygon-amoy.api.onfinality.io/public",
     ],
     explorerUrl: "https://amoy.polygonscan.com",
     explorerTxPath: "/tx/",
@@ -245,26 +287,74 @@ export function getChainByChainId(chainId: number): CCTPChain | undefined {
 }
 
 /**
- * Get a working JsonRpcProvider for a chain, trying each RPC URL in order.
- * Returns the first one that responds successfully.
+ * Get a working JsonRpcProvider for a chain.
+ *
+ * Strategy:
+ * 1) Reuse cached provider when still responsive (fast path)
+ * 2) Probe all configured RPCs concurrently (first healthy wins)
+ * 3) Fall back to slower sequential probing if needed
  */
 export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvider> {
-  for (const rpcUrl of chain.rpcUrls) {
+  const cached = providerCacheByChainId.get(chain.chainId);
+  if (cached) {
+    if (Date.now() - cached.lastValidatedAt < RPC_CACHE_REVALIDATE_MS) {
+      return cached.provider;
+    }
+
     try {
-      const provider = new JsonRpcProvider(rpcUrl);
-      const timedPromise = Promise.race([
-        provider.getBlockNumber(),
-        new Promise<never>((_, reject) => 
-          setTimeout(() => reject(new Error("RPC request timed out")), 5000)
-        )
-      ]);
-      await timedPromise;
-      return provider;
+      await withTimeout(
+        cached.provider.getBlockNumber(),
+        RPC_CACHED_PROVIDER_TIMEOUT_MS,
+        `Cached RPC timed out: ${cached.rpcUrl}`,
+      );
+      cached.lastValidatedAt = Date.now();
+      return cached.provider;
     } catch {
-      continue;
+      providerCacheByChainId.delete(chain.chainId);
     }
   }
-  throw new Error(`No working RPC for ${chain.name}`);
+
+  const inFlight = providerResolutionInFlightByChainId.get(chain.chainId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const resolvePromise = (async (): Promise<JsonRpcProvider> => {
+    const rpcUrls = uniqueRpcUrls(chain.rpcUrls);
+    if (rpcUrls.length === 0) {
+      throw new Error(`No RPC URLs configured for ${chain.name}`);
+    }
+
+    try {
+      const fastest = await Promise.any(
+        rpcUrls.map((rpcUrl) => probeRpcUrl(rpcUrl, RPC_PROBE_TIMEOUT_MS)),
+      );
+      providerCacheByChainId.set(chain.chainId, fastest);
+      return fastest.provider;
+    } catch {
+      // Fall through to slower sequential probes.
+    }
+
+    for (const rpcUrl of rpcUrls) {
+      try {
+        const working = await probeRpcUrl(rpcUrl, RPC_FALLBACK_TIMEOUT_MS);
+        providerCacheByChainId.set(chain.chainId, working);
+        return working.provider;
+      } catch {
+        continue;
+      }
+    }
+
+    throw new Error(`No working RPC for ${chain.name}`);
+  })();
+
+  providerResolutionInFlightByChainId.set(chain.chainId, resolvePromise);
+
+  try {
+    return await resolvePromise;
+  } finally {
+    providerResolutionInFlightByChainId.delete(chain.chainId);
+  }
 }
 
 export interface CircleFeeResponse {
@@ -312,4 +402,6 @@ export const TOKEN_MESSENGER_V2_ABI = [
 
 export const MESSAGE_TRANSMITTER_V2_ABI = [
   "function receiveMessage(bytes message, bytes attestation) external",
+  "function usedNonces(bytes32) view returns (uint256)",
+  "function NONCE_USED() view returns (uint256)",
 ];
