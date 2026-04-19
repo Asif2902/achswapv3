@@ -373,8 +373,7 @@ export async function updateTransferStatus(
 
   const existing = getFallbackTransfers();
   const idx = existing.findIndex((t) => t.id === burnTxHash);
-  const canApplyLocal = status !== "complete" || ok;
-  if (idx >= 0 && canApplyLocal) {
+  if (idx >= 0) {
     existing[idx] = {
       ...existing[idx],
       ...updates,
