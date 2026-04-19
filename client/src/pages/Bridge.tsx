@@ -662,6 +662,11 @@ export default function Bridge() {
 
   useEffect(() => { void refreshPendingTransfers(); }, [refreshPendingTransfers]);
 
+  useEffect(() => {
+    if (!notifOpen) return;
+    void refreshPendingTransfers();
+  }, [notifOpen, refreshPendingTransfers]);
+
   // Listen for bridge-transfers-updated events (from persistence layer)
   useEffect(() => {
     const handler = () => { void refreshPendingTransfers(); };
@@ -670,7 +675,7 @@ export default function Bridge() {
   }, [refreshPendingTransfers]);
 
   useEffect(() => {
-    if (!address || !isBridgeDbAvailable) return;
+    if (!address) return;
 
     let interval: ReturnType<typeof setInterval> | null = null;
 
@@ -689,22 +694,20 @@ export default function Bridge() {
       if (interval) return;
       interval = setInterval(() => {
         void refreshPendingTransfers();
+        void probeBridgeAvailability();
       }, 12000);
     };
 
     startPollIfVisible();
 
-    const onVisibilityChange = () => {
-      startPollIfVisible();
-    };
-
+    const onVisibilityChange = () => { startPollIfVisible(); };
     document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
       clearPoll();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [address, isBridgeDbAvailable, refreshPendingTransfers]);
+  }, [address, probeBridgeAvailability, refreshPendingTransfers]);
 
   useEffect(() => {
     let mounted = true;
@@ -713,6 +716,7 @@ export default function Bridge() {
       const ok = await probeBridgeAvailability();
       if (!mounted) return;
       setIsBridgeDbAvailable(ok);
+      void refreshPendingTransfers();
     };
 
     void runProbe();
@@ -732,7 +736,7 @@ export default function Bridge() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [probeBridgeAvailability]);
+  }, [probeBridgeAvailability, refreshPendingTransfers]);
 
   // Animate notification panel in/out (same pattern as TransactionHistory)
   useEffect(() => {
