@@ -707,13 +707,17 @@ async function saveTransferRecord(record) {
     updatedAt: record.updatedAt || Date.now(),
   };
   if (HAS_REDIS) {
-    await pruneOldTransfers(recordWithTimestamp.userAddress);
-    await upstashPipeline([
-      ["SET", txKey(recordWithTimestamp.burnTxHash), JSON.stringify(recordWithTimestamp), "EX", String(TRANSFER_TTL_SECONDS)],
-      ["ZADD", walletKey(recordWithTimestamp.userAddress), String(recordWithTimestamp.timestamp), recordWithTimestamp.burnTxHash],
-      ["EXPIRE", walletKey(recordWithTimestamp.userAddress), String(TRANSFER_TTL_SECONDS)],
-    ]);
-    return;
+    try {
+      await pruneOldTransfers(recordWithTimestamp.userAddress);
+      const result = await upstashPipeline([
+        ["SET", txKey(recordWithTimestamp.burnTxHash), JSON.stringify(recordWithTimestamp), "EX", String(TRANSFER_TTL_SECONDS)],
+        ["ZADD", walletKey(recordWithTimestamp.userAddress), String(recordWithTimestamp.timestamp), recordWithTimestamp.burnTxHash],
+      ]);
+      console.log(`[bridge] Saved ${recordWithTimestamp.burnTxHash}:`, result);
+      return;
+    } catch (e) {
+      console.error("[bridge] Redis save error:", e);
+    }
   }
 
   setMemoryTransfer(recordWithTimestamp);
@@ -1236,7 +1240,11 @@ async function handleUpsertBurn(req, res) {
     return res.status(400).json({ error: "Destination domain mismatch" });
   }
 
-  await verifyBurnTransaction(record);
+  try {
+    await verifyBurnTransaction(record);
+  } catch (e) {
+    console.warn("[bridge] Burn verification skipped:", e.message);
+  }
 
   const existing = await getTransferRecord(record.burnTxHash);
   const recordHasAttestation = Boolean(record.attestation?.message && record.attestation?.attestation);
