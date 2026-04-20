@@ -46,6 +46,24 @@ function canonicalAddress(value: string): string {
   return String(value || "").trim().toLowerCase();
 }
 
+function getTransferStatusRank(status: string | null | undefined): number {
+  switch (String(status || "").toLowerCase()) {
+    case "attesting":
+      return 1;
+    case "ready_to_mint":
+      return 2;
+    case "minting":
+      return 3;
+    case "complete":
+    case "completed":
+      return 4;
+    case "failed":
+      return 5;
+    default:
+      return 0;
+  }
+}
+
 function normalizeTransfer(transfer: PendingBridgeTransfer): PendingBridgeTransfer {
   return {
     ...transfer,
@@ -94,7 +112,17 @@ function mergeFallbackTransfersForWallet(
     const local = existingByHash.get(serverHash);
     if (local) {
       existingByHash.delete(serverHash);
-      return { ...local, ...serverTx, id: local.id, burnTxHash: local.burnTxHash, userAddress: local.userAddress };
+      const preferLocalStatus = getTransferStatusRank(local.status) > getTransferStatusRank(serverTx.status);
+      return {
+        ...local,
+        ...serverTx,
+        status: preferLocalStatus ? local.status : serverTx.status,
+        mintTxHash: preferLocalStatus ? (local.mintTxHash || serverTx.mintTxHash) : (serverTx.mintTxHash || local.mintTxHash),
+        error: preferLocalStatus ? local.error : serverTx.error,
+        id: local.id,
+        burnTxHash: local.burnTxHash,
+        userAddress: local.userAddress,
+      };
     }
     return serverTx;
   });
