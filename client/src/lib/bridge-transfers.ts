@@ -126,10 +126,7 @@ function mergeFallbackTransfersForWallet(
     }
     return serverTx;
   });
-  const unmatchedLocals = [...existingByHash.values()].filter(
-    (tx) => tx.status !== "complete" && tx.status !== "failed",
-  );
-  return [...merged, ...unmatchedLocals, ...others];
+  return [...merged, ...others];
 }
 
 function isOwnershipAction(status: PendingBridgeTransfer["status"] | undefined): boolean {
