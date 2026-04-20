@@ -1142,8 +1142,13 @@ async function handleGet(req, res) {
   if (claimedTransfers.length) {
     await Promise.allSettled(
       claimedTransfers.map(async (transfer) => {
-        await deleteTransferRecord(transfer.burnTxHash, transfer.userAddress);
-        staleHashSet.add(transfer.burnTxHash);
+        await saveTransferRecord({
+          ...transfer,
+          status: "complete",
+          error: undefined,
+          updatedAt: Date.now(),
+          expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
+        });
       }),
     );
   }
@@ -1382,8 +1387,15 @@ async function handleMarkComplete(req, res) {
     return res.status(409).json({ error: "Unable to verify mint completion on-chain" });
   }
 
-  await deleteTransferRecord(burnTxHash, transfer.userAddress);
-  return res.status(200).json({ ok: true, deleted: true });
+  await saveTransferRecord({
+    ...transfer,
+    status: "complete",
+    mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
+    error: undefined,
+    updatedAt: Date.now(),
+    expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
+  });
+  return res.status(200).json({ ok: true, completed: true });
 }
 
 async function handleDismiss(req, res) {
