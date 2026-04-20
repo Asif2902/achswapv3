@@ -372,6 +372,7 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
   if (!wallet) return [];
 
   let serverTransfers: PendingBridgeTransfer[] = [];
+  let serverFailed = false;
   try {
     const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`, {
       signal: AbortSignal.timeout(10000),
@@ -381,8 +382,11 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
       serverTransfers = Array.isArray(data?.transfers)
         ? (data.transfers as PendingBridgeTransfer[]).map(normalizeTransfer)
         : [];
+    } else {
+      serverFailed = true;
     }
   } catch (e) {
+    serverFailed = true;
     console.warn("[bridge] Failed to fetch from server, using local only", e);
   }
 
@@ -414,8 +418,14 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
     }
   }
 
-  for (const [, local] of localByHash) {
-    if (local.status !== "complete" && local.status !== "failed") {
+  if (!serverFailed) {
+    for (const [, local] of localByHash) {
+      if (local.status !== "complete" && local.status !== "failed") {
+        result.push(local);
+      }
+    }
+  } else {
+    for (const [, local] of localByHash) {
       result.push(local);
     }
   }
