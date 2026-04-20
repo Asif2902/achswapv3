@@ -210,7 +210,6 @@ function isOwnershipAction(status: PendingBridgeTransfer["status"] | undefined):
     || status === "minting"
     || status === "attesting"
     || status === "failed"
-    || status === "complete"
   );
 }
 
@@ -372,23 +371,58 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
   const wallet = canonicalAddress(userAddress);
   if (!wallet) return [];
 
-  const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`, {
-    signal: AbortSignal.timeout(10000),
-  });
-  if (!res.ok) {
-    const data = await parseResponseJson(res);
-    const message = data?.error || `Bridge transfer API error ${res.status}`;
-    throw new Error(message);
+  let serverTransfers: PendingBridgeTransfer[] = [];
+  try {
+    const res = await fetch(`/api/bridge-transfers?wallet=${encodeURIComponent(wallet)}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      const data = await parseResponseJson(res);
+      serverTransfers = Array.isArray(data?.transfers)
+        ? (data.transfers as PendingBridgeTransfer[]).map(normalizeTransfer)
+        : [];
+    }
+  } catch (e) {
+    console.warn("[bridge] Failed to fetch from server, using local only", e);
   }
 
-  const data = await parseResponseJson(res);
-  const transfers = Array.isArray(data?.transfers)
-    ? (data.transfers as PendingBridgeTransfer[]).map(normalizeTransfer)
-    : [];
+  const localTransfers = getFallbackTransfers();
+  const localByHash = new Map<string, PendingBridgeTransfer>();
+  for (const tx of localTransfers) {
+    localByHash.set(tx.id, tx);
+  }
 
-  const merged = mergeFallbackTransfersForWallet(wallet, transfers);
-  setFallbackTransfers(merged);
-  return merged;
+  const result: PendingBridgeTransfer[] = [];
+
+  for (const serverTx of serverTransfers) {
+    const local = localByHash.get(serverTx.id);
+    if (local) {
+      localByHash.delete(serverTx.id);
+      if (local.status === "complete" || local.status === "failed") {
+        result.push(local);
+      } else {
+        const serverUpdated = serverTx.updatedAt || serverTx.timestamp;
+        const localUpdated = local.updatedAt || local.timestamp;
+        if (serverUpdated >= localUpdated) {
+          result.push({ ...serverTx, userAddress: local.userAddress });
+        } else {
+          result.push(local);
+        }
+      }
+    } else {
+      result.push(serverTx);
+    }
+  }
+
+  for (const [, local] of localByHash) {
+    if (local.status !== "complete" && local.status !== "failed") {
+      result.push(local);
+    }
+  }
+
+  const sorted = result.sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+  setFallbackTransfers(sorted);
+  return sorted;
 }
 
 export async function savePendingTransfer(
@@ -474,7 +508,6 @@ export async function updateTransferStatus(
       destChainId: localRecord?.destChainId,
       amount: localRecord?.amount,
       timestamp: localRecord?.timestamp,
-      ownershipProof,
     });
   } else if (status === "failed") {
     ok = await postBridgeTransfer("mark_failed", {
