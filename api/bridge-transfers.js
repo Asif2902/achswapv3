@@ -1492,12 +1492,8 @@ async function handleDismiss(req, res) {
     return res.status(409).json({ error: "Only failed or completed transfers can be dismissed" });
   }
 
-  await saveTransferRecord({
-    ...transfer,
-    hiddenAt: Date.now(),
-    updatedAt: Date.now(),
-  });
-  return res.status(200).json({ ok: true, hidden: true });
+  await deleteTransferRecord(burnTxHash, transfer.userAddress);
+  return res.status(200).json({ ok: true, deleted: true });
 }
 
 async function handleRetry(req, res) {
