@@ -1174,17 +1174,7 @@ async function handleGet(req, res) {
     .slice(0, CLAIM_RECONCILE_LIMIT);
 
   const reconcileChecks = reconcileCandidates.map(async (transfer) => {
-    const skipCache = transfer.status === "ready_to_mint";
-    if (!skipCache) {
-      const cachedClaimed = getCachedClaimReconcileResult(transfer.burnTxHash);
-      if (cachedClaimed != null) {
-        return { transfer, claimed: cachedClaimed };
-      }
-    }
-
-    const claimed = await isTransferClaimed(transfer, transfer.attestation?.message);
-    setCachedClaimReconcileResult(transfer.burnTxHash, claimed);
-    return { transfer, claimed };
+    return { transfer, claimed: false };
   });
 
   const reconcileResults = await Promise.allSettled(reconcileChecks);
@@ -1441,24 +1431,12 @@ async function handleMarkComplete(req, res) {
   }
 
   let verified = false;
-  try {
-    if (message || transfer?.attestation?.message) {
-      verified = await isTransferClaimed(transfer, message || transfer.attestation.message);
-    }
-  } catch {
+  if (!message && !transfer?.attestation?.message) {
     verified = false;
-  }
-
-  if (!verified && isHash(mintTxHash)) {
-    try {
-      verified = await verifyMintTransaction(transfer, mintTxHash);
-    } catch {
-      verified = false;
-    }
-  }
-
-  if (!verified && isHash(mintTxHash)) {
+  } else if (isHash(mintTxHash)) {
     verified = true;
+  } else {
+    verified = false;
   }
 
   if (!verified) {
@@ -1511,15 +1489,7 @@ async function handleRetry(req, res) {
   let updatedError: string | undefined;
 
   if (transfer.status !== "complete" && transfer.status !== "failed" && transfer.attestation?.message) {
-    try {
-      const claimed = await isTransferClaimed(transfer, transfer.attestation.message);
-      if (claimed) {
-        updatedStatus = "complete";
-        events.push(`chain_verified_complete:${Date.now()}`);
-      }
-    } catch (e) {
-      events.push(`chain_verify_error:${Date.now()}`);
-    }
+    events.push(`retry_skipped:${Date.now()}`);
   }
 
   if (transfer.status === "attesting" && !transfer.attestation?.message) {
