@@ -378,10 +378,14 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
       signal: AbortSignal.timeout(10000),
     });
     if (res.ok) {
-      const data = await parseResponseJson(res);
-      serverTransfers = Array.isArray(data?.transfers)
-        ? (data.transfers as PendingBridgeTransfer[]).map(normalizeTransfer)
-        : [];
+      try {
+        const data = await parseResponseJson(res);
+        if (data && Array.isArray(data.transfers)) {
+          serverTransfers = data.transfers.map((t: any) => normalizeTransfer(t));
+        }
+      } catch {
+        serverTransfers = [];
+      }
     } else {
       serverFailed = true;
     }
@@ -399,6 +403,7 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
   const result: PendingBridgeTransfer[] = [];
 
   for (const serverTx of serverTransfers) {
+    if (!serverTx.id) continue;
     const local = localByHash.get(serverTx.id);
     if (local) {
       localByHash.delete(serverTx.id);
@@ -430,7 +435,7 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
     }
   }
 
-  const sorted = result.sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+  const sorted = result.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
   setFallbackTransfers(sorted);
   return sorted;
 }

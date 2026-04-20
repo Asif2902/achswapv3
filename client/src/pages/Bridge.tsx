@@ -35,7 +35,7 @@ const TOKEN_MESSENGER_V2_INTERFACE = new Interface([
   "event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)",
 ]);
 
-const PRIORITY_FEE_PER_GAS = BigInt(5e9);
+const PRIORITY_FEE_PER_GAS = BigInt(10e9);
 
 // ── Transfer status steps ────────────────────────────────────────────────────
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "complete" | "error";
