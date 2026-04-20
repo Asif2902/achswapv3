@@ -1,6 +1,6 @@
 import { ethers } from "ethers";
 
-let ALLOWED_ORIGINS: string[] = [];
+let ALLOWED_ORIGINS = [];
 try {
   ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
     .split(",")
@@ -495,7 +495,7 @@ const TRANSFER_STATUS_ORDER = {
   failed: 5,
 };
 
-const VALID_TRANSITIONS: Record<string, string[]> = {
+const VALID_TRANSITIONS = {
   attesting: ["ready_to_mint", "failed"],
   ready_to_mint: ["minting", "failed"],
   minting: ["complete", "failed"],
@@ -510,7 +510,7 @@ function normalizeTransferStatus(value) {
   return "attesting";
 }
 
-function canTransition(from: string, to: string): boolean {
+function canTransition(from, to) {
   const valid = VALID_TRANSITIONS[from];
   return valid ? valid.includes(to) : false;
 }
@@ -1491,10 +1491,10 @@ async function handleRetry(req, res) {
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(404).json({ error: "Transfer not found" });
 
-  const events: string[] = transfer.events || [];
+  const events = transfer.events || [];
   events.push(`retry_started:${Date.now()}`);
   let updatedStatus = transfer.status;
-  let updatedError: string | undefined;
+  let updatedError;
 
   if (transfer.status !== "complete" && transfer.status !== "failed" && transfer.attestation?.message) {
     events.push(`retry_skipped:${Date.now()}`);
