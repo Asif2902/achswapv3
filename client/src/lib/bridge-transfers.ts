@@ -460,10 +460,20 @@ export async function updateTransferStatus(
       ownershipProof,
     });
   } else if (status === "complete") {
+    const existing = getFallbackTransfers();
+    const localRecord = existing.find((t) => t.id === burnTxHash);
     ok = await postBridgeTransfer("mark_complete", {
       burnTxHash,
       mintTxHash: updates.mintTxHash,
       message: updates.attestation?.message,
+      attestation: updates.attestation,
+      userAddress: localRecord?.userAddress,
+      sourceDomain: localRecord?.sourceDomain,
+      sourceChainId: localRecord?.sourceChainId,
+      destDomain: localRecord?.destDomain,
+      destChainId: localRecord?.destChainId,
+      amount: localRecord?.amount,
+      timestamp: localRecord?.timestamp,
       ownershipProof,
     });
   } else if (status === "failed") {

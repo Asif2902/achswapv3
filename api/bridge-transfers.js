@@ -1389,11 +1389,34 @@ async function handleMarkComplete(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   const mintTxHash = canonicalHash(req.body?.mintTxHash || "");
   const message = typeof req.body?.message === "string" ? req.body.message : "";
+  const attestation = req.body?.attestation;
 
   if (!isHash(burnTxHash)) return res.status(400).json({ error: "Invalid burnTxHash" });
 
-  const transfer = await getTransferRecord(burnTxHash);
-  if (!transfer) return res.status(200).json({ ok: true });
+  let transfer = await getTransferRecord(burnTxHash);
+  if (!transfer) {
+    const userAddress = canonicalAddress(req.body?.userAddress || req.query?.wallet || "");
+    if (!isWallet(userAddress)) {
+      return res.status(400).json({ error: "Transfer not found and no userAddress provided" });
+    }
+    transfer = {
+      id: burnTxHash,
+      burnTxHash,
+      sourceDomain: Number(req.body?.sourceDomain) || 0,
+      sourceChainId: Number(req.body?.sourceChainId) || 0,
+      destDomain: Number(req.body?.destDomain) || 0,
+      destChainId: Number(req.body?.destChainId) || 0,
+      amount: String(req.body?.amount || "0"),
+      userAddress,
+      timestamp: Number(req.body?.timestamp) || Date.now(),
+      status: "attesting",
+    };
+    await saveTransferRecord(transfer);
+    transfer = await getTransferRecord(burnTxHash);
+    if (!transfer) {
+      return res.status(500).json({ error: "Failed to create transfer record" });
+    }
+  }
 
   try {
     await requireSignedOwnership(req, transfer);
@@ -1423,6 +1446,7 @@ async function handleMarkComplete(req, res) {
   await saveTransferRecord({
     ...transfer,
     status: "complete",
+    attestation: attestation || transfer.attestation,
     mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
     error: undefined,
     updatedAt: Date.now(),
