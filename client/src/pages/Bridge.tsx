@@ -23,6 +23,8 @@ import {
   updateTransferStatus,
   fetchPendingTransfers,
   getCachedPendingTransfersForWallet,
+  getTransferHistory,
+  getCachedHistoryForWallet,
   isBridgeTransferApiAvailable,
   removeTransfer,
   type PendingBridgeTransfer,
@@ -622,6 +624,7 @@ export default function Bridge() {
   // Notification panel state (full-screen modal like TransactionHistory)
   const [notifOpen, setNotifOpen] = useState(false);
   const [allTransfers, setAllTransfers] = useState<PendingBridgeTransfer[]>([]);
+  const [transferHistory, setTransferHistory] = useState<PendingBridgeTransfer[]>([]);
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifMounted, setNotifMounted] = useState(false);
 
@@ -642,6 +645,7 @@ export default function Bridge() {
   const refreshPendingTransfers = useCallback(async () => {
     if (!address) {
       setAllTransfers([]);
+      setTransferHistory([]);
       return;
     }
 
@@ -654,6 +658,8 @@ export default function Bridge() {
         getCachedPendingTransfersForWallet(address),
       );
     }
+
+    setTransferHistory(getCachedHistoryForWallet(address));
   }, [address]);
 
   const probeBridgeAvailability = useCallback(async (): Promise<boolean> => {
@@ -689,12 +695,16 @@ export default function Bridge() {
     }
   }, [probeBridgeAvailability]);
 
-  useEffect(() => { void refreshPendingTransfers(); }, [refreshPendingTransfers]);
-
   useEffect(() => {
     if (!notifOpen) return;
+    setTransferHistory(getCachedHistoryForWallet(address || ""));
     void refreshPendingTransfers();
-  }, [notifOpen, refreshPendingTransfers]);
+  }, [notifOpen, address]);
+
+  useEffect(() => {
+    if (!address) return;
+    void refreshPendingTransfers();
+  }, [address]);
 
   // Listen for bridge-transfers-updated events (from persistence layer)
   useEffect(() => {
@@ -707,34 +717,48 @@ export default function Bridge() {
     if (!address) return;
 
     let interval: ReturnType<typeof setInterval> | null = null;
+    let lastPollTime = 0;
 
-    const clearPoll = () => {
+    const poll = () => {
+      const now = Date.now();
+      if (now - lastPollTime < 5000) return;
+      lastPollTime = now;
+      void refreshPendingTransfers();
+      void probeBridgeAvailability();
+    };
+
+    const startPoll = () => {
+      if (interval) return;
+      const intervalMs = document.visibilityState !== "visible" ? 30000 : 12000;
+      interval = setInterval(poll, intervalMs);
+    };
+
+    const stopPoll = () => {
       if (interval) {
         clearInterval(interval);
         interval = null;
       }
     };
 
-    const startPollIfVisible = () => {
-      if (document.visibilityState !== "visible") {
-        clearPoll();
-        return;
+    const onVisibilityChange = () => {
+      stopPoll();
+      if (document.visibilityState === "visible") {
+        poll();
+        startPoll();
+      } else {
+        startPoll();
       }
-      if (interval) return;
-      interval = setInterval(() => {
-        void refreshPendingTransfers();
-        void probeBridgeAvailability();
-      }, 12000);
     };
 
-    startPollIfVisible();
-
-    const onVisibilityChange = () => { startPollIfVisible(); };
+    startPoll();
+    poll();
     document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("focus", poll);
 
     return () => {
-      clearPoll();
+      stopPoll();
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("focus", poll);
     };
   }, [address, probeBridgeAvailability, refreshPendingTransfers]);
 
@@ -2242,7 +2266,7 @@ export default function Bridge() {
                 className="flex-1 overflow-y-auto overscroll-contain px-5 py-4"
                 style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
               >
-                {allTransfers.length === 0 ? (
+                {allTransfers.length === 0 && transferHistory.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 gap-3">
                     <div
                       className="w-14 h-14 rounded-2xl flex items-center justify-center"
@@ -2250,8 +2274,8 @@ export default function Bridge() {
                     >
                       <Clock className="w-6 h-6 text-white/15" />
                     </div>
-                    <p className="text-sm text-white/30">No transfers yet</p>
-                    <p className="text-[11px] text-white/20">Your bridge transfers will appear here</p>
+                    <p className="text-sm text-white/30">No pending transfers</p>
+                    <p className="text-[11px] text-white/20">Completed transfers appear in history</p>
                   </div>
                 ) : (
                   <div className="space-y-2.5">
@@ -2392,6 +2416,58 @@ export default function Bridge() {
                       );
                     })}
                   </div>
+                )}
+
+                {transferHistory.length > 0 && (
+                  <>
+                    <div className="flex items-center gap-2 mt-6 mb-3">
+                      <div className="h-px flex-1" style={{ background: "rgba(255,255,255,0.06)" }} />
+                      <span className="text-[11px] text-white/30 font-medium uppercase tracking-wider">History</span>
+                      <div className="h-px flex-1" style={{ background: "rgba(255,255,255,0.06)" }} />
+                    </div>
+                    <div className="space-y-2.5">
+                      {transferHistory.map((tx, i) => {
+                        const srcChain = getChainByDomain(tx.sourceDomain);
+                        const dstChain = getChainByDomain(tx.destDomain);
+                        const { label, color, Icon } = getStatusInfo(tx.status);
+                        const age = Date.now() - (tx.updatedAt || tx.timestamp);
+                        const ageStr = age < 60000 ? "<1m ago"
+                          : age < 3600000 ? `${Math.floor(age / 60000)}m ago`
+                          : age < 86400000 ? `${Math.floor(age / 3600000)}h ago`
+                          : `${Math.floor(age / 86400000)}d ago`;
+                        const canDismiss = tx.status === "complete" || tx.status === "failed";
+
+                        return (
+                          <div
+                            key={tx.id}
+                            className="rounded-2xl p-4 transition-all opacity-60 hover:opacity-80"
+                            style={{
+                              background: "rgba(255,255,255,0.015)",
+                              border: "1px solid rgba(255,255,255,0.04)",
+                            }}
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-9 h-9 rounded-full overflow-hidden flex-shrink-0 flex items-center justify-center" style={{ background: `linear-gradient(135deg, ${srcChain?.color || "#666"}33, ${srcChain?.color || "#666"}66)` }}>
+                                {srcChain?.logo ? <img src={srcChain.logo} alt={srcChain.shortName} className="w-full h-full object-cover" /> : <span style={{ fontSize: 14, fontWeight: 800, color: srcChain?.color || "#888" }}>{srcChain?.shortName.charAt(0) || "?"}</span>}
+                              </div>
+                              <ArrowRight className="w-4 h-4 text-white/20" />
+                              <div className="w-9 h-9 rounded-full overflow-hidden flex-shrink-0 flex items-center justify-center" style={{ background: `linear-gradient(135deg, ${dstChain?.color || "#666"}33, ${dstChain?.color || "#666"}66)` }}>
+                                {dstChain?.logo ? <img src={dstChain.logo} alt={dstChain.shortName} className="w-full h-full object-cover" /> : <span style={{ fontSize: 14, fontWeight: 800, color: dstChain?.color || "#888" }}>{dstChain?.shortName.charAt(0) || "?"}</span>}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-semibold text-white truncate">{tx.amount && formatUnits(tx.amount, 6)} USDC</p>
+                                <p className="text-[11px] text-white/30 truncate">{ageStr}</p>
+                              </div>
+                              <div className="flex items-center gap-1.5" style={{ color }}>
+                                <Icon className="w-3 h-3" />
+                                <span className="text-[11px] font-semibold">{label}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
                 )}
 
                 {/* Bottom safe area */}

@@ -19,7 +19,7 @@ const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
 
 const RPC_PROBE_TIMEOUT_MS = 4_500;
 const RPC_CACHE_REVALIDATE_MS = 30_000;
-const CLAIM_RECONCILE_CACHE_TTL_MS = 45_000;
+const CLAIM_RECONCILE_CACHE_TTL_MS = 5_000;
 
 const memoryRateLimitByKey = new Map();
 let memoryRateLimitRequestCount = 0;
@@ -657,16 +657,21 @@ function deleteMemoryTransfer(burnTxHash, wallet) {
 }
 
 async function saveTransferRecord(record) {
+  const recordWithTimestamp = {
+    ...record,
+    timestamp: record.timestamp || Date.now(),
+    updatedAt: record.updatedAt || Date.now(),
+  };
   if (HAS_REDIS) {
     await upstashPipeline([
-      ["SET", txKey(record.burnTxHash), JSON.stringify(record), "EX", String(TRANSFER_TTL_SECONDS)],
-      ["ZADD", walletKey(record.userAddress), String(record.timestamp || Date.now()), record.burnTxHash],
-      ["EXPIRE", walletKey(record.userAddress), String(TRANSFER_TTL_SECONDS)],
+      ["SET", txKey(recordWithTimestamp.burnTxHash), JSON.stringify(recordWithTimestamp), "EX", String(TRANSFER_TTL_SECONDS)],
+      ["ZADD", walletKey(recordWithTimestamp.userAddress), String(recordWithTimestamp.timestamp), recordWithTimestamp.burnTxHash],
+      ["EXPIRE", walletKey(recordWithTimestamp.userAddress), String(TRANSFER_TTL_SECONDS)],
     ]);
     return;
   }
 
-  setMemoryTransfer(record);
+  setMemoryTransfer(recordWithTimestamp);
 }
 
 async function getTransferRecord(burnTxHash) {
@@ -1120,9 +1125,12 @@ async function handleGet(req, res) {
     .slice(0, CLAIM_RECONCILE_LIMIT);
 
   const reconcileChecks = reconcileCandidates.map(async (transfer) => {
-    const cachedClaimed = getCachedClaimReconcileResult(transfer.burnTxHash);
-    if (cachedClaimed != null) {
-      return { transfer, claimed: cachedClaimed };
+    const skipCache = transfer.status === "ready_to_mint";
+    if (!skipCache) {
+      const cachedClaimed = getCachedClaimReconcileResult(transfer.burnTxHash);
+      if (cachedClaimed != null) {
+        return { transfer, claimed: cachedClaimed };
+      }
     }
 
     const claimed = await isTransferClaimed(transfer, transfer.attestation?.message);

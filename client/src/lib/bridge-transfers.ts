@@ -17,6 +17,7 @@ export interface PendingBridgeTransfer {
   amount: string;
   userAddress: string;
   timestamp: number;
+  updatedAt?: number;
   attestation?: {
     message: string;
     attestation: string;
@@ -27,6 +28,7 @@ export interface PendingBridgeTransfer {
 }
 
 const FALLBACK_STORAGE_KEY = "achswap_bridge_pending_transfers_fallback";
+const HISTORY_STORAGE_KEY = "achswap_bridge_transfer_history";
 const OWNERSHIP_INTENT = "bridge_transfer_mutation";
 const OWNERSHIP_PROOF_TTL_MS = 10 * 60_000;
 const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
@@ -102,31 +104,104 @@ function mergeFallbackTransfersForWallet(
   walletTransfers: PendingBridgeTransfer[],
 ): PendingBridgeTransfer[] {
   const wallet = canonicalAddress(userAddress);
-  const normalizedWalletTransfers = walletTransfers.map(normalizeTransfer);
+  const normalizedServerTransfers = walletTransfers.map(normalizeTransferWithTimestamp);
   const existing = getFallbackTransfers();
   const others = existing.filter((tx) => canonicalAddress(tx.userAddress) !== wallet);
   const walletsExisting = existing.filter((tx) => canonicalAddress(tx.userAddress) === wallet);
-  const existingByHash = new Map(walletsExisting.map((tx) => [canonicalHash(tx.burnTxHash || tx.id), tx]));
-  const merged = normalizedWalletTransfers.map((serverTx) => {
-    const serverHash = canonicalHash(serverTx.burnTxHash || serverTx.id);
-    const local = existingByHash.get(serverHash);
+
+  const byHash = new Map<string, PendingBridgeTransfer>();
+  for (const tx of walletsExisting) {
+    const hash = canonicalHash(tx.burnTxHash || tx.id);
+    byHash.set(hash, normalizeTransferWithTimestamp(tx));
+  }
+
+  const serverByHash = new Map<string, PendingBridgeTransfer>();
+  for (const tx of normalizedServerTransfers) {
+    const hash = canonicalHash(tx.burnTxHash || tx.id);
+    serverByHash.set(hash, tx);
+  }
+
+  const result: PendingBridgeTransfer[] = [];
+
+  for (const [hash, serverTx] of serverByHash) {
+    const local = byHash.get(hash);
     if (local) {
-      existingByHash.delete(serverHash);
-      const preferLocalStatus = getTransferStatusRank(local.status) > getTransferStatusRank(serverTx.status);
-      return {
-        ...local,
-        ...serverTx,
-        status: preferLocalStatus ? local.status : serverTx.status,
-        mintTxHash: preferLocalStatus ? (local.mintTxHash || serverTx.mintTxHash) : (serverTx.mintTxHash || local.mintTxHash),
-        error: preferLocalStatus ? local.error : serverTx.error,
-        id: local.id,
-        burnTxHash: local.burnTxHash,
-        userAddress: local.userAddress,
-      };
+      byHash.delete(hash);
+      result.push(resolveTransferConflict(local, serverTx));
+    } else {
+      result.push(serverTx);
     }
-    return serverTx;
-  });
-  return [...merged, ...others];
+  }
+
+  const pendingLocals = [...byHash.values()].filter(
+    (tx) => tx.status !== "complete" && tx.status !== "failed",
+  );
+  return [...result, ...pendingLocals, ...others];
+}
+
+function normalizeTransferWithTimestamp(transfer: PendingBridgeTransfer): PendingBridgeTransfer {
+  const normalized = normalizeTransfer(transfer);
+  if (!normalized.updatedAt) {
+    normalized.updatedAt = normalized.timestamp;
+  }
+  return normalized;
+}
+
+function resolveTransferConflict(
+  local: PendingBridgeTransfer,
+  server: PendingBridgeTransfer,
+): PendingBridgeTransfer {
+  const localUpdated = local.updatedAt || local.timestamp;
+  const serverUpdated = server.updatedAt || server.timestamp;
+
+  if (serverUpdated >= localUpdated) {
+    return {
+      ...server,
+      id: local.id,
+      burnTxHash: local.burnTxHash,
+      userAddress: local.userAddress,
+    };
+  }
+
+  return {
+    ...local,
+    status: server.status,
+    mintTxHash: server.mintTxHash || local.mintTxHash,
+    error: server.error || local.error,
+  };
+}
+
+function getHistoryTransfers(): PendingBridgeTransfer[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as PendingBridgeTransfer[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(normalizeTransfer);
+  } catch {
+    return [];
+  }
+}
+
+function setHistoryTransfers(transfers: PendingBridgeTransfer[]): void {
+  try {
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(transfers.map(normalizeTransfer)));
+  } catch {}
+}
+
+function addToHistory(transfer: PendingBridgeTransfer): void {
+  const history = getHistoryTransfers();
+  const normalized = normalizeTransfer(transfer);
+  const existingIndex = history.findIndex(
+    (t) => canonicalHash(t.burnTxHash || t.id) === canonicalHash(normalized.burnTxHash || normalized.id),
+  );
+  if (existingIndex >= 0) {
+    history[existingIndex] = { ...history[existingIndex], ...normalized };
+  } else {
+    history.unshift(normalized);
+  }
+  const limited = history.slice(0, 100);
+  setHistoryTransfers(limited);
 }
 
 function isOwnershipAction(status: PendingBridgeTransfer["status"] | undefined): boolean {
@@ -177,6 +252,16 @@ export function getCachedPendingTransfersForWallet(userAddress: string): Pending
   const wallet = canonicalAddress(userAddress);
   if (!wallet) return [];
   return getFallbackTransfers().filter((tx) => canonicalAddress(tx.userAddress) === wallet);
+}
+
+export function getTransferHistory(): PendingBridgeTransfer[] {
+  return getHistoryTransfers();
+}
+
+export function getCachedHistoryForWallet(userAddress: string): PendingBridgeTransfer[] {
+  const wallet = canonicalAddress(userAddress);
+  if (!wallet) return [];
+  return getHistoryTransfers().filter((tx) => canonicalAddress(tx.userAddress) === wallet);
 }
 
 export async function isBridgeTransferApiAvailable(userAddress: string): Promise<boolean> {
@@ -460,6 +545,10 @@ export async function removeTransfer(id: string): Promise<boolean> {
 
   if (!ok) {
     return false;
+  }
+
+  if (localRecord) {
+    addToHistory(localRecord);
   }
 
   const filtered = getFallbackTransfers().filter((t) => t.id !== burnTxHash);
