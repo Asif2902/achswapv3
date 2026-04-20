@@ -1,13 +1,21 @@
 import { ethers } from "ethers";
 
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((v) => normalizeOrigin(v))
-  .filter(Boolean);
+let ALLOWED_ORIGINS: string[] = [];
+try {
+  ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((v) => normalizeOrigin(v))
+    .filter(Boolean);
+} catch {}
 
-const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim();
-const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
-const HAS_REDIS = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
+let UPSTASH_REDIS_REST_URL = "";
+let UPSTASH_REDIS_REST_TOKEN = "";
+let HAS_REDIS = false;
+try {
+  UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL?.trim() || "";
+  UPSTASH_REDIS_REST_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN?.trim() || "";
+  HAS_REDIS = !!(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
+} catch {}
 
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 240;
 const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -1512,23 +1520,27 @@ async function handleRetry(req, res) {
 }
 
 export default async function handler(req, res) {
-  setCorsHeaders(req, res);
+  try {
+    setCorsHeaders(req, res);
 
-  if (req.method === "HEAD") {
-    return res.status(200).end();
-  }
+    if (req.method === "HEAD") {
+      return res.status(200).end();
+    }
 
-  if (req.method === "OPTIONS") {
-    if (req.headers.origin && !isAllowedBrowserOrigin(req)) return res.status(403).json({ error: "Origin not allowed" });
-    return res.status(200).end();
-  }
+    if (req.method === "OPTIONS") {
+      if (req.headers.origin && !isAllowedBrowserOrigin(req)) return res.status(403).json({ error: "Origin not allowed" });
+      return res.status(200).end();
+    }
 
-  if (req.headers.origin && !isAllowedBrowserOrigin(req)) {
-    return res.status(403).json({ error: "Origin not allowed" });
-  }
+    if (req.headers.origin && !isAllowedBrowserOrigin(req)) {
+      return res.status(403).json({ error: "Origin not allowed" });
+    }
 
-  if (!await checkRateLimit(req)) {
-    return res.status(429).json({ error: "Rate limit exceeded" });
+    if (!await checkRateLimit(req)) {
+      return res.status(429).json({ error: "Rate limit exceeded" });
+    }
+  } catch (err) {
+    return res.status(500).json({ error: "Init error: " + (err?.message || err) });
   }
 
   try {
