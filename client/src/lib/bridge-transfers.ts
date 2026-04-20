@@ -490,6 +490,7 @@ export async function updateTransferStatus(
       id: existing[idx].id,
       burnTxHash: existing[idx].burnTxHash,
       userAddress: existing[idx].userAddress,
+      updatedAt: Date.now(),
     };
     setFallbackTransfers(existing);
     dispatchTransfersUpdated();
