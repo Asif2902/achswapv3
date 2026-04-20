@@ -1240,12 +1240,6 @@ async function handleUpsertBurn(req, res) {
     return res.status(400).json({ error: "Destination domain mismatch" });
   }
 
-  try {
-    await verifyBurnTransaction(record);
-  } catch (e) {
-    console.warn("[bridge] Burn verification skipped:", e.message);
-  }
-
   const existing = await getTransferRecord(record.burnTxHash);
   const recordHasAttestation = Boolean(record.attestation?.message && record.attestation?.attestation);
   const mergedStatus = selectProgressStatus(existing?.status, record.status, recordHasAttestation);
