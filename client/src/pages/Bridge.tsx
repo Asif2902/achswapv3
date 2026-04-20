@@ -35,6 +35,8 @@ const TOKEN_MESSENGER_V2_INTERFACE = new Interface([
   "event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)",
 ]);
 
+const PRIORITY_FEE_PER_GAS = BigInt(5e9);
+
 // ── Transfer status steps ────────────────────────────────────────────────────
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "complete" | "error";
 
@@ -1075,17 +1077,12 @@ export default function Bridge() {
         return;
       }
 
-      // Estimate gas and apply 150% boost for slow chains
-      const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
-        attestation.message,
-        attestation.attestation
-      );
-      const boostedGas = gasEstimate * 170n / 100n;
-
       const mintTx = await messageTransmitter.receiveMessage(
         attestation.message,
         attestation.attestation,
-        { gasLimit: boostedGas }
+        {
+          maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS,
+        }
       );
       const mintReceipt = await mintTx.wait();
 
@@ -1613,8 +1610,9 @@ export default function Bridge() {
       const currentAllowance: bigint = await usdcContract.allowance(address, sourceChain.tokenMessengerV2);
 
       if (currentAllowance < amountWei) {
-        const approveGas = await usdcContract.approve.estimateGas(sourceChain.tokenMessengerV2, amountWei);
-        const approveTx = await usdcContract.approve(sourceChain.tokenMessengerV2, amountWei, { gasLimit: approveGas * 170n / 100n });
+        const approveTx = await usdcContract.approve(sourceChain.tokenMessengerV2, amountWei, {
+          maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS,
+        });
         await approveTx.wait();
       }
 
@@ -1632,15 +1630,6 @@ export default function Bridge() {
         signer
       );
 
-      const burnGas = await tokenMessenger.depositForBurn.estimateGas(
-        amountWei,
-        destChain.domain,
-        mintRecipient,
-        sourceChain.usdcAddress,
-        destCallerBytes32,
-        maxFee,
-        minFinalityThreshold
-      );
       const burnTx = await tokenMessenger.depositForBurn(
         amountWei,
         destChain.domain,
@@ -1649,7 +1638,7 @@ export default function Bridge() {
         destCallerBytes32,
         maxFee,
         minFinalityThreshold,
-        { gasLimit: burnGas * 170n / 100n }
+        { maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS }
       );
       const burnReceipt = await burnTx.wait();
       const burnTxHash = burnReceipt.hash;
