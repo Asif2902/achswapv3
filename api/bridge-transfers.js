@@ -11,9 +11,9 @@ const HAS_REDIS = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
 
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 240;
 const RATE_LIMIT_WINDOW_MS = 60_000;
-const DEFAULT_TRANSFER_TTL_SECONDS = 7 * 24 * 60 * 60;
+const DEFAULT_TRANSFER_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MAX_TRANSFERS_PER_WALLET = 100;
-const CLAIM_RECONCILE_LIMIT = 6;
+const CLAIM_RECONCILE_LIMIT = 10;
 const OWNERSHIP_PROOF_MAX_TTL_MS = 10 * 60_000;
 const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
 
@@ -449,7 +449,13 @@ function normalizeTransferRecord(input) {
   let status = "attesting";
   if (requestedStatus === "ready_to_mint") status = "ready_to_mint";
   if (requestedStatus === "minting") status = "minting";
+  if (requestedStatus === "complete") status = "complete";
   if (requestedStatus === "failed") status = "failed";
+
+  const updatedAtRaw = Number(input.updatedAt);
+  const updatedAt = Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? Math.trunc(updatedAtRaw) : Date.now();
+  const hiddenAtRaw = Number(input.hiddenAt);
+  const hiddenAt = Number.isFinite(hiddenAtRaw) && hiddenAtRaw > 0 ? Math.trunc(hiddenAtRaw) : undefined;
 
   return {
     id: burnTxHash,
@@ -466,7 +472,8 @@ function normalizeTransferRecord(input) {
     mintTxHash: isHash(input.mintTxHash) ? canonicalHash(input.mintTxHash) : undefined,
     error: trimErrorMessage(input.error),
     expiresAt: Number.isFinite(Number(input.expiresAt)) ? Math.trunc(Number(input.expiresAt)) : undefined,
-    updatedAt: Date.now(),
+    updatedAt,
+    hiddenAt,
   };
 }
 
@@ -656,6 +663,23 @@ function deleteMemoryTransfer(burnTxHash, wallet) {
   touchMemoryTransferPrune();
 }
 
+async function pruneOldTransfers(wallet) {
+  if (!HAS_REDIS) return;
+  const [countResult] = await upstashPipeline([["ZCARD", walletKey(wallet)]]);
+  const count = Number(countResult || 0);
+  if (count <= MAX_TRANSFERS_PER_WALLET) return;
+
+  const toRemove = count - MAX_TRANSFERS_PER_WALLET;
+  const [oldest] = await upstashPipeline([
+    ["ZRANGE", walletKey(wallet), "0", String(toRemove - 1)],
+  ]);
+  if (!Array.isArray(oldest) || !oldest.length) return;
+
+  const deleteKeys = oldest.map((hash) => ["DEL", txKey(hash)]);
+  deleteKeys.push(["ZREM", walletKey(wallet), ...oldest]);
+  await upstashPipeline(deleteKeys);
+}
+
 async function saveTransferRecord(record) {
   const recordWithTimestamp = {
     ...record,
@@ -663,6 +687,7 @@ async function saveTransferRecord(record) {
     updatedAt: record.updatedAt || Date.now(),
   };
   if (HAS_REDIS) {
+    await pruneOldTransfers(recordWithTimestamp.userAddress);
     await upstashPipeline([
       ["SET", txKey(recordWithTimestamp.burnTxHash), JSON.stringify(recordWithTimestamp), "EX", String(TRANSFER_TTL_SECONDS)],
       ["ZADD", walletKey(recordWithTimestamp.userAddress), String(recordWithTimestamp.timestamp), recordWithTimestamp.burnTxHash],
@@ -1166,11 +1191,11 @@ async function handleGet(req, res) {
     await removeWalletIndexEntries(wallet, staleHashes);
   }
 
-  const active = transfers
-    .filter((t) => !staleHashSet.has(t.burnTxHash))
-    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
-    .slice(0, MAX_TRANSFERS_PER_WALLET)
-    .map(sanitizeForResponse);
+  const allTransfers = transfers
+    .filter((t) => !staleHashSet.has(t.burnTxHash) && !t.hiddenAt)
+    .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+
+  const active = allTransfers.slice(0, MAX_TRANSFERS_PER_WALLET).map(sanitizeForResponse);
 
   return res.status(200).json({ transfers: active, storage: HAS_REDIS ? "redis" : "memory" });
 }
@@ -1423,8 +1448,12 @@ async function handleDismiss(req, res) {
     return res.status(409).json({ error: "Only failed or completed transfers can be dismissed" });
   }
 
-  await deleteTransferRecord(burnTxHash, transfer.userAddress);
-  return res.status(200).json({ ok: true, deleted: true });
+  await saveTransferRecord({
+    ...transfer,
+    hiddenAt: Date.now(),
+    updatedAt: Date.now(),
+  });
+  return res.status(200).json({ ok: true, hidden: true });
 }
 
 export default async function handler(req, res) {
