@@ -64,6 +64,35 @@ function extractCCTPMessageNonce(message: string): `0x${string}` | null {
   return `0x${normalized.slice(start, end)}` as `0x${string}`;
 }
 
+async function isTransferClaimedOnDestination(
+  dstChain: CCTPChain,
+  attestationMessage: string,
+): Promise<boolean> {
+  const messageNonce = extractCCTPMessageNonce(attestationMessage);
+  if (!messageNonce) return false;
+
+  try {
+    const provider = await getWorkingProvider(dstChain);
+    const messageTransmitter = new Contract(
+      dstChain.messageTransmitterV2,
+      MESSAGE_TRANSMITTER_V2_ABI,
+      provider,
+    );
+
+    const [nonceState, nonceUsedValue] = await Promise.all([
+      messageTransmitter.usedNonces(messageNonce) as Promise<bigint>,
+      messageTransmitter.NONCE_USED() as Promise<bigint>,
+    ]);
+
+    return nonceUsedValue > 0n
+      ? nonceState === nonceUsedValue
+      : nonceState > 0n;
+  } catch (err) {
+    console.warn("Destination claimed-state check failed", err);
+    return false;
+  }
+}
+
 function extractErrorCode(error: unknown): number | string | null {
   if (!error || typeof error !== "object") return null;
 
@@ -1002,39 +1031,24 @@ export default function Bridge() {
         destSigner
       );
 
-      const messageNonce = extractCCTPMessageNonce(attestation.message);
-      if (messageNonce) {
-        try {
-          const [nonceState, nonceUsedValue] = await Promise.all([
-            messageTransmitter.usedNonces(messageNonce) as Promise<bigint>,
-            messageTransmitter.NONCE_USED() as Promise<bigint>,
-          ]);
-
-          const nonceAlreadyUsed = nonceUsedValue > 0n
-            ? nonceState === nonceUsedValue
-            : nonceState > 0n;
-
-          if (nonceAlreadyUsed) {
-            await updateTransferStatus(transferId, {
-              status: "complete",
-              attestation,
-              error: undefined,
-            });
-            setTransfer(prev => ({
-              ...prev,
-              step: "complete",
-              error: null,
-            }));
-            toast({
-              title: "Already Claimed",
-              description: "This transfer was already claimed on the destination chain.",
-            });
-            fetchBalance();
-            return;
-          }
-        } catch (nonceCheckErr) {
-          console.warn("CCTP nonce pre-check failed; continuing with mint attempt", nonceCheckErr);
-        }
+      const nonceAlreadyUsed = await isTransferClaimedOnDestination(dstChain, attestation.message);
+      if (nonceAlreadyUsed) {
+        await updateTransferStatus(transferId, {
+          status: "complete",
+          attestation,
+          error: undefined,
+        });
+        setTransfer(prev => ({
+          ...prev,
+          step: "complete",
+          error: null,
+        }));
+        toast({
+          title: "Already Claimed",
+          description: "This transfer was already claimed on the destination chain.",
+        });
+        fetchBalance();
+        return;
       }
 
       // Estimate gas and apply 150% boost for slow chains
@@ -1079,22 +1093,25 @@ export default function Bridge() {
 
     } catch (mintErr: any) {
       if (isAlreadyClaimedError(mintErr)) {
-        await updateTransferStatus(transferId, {
-          status: "complete",
-          attestation,
-          error: undefined,
-        });
-        setTransfer(prev => ({
-          ...prev,
-          step: "complete",
-          error: null,
-        }));
-        toast({
-          title: "Already Claimed",
-          description: "This transfer was already claimed on the destination chain.",
-        });
-        fetchBalance();
-        return;
+        const claimedOnDestination = await isTransferClaimedOnDestination(dstChain, attestation.message);
+        if (claimedOnDestination) {
+          await updateTransferStatus(transferId, {
+            status: "complete",
+            attestation,
+            error: undefined,
+          });
+          setTransfer(prev => ({
+            ...prev,
+            step: "complete",
+            error: null,
+          }));
+          toast({
+            title: "Already Claimed",
+            description: "This transfer was already claimed on the destination chain.",
+          });
+          fetchBalance();
+          return;
+        }
       }
 
       // Mint failed or was cancelled — keep transfer resumable with attestation intact
