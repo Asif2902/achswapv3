@@ -1080,7 +1080,7 @@ export default function Bridge() {
         attestation.message,
         attestation.attestation
       );
-      const boostedGas = gasEstimate * 150n / 100n;
+      const boostedGas = gasEstimate * 170n / 100n;
 
       const mintTx = await messageTransmitter.receiveMessage(
         attestation.message,
@@ -1614,7 +1614,7 @@ export default function Bridge() {
 
       if (currentAllowance < amountWei) {
         const approveGas = await usdcContract.approve.estimateGas(sourceChain.tokenMessengerV2, amountWei);
-        const approveTx = await usdcContract.approve(sourceChain.tokenMessengerV2, amountWei, { gasLimit: approveGas * 150n / 100n });
+        const approveTx = await usdcContract.approve(sourceChain.tokenMessengerV2, amountWei, { gasLimit: approveGas * 170n / 100n });
         await approveTx.wait();
       }
 
@@ -1649,7 +1649,7 @@ export default function Bridge() {
         destCallerBytes32,
         maxFee,
         minFinalityThreshold,
-        { gasLimit: burnGas * 150n / 100n }
+        { gasLimit: burnGas * 170n / 100n }
       );
       const burnReceipt = await burnTx.wait();
       const burnTxHash = burnReceipt.hash;

@@ -456,6 +456,7 @@ function normalizeTransferRecord(input) {
   const updatedAt = Number.isFinite(updatedAtRaw) && updatedAtRaw > 0 ? Math.trunc(updatedAtRaw) : Date.now();
   const hiddenAtRaw = Number(input.hiddenAt);
   const hiddenAt = Number.isFinite(hiddenAtRaw) && hiddenAtRaw > 0 ? Math.trunc(hiddenAtRaw) : undefined;
+  const events = Array.isArray(input.events) ? input.events.filter((e) => typeof e === "string") : [];
 
   return {
     id: burnTxHash,
@@ -474,6 +475,7 @@ function normalizeTransferRecord(input) {
     expiresAt: Number.isFinite(Number(input.expiresAt)) ? Math.trunc(Number(input.expiresAt)) : undefined,
     updatedAt,
     hiddenAt,
+    events,
   };
 }
 
@@ -482,6 +484,15 @@ const TRANSFER_STATUS_ORDER = {
   ready_to_mint: 2,
   minting: 3,
   complete: 4,
+  failed: 5,
+};
+
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  attesting: ["ready_to_mint", "failed"],
+  ready_to_mint: ["minting", "failed"],
+  minting: ["complete", "failed"],
+  complete: [],
+  failed: [],
 };
 
 function normalizeTransferStatus(value) {
@@ -491,15 +502,24 @@ function normalizeTransferStatus(value) {
   return "attesting";
 }
 
+function canTransition(from: string, to: string): boolean {
+  const valid = VALID_TRANSITIONS[from];
+  return valid ? valid.includes(to) : false;
+}
+
 function selectProgressStatus(existingStatus, incomingStatus, incomingHasAttestation) {
   const existing = normalizeTransferStatus(existingStatus);
   let incoming = normalizeTransferStatus(incomingStatus);
 
-  if (existing === "failed") return "failed";
-  if (incoming === "failed") incoming = "attesting";
+  if (existing === "failed" || existing === "complete") return existing;
+  if (incoming === "failed") return "failed";
 
   if (incomingHasAttestation && incoming === "attesting") {
     incoming = "ready_to_mint";
+  }
+
+  if (!canTransition(existing, incoming)) {
+    return existing;
   }
 
   const existingRank = TRANSFER_STATUS_ORDER[existing] || 0;
@@ -1480,6 +1500,49 @@ async function handleDismiss(req, res) {
   return res.status(200).json({ ok: true, hidden: true });
 }
 
+async function handleRetry(req, res) {
+  const burnTxHash = canonicalHash(req.body?.burnTxHash);
+  if (!isHash(burnTxHash)) return res.status(400).json({ error: "Invalid burnTxHash" });
+
+  const transfer = await getTransferRecord(burnTxHash);
+  if (!transfer) return res.status(404).json({ error: "Transfer not found" });
+
+  const events: string[] = transfer.events || [];
+  events.push(`retry_started:${Date.now()}`);
+  let updatedStatus = transfer.status;
+  let updatedError: string | undefined;
+
+  if (transfer.status !== "complete" && transfer.status !== "failed" && transfer.attestation?.message) {
+    try {
+      const claimed = await isTransferClaimed(transfer, transfer.attestation.message);
+      if (claimed) {
+        updatedStatus = "complete";
+        events.push(`chain_verified_complete:${Date.now()}`);
+      }
+    } catch (e) {
+      events.push(`chain_verify_error:${Date.now()}`);
+    }
+  }
+
+  if (transfer.status === "attesting" && !transfer.attestation?.message) {
+    updatedStatus = "attesting";
+    events.push(`needs_attestation:${Date.now()}`);
+  }
+
+  if (updatedStatus !== transfer.status) {
+    await saveTransferRecord({
+      ...transfer,
+      status: updatedStatus,
+      error: updatedError,
+      events,
+      updatedAt: Date.now(),
+    });
+  }
+
+  const refreshed = await getTransferRecord(burnTxHash);
+  return res.status(200).json({ ok: true, status: refreshed?.status, events });
+}
+
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
 
@@ -1517,6 +1580,7 @@ export default async function handler(req, res) {
     if (action === "mark_failed") return await handleMarkFailed(req, res);
     if (action === "mark_complete") return await handleMarkComplete(req, res);
     if (action === "dismiss") return await handleDismiss(req, res);
+    if (action === "retry") return await handleRetry(req, res);
 
     return res.status(400).json({ error: "Unknown action" });
   } catch (err) {
