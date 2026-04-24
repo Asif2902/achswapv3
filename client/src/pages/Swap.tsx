@@ -427,18 +427,13 @@ export default function Swap() {
       if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
       const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your list` }); return exists; }
-      const provider = new BrowserProvider({
-        request: async ({ method, params }: any) => {
-          const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-          const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result;
-        },
-      });
+      if (!chainId) throw new Error("Chain ID not available");
+      const provider = createAlchemyProvider(chainId);
       const contract = new Contract(addr, ERC20_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([
         Promise.all([contract.name(), contract.symbol(), contract.decimals()]),
         new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), 10000)),
       ]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
       const key = `importedTokens:${chainId}`;
       const raw = localStorage.getItem(key);

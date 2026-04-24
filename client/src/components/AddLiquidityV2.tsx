@@ -11,7 +11,7 @@ import { defaultTokens, getTokensByChainId, isRWAToken, isCanonicalUSDC, getWrap
 import { formatAmount, parseAmount, calculateRatio, getMaxAmount } from "@/lib/decimal-utils";
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
-import { getRpcUrl, FALLBACK_RPC, fetchWithRetry } from "@/lib/config";
+import { createAlchemyProvider } from "@/lib/config";
 import { getGatewayUrlFromCid } from "@/pages/LaunchToken";
 
 const ERC20_ABI = [
@@ -352,29 +352,10 @@ export function AddLiquidityV2() {
       if (!address || address.length !== 42 || !address.startsWith('0x')) throw new Error("Invalid token address format");
       const exists = tokens.find(t => t.address.toLowerCase() === address.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your token list` }); return exists; }
-      const primaryRpcUrl = getRpcUrl(chainId);
-      const fallbackRpcUrl = FALLBACK_RPC;
-      const provider = new BrowserProvider({
-        request: async ({ method, params }: any) => {
-          let url = primaryRpcUrl;
-          try {
-            const r = await fetchWithRetry(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) }, 3);
-            const d = await r.json();
-            if (d.error) throw new Error(d.error.message);
-            return d.result;
-          } catch {
-            console.warn('Primary RPC failed, trying fallback');
-            url = fallbackRpcUrl;
-            const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) });
-            const d = await r.json();
-            if (d.error) throw new Error(d.error.message);
-            return d.result;
-          }
-        },
-      });
+      if (!chainId) throw new Error("Chain ID not available");
+      const provider = createAlchemyProvider(chainId);
       const contract = new Contract(address, ERC20_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([Promise.all([contract.name(), contract.symbol(), contract.decimals()]), new Promise((_, reject) => setTimeout(() => reject(new Error("Request timed out")), 10000))]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
       const key = `importedTokens:${chainId}`;
       let importedTokens: Token[] = [];

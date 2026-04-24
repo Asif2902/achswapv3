@@ -9,7 +9,8 @@ export interface CommunityToken extends Token {
 }
 
 const COMMUNITY_CACHE_TTL = 5 * 60 * 1000; // 5 min
-let _communityCache: { tokens: CommunityToken[]; ts: number } | null = null;
+const communityCache = new Map<number, { tokens: CommunityToken[]; ts: number }>();
+const communityInFlight = new Map<number, Promise<CommunityToken[]>>();
 
 // Ensure gateway URL is consistent with LaunchToken
 function getGatewayUrlFromCid(cidOrUrl: string): string {
@@ -29,11 +30,17 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
   if (chainId !== 5042002) return [];
 
   // Use cache if fresh
-  if (_communityCache && Date.now() - _communityCache.ts < COMMUNITY_CACHE_TTL) {
-    return _communityCache.tokens;
+  const cached = communityCache.get(chainId);
+  if (cached && Date.now() - cached.ts < COMMUNITY_CACHE_TTL) {
+    return cached.tokens;
   }
 
-  try {
+  const inFlight = communityInFlight.get(chainId);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  const request = (async () => {
     // Use the batch provider for better performance
     const provider = createAlchemyProvider(chainId);
     const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
@@ -61,12 +68,27 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
       });
     }
 
-    _communityCache = { tokens: result, ts: Date.now() };
+    communityCache.set(chainId, { tokens: result, ts: Date.now() });
     return result;
-  } catch (err) {
-    console.warn("[Tokens] Community fetch failed:", err);
-    return [];
-  }
+  })()
+    .catch(() => [])
+    .finally(() => {
+      communityInFlight.delete(chainId);
+    });
+
+  communityInFlight.set(chainId, request);
+  return request;
+}
+
+export function getCachedCommunityTokens(chainId: number): CommunityToken[] | null {
+  const cached = communityCache.get(chainId);
+  if (!cached) return null;
+  if (Date.now() - cached.ts >= COMMUNITY_CACHE_TTL) return null;
+  return cached.tokens;
+}
+
+export function preloadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
+  return fetchCommunityTokens(chainId);
 }
 
 

@@ -1,74 +1,62 @@
 import { JsonRpcProvider, Network } from "ethers";
 import type { JsonRpcPayload, JsonRpcResult } from "ethers";
 
-const alchemyKey = import.meta.env.VITE_ALCHEMY_KEY;
+const ARC_TESTNET_CHAIN_ID = 5042002;
+const PUBLIC_ARC_RPC = "https://rpc.testnet.arc.network";
+const PRIMARY_ALCHEMY_KEY = import.meta.env.VITE_ALCHEMY_KEY;
+const BACKUP_ALCHEMY_KEY = import.meta.env.VITE_ALCHEMY_BACKUP_KEY;
+const FAILOVER_STORAGE_KEY = "achswap_rpc_failover_v1";
+const MAX_ALCHEMY_FAILURES = 3;
+const ALCHEMY_TIMEOUT_MS = 2200;
+const PUBLIC_TIMEOUT_MS = 3200;
 
-export const RPC_CONFIG = {
-  arcTestnet: alchemyKey 
-    ? `https://arc-testnet.g.alchemy.com/v2/${alchemyKey}`
-    : 'https://rpc.testnet.arc.network',
-  // Add more chains here, e.g.:
-  // mainnet: 'https://...',
-};
+type RpcRole = "primary" | "backup" | "public";
 
-export const getRpcUrl = (chainId: number): string => {
-  // Extend this switch for multi-chain support
-  return RPC_CONFIG.arcTestnet;
-};
-
-export const FALLBACK_RPC = 'https://rpc.testnet.arc.network';
-
-// ─── Batch JSON-RPC provider with primary/fallback ────────────────────────────
-//
-// ethers v6's JsonRpcProvider auto-batches RPC calls made in the same event-loop
-// tick.  Instead of sending N individual HTTP requests for Promise.all([...]),
-// it packs them into a single JSON-RPC batch request `[{...}, {...}, ...]`.
-//
-// batchMaxCount: max calls per batch (20 keeps payloads small, avoids 413 errors)
-// batchStallTime: ms to wait collecting calls before flushing (10ms is plenty)
-// staticNetwork: skips the automatic eth_chainId probe on every provider creation
-//
-// Fallback: if the primary (Alchemy) batch fails, we retry the entire batch
-// against the public ARC RPC.
-
-class BatchRpcProvider extends JsonRpcProvider {
-  private _fallbackUrl: string;
-  private _primaryUrl: string;
-
-  constructor(primaryUrl: string, fallbackUrl: string, network: Network) {
-    super(primaryUrl, network, {
-      batchMaxCount: 20,
-      batchStallTime: 10,
-      staticNetwork: network,
-    });
-    this._primaryUrl = primaryUrl;
-    this._fallbackUrl = fallbackUrl;
-  }
-
-  async _send(payload: Array<JsonRpcPayload>): Promise<Array<JsonRpcResult>> {
-    try {
-      return await super._send(payload);
-    } catch (err) {
-      if (this._fallbackUrl && this._fallbackUrl !== this._primaryUrl) {
-        console.warn(
-          `Primary RPC batch failed (${payload.length} calls), trying fallback: ${this._fallbackUrl}`,
-        );
-        const body = JSON.stringify(payload.length === 1 ? payload[0] : payload);
-        const res = await fetch(this._fallbackUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body,
-        });
-        const json = await res.json();
-        return Array.isArray(json) ? json : [json];
-      }
-      throw err;
-    }
-  }
+interface RpcEndpoint {
+  role: RpcRole;
+  timeoutMs: number;
+  url: string;
 }
 
-// Network instances are cached per chainId to avoid re-creating them.
+export interface ManagedRpcAttempt {
+  timeoutMs: number;
+  url: string;
+}
+
+interface RpcFailoverState {
+  alchemyFailureCount: number;
+  permanentPublic: boolean;
+  preferredRole: RpcRole;
+  updatedAt: number;
+}
+
+const DEFAULT_FAILOVER_STATE: RpcFailoverState = {
+  alchemyFailureCount: 0,
+  permanentPublic: false,
+  preferredRole: "primary",
+  updatedAt: 0,
+};
+
 const networkCache = new Map<number, Network>();
+const failoverStateCache = new Map<number, RpcFailoverState>();
+
+const RPC_CONFIG = {
+  arcTestnet: PRIMARY_ALCHEMY_KEY
+    ? `https://arc-testnet.g.alchemy.com/v2/${PRIMARY_ALCHEMY_KEY}`
+    : PUBLIC_ARC_RPC,
+};
+
+function getArcPrimaryUrl(): string {
+  return PRIMARY_ALCHEMY_KEY
+    ? `https://arc-testnet.g.alchemy.com/v2/${PRIMARY_ALCHEMY_KEY}`
+    : PUBLIC_ARC_RPC;
+}
+
+function getArcBackupUrl(): string | null {
+  return BACKUP_ALCHEMY_KEY
+    ? `https://arc-testnet.g.alchemy.com/v2/${BACKUP_ALCHEMY_KEY}`
+    : null;
+}
 
 function getNetwork(chainId: number): Network {
   let network = networkCache.get(chainId);
@@ -79,38 +67,301 @@ function getNetwork(chainId: number): Network {
   return network;
 }
 
-/**
- * Create a read-only JSON-RPC provider with automatic request batching.
- *
- * When multiple eth_call / eth_getBalance / etc. are awaited together
- * (e.g. via Promise.all), they are packed into a single HTTP request.
- * This dramatically reduces latency for pages that load many pools or
- * positions in parallel.
- *
- * Retains primary → fallback RPC behaviour.
- */
-export function createAlchemyProvider(chainId: number): JsonRpcProvider {
-  const primaryUrl = getRpcUrl(chainId);
-  const network = getNetwork(chainId);
-  return new BatchRpcProvider(primaryUrl, FALLBACK_RPC, network);
+function canUseStorage(): boolean {
+  return typeof window !== "undefined" && !!window.sessionStorage;
 }
 
-export async function fetchWithRetry(
-  url: string,
-  options: RequestInit,
-  retries = 3
-): Promise<Response> {
-  let lastError: Error | null = null;
-  
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await fetch(url, options);
-      if (res.ok) return res;
-      lastError = new Error(`HTTP ${res.status}`);
-    } catch (e) {
-      lastError = e as Error;
-    }
+function loadStoredFailoverMap(): Record<string, RpcFailoverState> {
+  if (!canUseStorage()) return {};
+  try {
+    const raw = window.sessionStorage.getItem(FAILOVER_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
   }
-  
-  throw lastError || new Error('Fetch failed');
+}
+
+function saveFailoverState(chainId: number, state: RpcFailoverState) {
+  failoverStateCache.set(chainId, state);
+  if (!canUseStorage()) return;
+
+  try {
+    const stored = loadStoredFailoverMap();
+    stored[String(chainId)] = state;
+    window.sessionStorage.setItem(FAILOVER_STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // Ignore session storage issues.
+  }
+}
+
+function getFailoverState(chainId: number): RpcFailoverState {
+  const cached = failoverStateCache.get(chainId);
+  if (cached) return cached;
+
+  const stored = loadStoredFailoverMap()[String(chainId)];
+  const state =
+    stored && typeof stored === "object"
+      ? {
+          alchemyFailureCount: Number(stored.alchemyFailureCount) || 0,
+          permanentPublic: stored.permanentPublic === true,
+          preferredRole:
+            stored.preferredRole === "backup" || stored.preferredRole === "public"
+              ? stored.preferredRole
+              : "primary",
+          updatedAt: Number(stored.updatedAt) || 0,
+        }
+      : { ...DEFAULT_FAILOVER_STATE };
+
+  failoverStateCache.set(chainId, state);
+  return state;
+}
+
+function uniqueEndpoints(endpoints: Array<RpcEndpoint | null | undefined>): RpcEndpoint[] {
+  const seen = new Set<string>();
+  const result: RpcEndpoint[] = [];
+
+  for (const endpoint of endpoints) {
+    if (!endpoint) continue;
+    if (seen.has(endpoint.url)) continue;
+    seen.add(endpoint.url);
+    result.push(endpoint);
+  }
+
+  return result;
+}
+
+function getConfiguredRpcEndpoints(chainId: number): RpcEndpoint[] {
+  switch (chainId) {
+    case ARC_TESTNET_CHAIN_ID:
+      return uniqueEndpoints([
+        { role: "primary", timeoutMs: ALCHEMY_TIMEOUT_MS, url: getArcPrimaryUrl() },
+        getArcBackupUrl()
+          ? { role: "backup", timeoutMs: ALCHEMY_TIMEOUT_MS, url: getArcBackupUrl()! }
+          : null,
+        { role: "public", timeoutMs: PUBLIC_TIMEOUT_MS, url: PUBLIC_ARC_RPC },
+      ]);
+    default:
+      return uniqueEndpoints([
+        { role: "public", timeoutMs: PUBLIC_TIMEOUT_MS, url: getArcPrimaryUrl() },
+      ]);
+  }
+}
+
+function getEndpointByRole(endpoints: RpcEndpoint[], role: RpcRole): RpcEndpoint | undefined {
+  return endpoints.find((endpoint) => endpoint.role === role);
+}
+
+function getNextPreferredRole(chainId: number, currentRole: RpcRole): RpcRole {
+  const endpoints = getConfiguredRpcEndpoints(chainId);
+  const primary = getEndpointByRole(endpoints, "primary");
+  const backup = getEndpointByRole(endpoints, "backup");
+
+  if (currentRole === "primary" && backup) return "backup";
+  if (currentRole === "backup" && primary) return "primary";
+  return "public";
+}
+
+function registerAlchemyFailure(chainId: number, role: RpcRole) {
+  if (role === "public") return;
+
+  const current = getFailoverState(chainId);
+  const nextCount = current.alchemyFailureCount + 1;
+  const nextState: RpcFailoverState =
+    nextCount >= MAX_ALCHEMY_FAILURES
+      ? {
+          alchemyFailureCount: nextCount,
+          permanentPublic: true,
+          preferredRole: "public",
+          updatedAt: Date.now(),
+        }
+      : {
+          alchemyFailureCount: nextCount,
+          permanentPublic: false,
+          preferredRole: getNextPreferredRole(chainId, role),
+          updatedAt: Date.now(),
+        };
+
+  saveFailoverState(chainId, nextState);
+}
+
+function getRpcAttemptOrder(chainId: number): RpcEndpoint[] {
+  const endpoints = getConfiguredRpcEndpoints(chainId);
+  const publicEndpoint = getEndpointByRole(endpoints, "public");
+  const state = getFailoverState(chainId);
+
+  if (!publicEndpoint) return endpoints;
+  if (state.permanentPublic) return [publicEndpoint];
+
+  const preferred =
+    getEndpointByRole(endpoints, state.preferredRole) ??
+    getEndpointByRole(endpoints, "primary") ??
+    getEndpointByRole(endpoints, "backup") ??
+    publicEndpoint;
+
+  return uniqueEndpoints([
+    preferred,
+    ...endpoints.filter((endpoint) => endpoint.url !== preferred.url),
+  ]);
+}
+
+function createTimeoutSignal(timeoutMs: number): { cancel: () => void; signal: AbortSignal } {
+  const controller = new AbortController();
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
+  return {
+    signal: controller.signal,
+    cancel: () => globalThis.clearTimeout(timer),
+  };
+}
+
+function normalizeRpcBatch(json: unknown): Array<JsonRpcResult> {
+  if (Array.isArray(json)) return json as Array<JsonRpcResult>;
+  return [json as JsonRpcResult];
+}
+
+function isRetryableRpcError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+
+  const code = "code" in error ? Number((error as { code?: unknown }).code) : NaN;
+  const message = "message" in error ? String((error as { message?: unknown }).message ?? "").toLowerCase() : "";
+
+  if ([-32005, -32016, 429].includes(code)) return true;
+
+  return [
+    "alchemy",
+    "credit",
+    "compute units",
+    "rate limit",
+    "too many requests",
+    "timeout",
+    "timed out",
+    "service unavailable",
+    "temporarily unavailable",
+    "upstream",
+    "over capacity",
+    "capacity",
+    "payment required",
+    "limit exceeded",
+  ].some((token) => message.includes(token));
+}
+
+function shouldFailoverFromResponse(json: unknown): boolean {
+  if (Array.isArray(json)) {
+    const errors = json
+      .map((entry) => (entry && typeof entry === "object" ? (entry as { error?: unknown }).error : undefined))
+      .filter(Boolean);
+
+    return errors.length > 0 && errors.length === json.length && errors.every(isRetryableRpcError);
+  }
+
+  if (json && typeof json === "object" && "error" in json) {
+    return isRetryableRpcError((json as { error?: unknown }).error);
+  }
+
+  return false;
+}
+
+async function fetchJsonRpc(endpoint: RpcEndpoint, payload: Array<JsonRpcPayload>): Promise<Array<JsonRpcResult>> {
+  const body = JSON.stringify(payload.length === 1 ? payload[0] : payload);
+  const { signal, cancel } = createTimeoutSignal(endpoint.timeoutMs);
+
+  try {
+    const response = await fetch(endpoint.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`RPC HTTP ${response.status}`);
+    }
+
+    const json = await response.json();
+    if (shouldFailoverFromResponse(json)) {
+      throw new Error("Retryable RPC upstream failure");
+    }
+
+    return normalizeRpcBatch(json);
+  } finally {
+    cancel();
+  }
+}
+
+class BatchRpcProvider extends JsonRpcProvider {
+  private readonly chainId: number;
+
+  constructor(chainId: number, network: Network) {
+    super(getRpcAttemptOrder(chainId)[0]?.url ?? getArcPrimaryUrl(), network, {
+      batchMaxCount: 20,
+      batchStallTime: 10,
+      staticNetwork: network,
+    });
+    this.chainId = chainId;
+  }
+
+  async _send(payload: Array<JsonRpcPayload>): Promise<Array<JsonRpcResult>> {
+    const attempts = getRpcAttemptOrder(this.chainId);
+    let lastError: unknown = null;
+
+    for (const endpoint of attempts) {
+      try {
+        return await fetchJsonRpc(endpoint, payload);
+      } catch (error) {
+        lastError = error;
+        registerAlchemyFailure(this.chainId, endpoint.role);
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("RPC request failed");
+  }
+}
+
+export const FALLBACK_RPC = PUBLIC_ARC_RPC;
+export { RPC_CONFIG };
+
+export function getRpcUrl(chainId: number): string {
+  switch (chainId) {
+    case ARC_TESTNET_CHAIN_ID:
+      return getArcPrimaryUrl();
+    default:
+      return getArcPrimaryUrl();
+  }
+}
+
+export function getRpcUrls(chainId: number): string[] {
+  return getConfiguredRpcEndpoints(chainId).map((endpoint) => endpoint.url);
+}
+
+export function getManagedRpcAttempts(chainId: number): ManagedRpcAttempt[] {
+  return getRpcAttemptOrder(chainId).map(({ timeoutMs, url }) => ({ timeoutMs, url }));
+}
+
+export function getRpcTimeoutMs(url: string): number {
+  return url === PUBLIC_ARC_RPC ? PUBLIC_TIMEOUT_MS : ALCHEMY_TIMEOUT_MS;
+}
+
+export function getPublicRpcUrl(chainId: number): string {
+  switch (chainId) {
+    case ARC_TESTNET_CHAIN_ID:
+      return PUBLIC_ARC_RPC;
+    default:
+      return getArcPrimaryUrl();
+  }
+}
+
+export function reportRpcFailure(chainId: number, url: string) {
+  const endpoint = getConfiguredRpcEndpoints(chainId).find((candidate) => candidate.url === url);
+  if (!endpoint) return;
+  registerAlchemyFailure(chainId, endpoint.role);
+}
+
+export function createAlchemyProvider(chainId: number): JsonRpcProvider {
+  return new BatchRpcProvider(chainId, getNetwork(chainId));
+}
+
+export async function warmRpcProvider(chainId: number): Promise<void> {
+  const provider = createAlchemyProvider(chainId);
+  await provider.getBlockNumber();
 }

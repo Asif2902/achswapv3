@@ -4,38 +4,12 @@ import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
-import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
+import { fetchCommunityTokens, getCachedCommunityTokens, type CommunityToken } from "@/data/tokens";
 
 const MAX_RENDER_ITEMS_PER_SECTION = 80;
 const INITIAL_RENDER_ITEMS_PER_SECTION = 8;
 const MAX_RENDER_COMMUNITY_ITEMS = 30;
 const BALANCE_QUERY_BATCH_SIZE = 12;
-const communityTokenCache = new Map<number, CommunityToken[]>();
-const communityTokenInFlight = new Map<number, Promise<CommunityToken[]>>();
-
-function loadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
-  const cached = communityTokenCache.get(chainId);
-  if (cached) {
-    return Promise.resolve(cached);
-  }
-
-  const inFlight = communityTokenInFlight.get(chainId);
-  if (inFlight) {
-    return inFlight;
-  }
-
-  const request = fetchCommunityTokens(chainId)
-    .then((rows) => {
-      communityTokenCache.set(chainId, rows);
-      return rows;
-    })
-    .finally(() => {
-      communityTokenInFlight.delete(chainId);
-    });
-
-  communityTokenInFlight.set(chainId, request);
-  return request;
-}
 
 interface TokenSelectorProps {
   open: boolean;
@@ -110,7 +84,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       // Fetch community tokens
       if (chainId && !rwaOnly) {
         // Keep open interaction lightweight; hydrate community after panel is visible
-        setCommunityTokens([]);
+        setCommunityTokens(getCachedCommunityTokens(chainId) ?? []);
         setLoadingCommunity(false);
       } else if (rwaOnly) {
         setCommunityTokens([]);
@@ -149,6 +123,15 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     if (communityTokens.length > 0) return;
     if (communityFetchStartedRef.current) return;
 
+    const cached = getCachedCommunityTokens(chainId);
+    if (cached) {
+      startTransition(() => {
+        setCommunityTokens(cached);
+      });
+      setLoadingCommunity(false);
+      return;
+    }
+
     communityFetchStartedRef.current = true;
 
     let loadTimer: number | null = null;
@@ -158,13 +141,12 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       if (cancelled) return;
 
       setLoadingCommunity(true);
-      loadCommunityTokens(chainId)
+      fetchCommunityTokens(chainId)
         .then((rows) => {
           if (!cancelled) {
             startTransition(() => {
               setCommunityTokens(rows);
             });
-
           }
         })
         .finally(() => {

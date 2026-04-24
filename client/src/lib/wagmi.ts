@@ -7,10 +7,11 @@ import {
   walletConnectWallet,
 } from '@rainbow-me/rainbowkit/wallets';
 import { createConfig, http } from 'wagmi';
-import { defineChain } from 'viem';
-import { RPC_CONFIG } from './config';
+import { createTransport, defineChain } from 'viem';
+import { getManagedRpcAttempts, getRpcUrl, getRpcUrls, reportRpcFailure } from './config';
 
-const ARC_WALLET_ADD_RPC = RPC_CONFIG.arcTestnet;
+const ARC_TESTNET_CHAIN_ID = 5042002;
+const ARC_WALLET_ADD_RPC = getRpcUrl(ARC_TESTNET_CHAIN_ID);
 
 // Define ARC Testnet chain
 export const arcTestnet = defineChain({
@@ -54,10 +55,43 @@ const connectors = connectorsForWallets(
   { appName: 'Achswap', projectId }
 );
 
+function createManagedHttpTransport(chainId: number) {
+  return ((params) =>
+    createTransport(
+      {
+        key: 'managedHttp',
+        name: 'Managed HTTP',
+        retryCount: 0,
+        type: 'managedHttp',
+        async request({ method, params: rpcParams }) {
+          let lastError: unknown = null;
+
+          for (const attempt of getManagedRpcAttempts(chainId)) {
+            const transport = http(attempt.url, {
+              batch: { batchSize: 20, wait: 10 },
+              retryCount: 0,
+              timeout: attempt.timeoutMs,
+            })(params);
+
+            try {
+              return await transport.request({ method, params: rpcParams } as any);
+            } catch (error) {
+              lastError = error;
+              reportRpcFailure(chainId, attempt.url);
+            }
+          }
+
+          throw lastError instanceof Error ? lastError : new Error('RPC transport failed');
+        },
+      },
+      { urls: getRpcUrls(chainId) },
+    )) as any;
+}
+
 export const config = createConfig({
   connectors,
   chains: supportedChains as any,
   transports: {
-    [arcTestnet.id]: http(),
+    [arcTestnet.id]: createManagedHttpTransport(ARC_TESTNET_CHAIN_ID),
   },
 });
