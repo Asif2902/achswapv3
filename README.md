@@ -66,6 +66,7 @@ Set these in **Vercel Project Settings -> Environment Variables**:
 - A transfer is persisted after burn confirmation and then updated across attestation/mint states.
 - Completion is verified on-chain before deletion (nonce consumed / mint verified).
 - If Redis/env is unavailable, the handler falls back to process memory and the client still keeps a local fallback cache.
+- On Vercel/serverless, process memory is not durable across invocations, so the browser now treats Redis as the only trusted shared bridge store and falls back to local storage otherwise.
 - Rate limiting is Redis-backed when Upstash env vars are configured; otherwise it falls back to per-instance in-memory limits.
 
 Important notes:

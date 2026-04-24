@@ -48,6 +48,20 @@ function canonicalAddress(value: string): string {
   return String(value || "").trim().toLowerCase();
 }
 
+function hasTrustedBridgeStorage(storage: unknown): boolean {
+  const normalized = String(storage || "").trim().toLowerCase();
+  if (normalized === "redis") return true;
+
+  // Local dev commonly runs a single long-lived process, so the memory
+  // fallback is usable there. On serverless deployments it is not durable.
+  if (normalized === "memory" && typeof window !== "undefined") {
+    const hostname = window.location.hostname;
+    return hostname === "localhost" || hostname === "127.0.0.1";
+  }
+
+  return false;
+}
+
 function getTransferStatusRank(status: string | null | undefined): number {
   switch (String(status || "").toLowerCase()) {
     case "attesting":
@@ -271,7 +285,9 @@ export async function isBridgeTransferApiAvailable(userAddress: string): Promise
     const res = await fetch(`/api/bridge-transfers?probe=1&wallet=${encodeURIComponent(wallet)}`, {
       signal: AbortSignal.timeout(4000),
     });
-    return res.ok;
+    if (!res.ok) return false;
+    const data = await parseResponseJson(res);
+    return hasTrustedBridgeStorage(data?.storage);
   } catch {
     return false;
   }
@@ -380,11 +396,13 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
     if (res.ok) {
       try {
         const data = await parseResponseJson(res);
-        if (data && Array.isArray(data.transfers)) {
+        if (hasTrustedBridgeStorage(data?.storage) && data && Array.isArray(data.transfers)) {
           serverTransfers = data.transfers.map((t: any) => normalizeTransfer(t));
+        } else {
+          serverFailed = true;
         }
       } catch {
-        serverTransfers = [];
+        serverFailed = true;
       }
     } else {
       serverFailed = true;
