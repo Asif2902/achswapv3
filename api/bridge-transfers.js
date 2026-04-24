@@ -1203,7 +1203,7 @@ async function requireSignedOwnership(req, transfer) {
 async function handleGet(req, res) {
   if (isTruthyFlag(req.query?.probe)) {
     const storageStatus = await getStorageStatus();
-    return res.status(200).json({ ok: true, ...storageStatus });
+    return res.status(200).json({ ok: true, storage: storageStatus.storage });
   }
 
   const wallet = canonicalAddress(req.query?.wallet || "");
@@ -1215,7 +1215,7 @@ async function handleGet(req, res) {
 
   const hashes = await listWalletHashes(wallet);
   if (!hashes.length) {
-    return res.status(200).json({ transfers: [], ...storageStatus });
+    return res.status(200).json({ transfers: [], storage: storageStatus.storage });
   }
 
   const entries = await getManyTransferRecords(hashes);
@@ -1312,7 +1312,7 @@ async function handleGet(req, res) {
 
   const active = allTransfers.slice(0, MAX_TRANSFERS_PER_WALLET).map(sanitizeForResponse);
 
-  return res.status(200).json({ transfers: active, ...storageStatus });
+  return res.status(200).json({ transfers: active, storage: storageStatus.storage });
 }
 
 async function handleUpsertBurn(req, res) {

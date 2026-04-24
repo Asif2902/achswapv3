@@ -11,6 +11,42 @@ export interface CommunityToken extends Token {
 const COMMUNITY_CACHE_TTL = 5 * 60 * 1000; // 5 min
 const communityCache = new Map<number, { tokens: CommunityToken[]; ts: number }>();
 const communityInFlight = new Map<number, Promise<CommunityToken[]>>();
+const COMMUNITY_CACHE_STORAGE_PREFIX = "achswap_community_tokens_v1:";
+
+function getCommunityCacheStorageKey(chainId: number): string {
+  return `${COMMUNITY_CACHE_STORAGE_PREFIX}${chainId}`;
+}
+
+function readPersistedCommunityCache(chainId: number): CommunityToken[] | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.localStorage.getItem(getCommunityCacheStorageKey(chainId));
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as { tokens?: CommunityToken[]; ts?: number };
+    if (!parsed || !Array.isArray(parsed.tokens) || !Number.isFinite(parsed.ts)) return null;
+    if (Date.now() - Number(parsed.ts) >= COMMUNITY_CACHE_TTL) return null;
+
+    communityCache.set(chainId, { tokens: parsed.tokens, ts: Number(parsed.ts) });
+    return parsed.tokens;
+  } catch {
+    return null;
+  }
+}
+
+function persistCommunityCache(chainId: number, tokens: CommunityToken[]): void {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(
+      getCommunityCacheStorageKey(chainId),
+      JSON.stringify({ tokens, ts: Date.now() }),
+    );
+  } catch {
+    // Ignore storage quota and serialization issues.
+  }
+}
 
 // Ensure gateway URL is consistent with LaunchToken
 function getGatewayUrlFromCid(cidOrUrl: string): string {
@@ -33,6 +69,11 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
   const cached = communityCache.get(chainId);
   if (cached && Date.now() - cached.ts < COMMUNITY_CACHE_TTL) {
     return cached.tokens;
+  }
+
+  const persisted = readPersistedCommunityCache(chainId);
+  if (persisted) {
+    return persisted;
   }
 
   const inFlight = communityInFlight.get(chainId);
@@ -69,6 +110,7 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
     }
 
     communityCache.set(chainId, { tokens: result, ts: Date.now() });
+    persistCommunityCache(chainId, result);
     return result;
   })()
     .catch(() => [])
@@ -82,9 +124,11 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
 
 export function getCachedCommunityTokens(chainId: number): CommunityToken[] | null {
   const cached = communityCache.get(chainId);
-  if (!cached) return null;
-  if (Date.now() - cached.ts >= COMMUNITY_CACHE_TTL) return null;
-  return cached.tokens;
+  if (cached && Date.now() - cached.ts < COMMUNITY_CACHE_TTL) {
+    return cached.tokens;
+  }
+
+  return readPersistedCommunityCache(chainId);
 }
 
 export function preloadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
