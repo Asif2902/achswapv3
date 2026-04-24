@@ -34,6 +34,7 @@ const TOKEN_MESSENGER_V2_INTERFACE = new Interface([
   "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)",
   "event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)",
 ]);
+const MESSAGE_TRANSMITTER_V2_INTERFACE = new Interface(MESSAGE_TRANSMITTER_V2_ABI);
 
 const PRIORITY_FEE_PER_GAS = BigInt(10e9);
 
@@ -71,12 +72,13 @@ function extractCCTPMessageNonce(message: string): `0x${string}` | null {
 async function isTransferClaimedOnDestination(
   dstChain: CCTPChain,
   attestationMessage: string,
+  options?: { runner?: BrowserProvider },
 ): Promise<boolean> {
   const messageNonce = extractCCTPMessageNonce(attestationMessage);
   if (!messageNonce) return false;
 
   try {
-    const provider = await getWorkingProvider(dstChain);
+    const provider = options?.runner ?? await getWorkingProvider(dstChain);
     const messageTransmitter = new Contract(
       dstChain.messageTransmitterV2,
       MESSAGE_TRANSMITTER_V2_ABI,
@@ -95,6 +97,79 @@ async function isTransferClaimedOnDestination(
     console.warn("Destination claimed-state check failed", err);
     return false;
   }
+}
+
+async function prepareMintTransaction(
+  dstChain: CCTPChain,
+  signerAddress: string,
+  attestation: { message: string; attestation: string },
+): Promise<{ data: `0x${string}`; gasLimit: bigint }> {
+  const provider = await getWorkingProvider(dstChain);
+  const data = MESSAGE_TRANSMITTER_V2_INTERFACE.encodeFunctionData("receiveMessage", [
+    attestation.message,
+    attestation.attestation,
+  ]) as `0x${string}`;
+
+  const txRequest = {
+    from: signerAddress,
+    to: dstChain.messageTransmitterV2,
+    data,
+  };
+
+  // Preflight through a public RPC so we get clearer errors than wallet
+  // providers usually return for failed gas estimation.
+  await provider.call(txRequest);
+
+  const estimatedGas = await provider.estimateGas(txRequest);
+  const gasLimit = estimatedGas * 120n / 100n;
+  return { data, gasLimit };
+}
+
+async function resolveMintErrorMessage(
+  dstChain: CCTPChain,
+  signerAddress: string,
+  attestation: { message: string; attestation: string },
+  originalError: unknown,
+): Promise<string> {
+  const originalText = extractErrorText(originalError).trim();
+  const normalizedOriginal = originalText.toLowerCase();
+
+  if (originalText && !normalizedOriginal.includes("missing revert data")) {
+    return originalText;
+  }
+
+  try {
+    await prepareMintTransaction(dstChain, signerAddress, attestation);
+  } catch (simulationError) {
+    const simulationText = extractErrorText(simulationError).trim();
+    if (simulationText) return simulationText;
+  }
+
+  if (originalText) return originalText;
+  return "Mint transaction could not be estimated. The message may already be claimed or not yet mintable on the destination chain.";
+}
+
+async function detectClaimedAfterMintFailure(
+  dstChain: CCTPChain,
+  attestationMessage: string,
+  walletProvider?: BrowserProvider,
+): Promise<boolean> {
+  const checkClaimed = async (): Promise<boolean> => {
+    if (await isTransferClaimedOnDestination(dstChain, attestationMessage)) {
+      return true;
+    }
+
+    if (walletProvider) {
+      return isTransferClaimedOnDestination(dstChain, attestationMessage, { runner: walletProvider });
+    }
+
+    return false;
+  };
+
+  if (await checkClaimed()) return true;
+
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  return checkClaimed();
 }
 
 function extractErrorCode(error: unknown): number | string | null {
@@ -1049,15 +1124,14 @@ export default function Bridge() {
 
       const destProvider = new BrowserProvider(window.ethereum);
       const destSigner = await destProvider.getSigner();
+      const signerAddress = await destSigner.getAddress();
 
       toast({ title: "Minting USDC...", description: `On ${dstChain.name}` });
-      const messageTransmitter = new Contract(
-        dstChain.messageTransmitterV2,
-        MESSAGE_TRANSMITTER_V2_ABI,
-        destSigner
+      const nonceAlreadyUsed = await detectClaimedAfterMintFailure(
+        dstChain,
+        attestation.message,
+        destProvider,
       );
-
-      const nonceAlreadyUsed = await isTransferClaimedOnDestination(dstChain, attestation.message);
       if (nonceAlreadyUsed) {
         await updateTransferStatus(transferId, {
           status: "complete",
@@ -1077,13 +1151,13 @@ export default function Bridge() {
         return;
       }
 
-      const mintTx = await messageTransmitter.receiveMessage(
-        attestation.message,
-        attestation.attestation,
-        {
-          maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS,
-        }
-      );
+      const { data, gasLimit } = await prepareMintTransaction(dstChain, signerAddress, attestation);
+      const mintTx = await destSigner.sendTransaction({
+        to: dstChain.messageTransmitterV2,
+        data,
+        gasLimit,
+        maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS,
+      });
       const mintReceipt = await mintTx.wait();
 
       if (!mintReceipt || mintReceipt.status !== 1) {
@@ -1113,30 +1187,33 @@ export default function Bridge() {
       fetchBalance();
 
     } catch (mintErr: any) {
-      if (isAlreadyClaimedError(mintErr)) {
-        const claimedOnDestination = await isTransferClaimedOnDestination(dstChain, attestation.message);
-        if (claimedOnDestination) {
-          await updateTransferStatus(transferId, {
-            status: "complete",
-            attestation,
-            error: undefined,
-          });
-          setTransfer(prev => ({
-            ...prev,
-            step: "complete",
-            error: null,
-          }));
-          toast({
-            title: "Already Claimed",
-            description: "This transfer was already claimed on the destination chain.",
-          });
-          fetchBalance();
-          return;
-        }
+      const claimedOnDestination = await detectClaimedAfterMintFailure(
+        dstChain,
+        attestation.message,
+        new BrowserProvider(window.ethereum),
+      );
+      if (claimedOnDestination || isAlreadyClaimedError(mintErr)) {
+        await updateTransferStatus(transferId, {
+          status: "complete",
+          attestation,
+          error: undefined,
+        });
+        setTransfer(prev => ({
+          ...prev,
+          step: "complete",
+          error: null,
+        }));
+        toast({
+          title: "Already Claimed",
+          description: "This transfer was already claimed on the destination chain.",
+        });
+        fetchBalance();
+        return;
       }
 
       // Mint failed or was cancelled — keep transfer resumable with attestation intact
-      const msg = mintErr?.message || mintErr?.reason || "Mint failed";
+      const signerAddress = address || "";
+      const msg = await resolveMintErrorMessage(dstChain, signerAddress, attestation, mintErr);
       await updateTransferStatus(transferId, { status: "ready_to_mint", attestation, error: msg });
       setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({
