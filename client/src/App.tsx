@@ -34,7 +34,6 @@ function Router() {
 }
 
 const BOOTSTRAP_MIN_VISIBLE_MS = 420;
-const BOOTSTRAP_MAX_VISIBLE_MS = 1400;
 
 function AppBootstrapOverlay({ phase, visible }: { phase: AppBootstrapPhase; visible: boolean }) {
   const copy: Record<AppBootstrapPhase, { kicker: string; title: string }> = {
@@ -43,8 +42,8 @@ function AppBootstrapOverlay({ phase, visible }: { phase: AppBootstrapPhase; vis
       title: "Checking the fastest live endpoint",
     },
     community: {
-      kicker: "Background warmup",
-      title: "Finishing non-blocking cache prep",
+      kicker: "Warm cache",
+      title: "Loading community tokens and swap data",
     },
     ready: {
       kicker: "Ready",
@@ -114,7 +113,7 @@ function AppBootstrapOverlay({ phase, visible }: { phase: AppBootstrapPhase; vis
           {copy[phase].title}
         </h2>
         <p className="mt-2 text-sm leading-6 text-white/45">
-          The first screen is being prepared now. Larger token and RPC cache warmups continue in the background after the app is interactive.
+          Backup RPC and token caches are being primed so balances, liquidity views, and swap inputs open warm.
         </p>
 
         <div className="mt-6 flex gap-2">
@@ -145,15 +144,6 @@ function App() {
     let cancelled = false;
     const startedAt = Date.now();
     let hideTimer: number | null = null;
-    let hardStopTimer: number | null = null;
-
-    if (initiallyVisible) {
-      hardStopTimer = window.setTimeout(() => {
-        if (!cancelled) {
-          setBootVisible(false);
-        }
-      }, BOOTSTRAP_MAX_VISIBLE_MS);
-    }
 
     bootstrapAppReadiness((phase) => {
       if (!cancelled) {
@@ -161,9 +151,6 @@ function App() {
       }
     }).finally(() => {
       if (cancelled) return;
-      if (hardStopTimer !== null) {
-        window.clearTimeout(hardStopTimer);
-      }
 
       const elapsed = Date.now() - startedAt;
       const remainingMinVisible = initiallyVisible
@@ -181,9 +168,6 @@ function App() {
       cancelled = true;
       if (hideTimer !== null) {
         window.clearTimeout(hideTimer);
-      }
-      if (hardStopTimer !== null) {
-        window.clearTimeout(hardStopTimer);
       }
     };
   }, [initiallyVisible]);
