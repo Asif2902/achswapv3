@@ -28,6 +28,7 @@ const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
 const RPC_PROBE_TIMEOUT_MS = 4_500;
 const RPC_CACHE_REVALIDATE_MS = 30_000;
 const CLAIM_RECONCILE_CACHE_TTL_MS = 5_000;
+const REDIS_HEALTH_CACHE_TTL_MS = 10_000;
 
 const memoryRateLimitByKey = new Map();
 let memoryRateLimitRequestCount = 0;
@@ -35,6 +36,7 @@ let memoryRateLimitRequestCount = 0;
 const providerCacheByChainId = new Map();
 const providerInFlightByChainId = new Map();
 const claimReconcileCacheByHash = new Map();
+let redisHealthCache = null;
 
 const MEMORY_TRANSFER_PRUNE_INTERVAL = 64;
 let memoryTransferOperationCount = 0;
@@ -172,6 +174,15 @@ class ValidationError extends Error {
   constructor(message, status = 400) {
     super(message);
     this.name = "ValidationError";
+    this.status = status;
+    this.statusCode = status;
+  }
+}
+
+class StorageError extends Error {
+  constructor(message, status = 503) {
+    super(message);
+    this.name = "StorageError";
     this.status = status;
     this.statusCode = status;
   }
@@ -657,6 +668,55 @@ async function upstashPipeline(commands) {
   });
 }
 
+async function isRedisHealthy(force = false) {
+  if (!HAS_REDIS) return false;
+
+  const now = Date.now();
+  if (
+    !force
+    && redisHealthCache
+    && Number.isFinite(redisHealthCache.checkedAt)
+    && now - redisHealthCache.checkedAt < REDIS_HEALTH_CACHE_TTL_MS
+  ) {
+    return Boolean(redisHealthCache.ok);
+  }
+
+  try {
+    const [result] = await upstashPipeline([["PING"]]);
+    const ok = String(result || "").toUpperCase() === "PONG";
+    redisHealthCache = { ok, checkedAt: now };
+    return ok;
+  } catch (err) {
+    console.error("[bridge] Redis health check failed:", err);
+    redisHealthCache = { ok: false, checkedAt: now };
+    return false;
+  }
+}
+
+function getRedisHost() {
+  if (!UPSTASH_REDIS_REST_URL) return null;
+
+  try {
+    return new URL(UPSTASH_REDIS_REST_URL).host || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getStorageStatus() {
+  const redisConfigured = HAS_REDIS;
+  const redisHealthy = redisConfigured ? await isRedisHealthy() : false;
+
+  return {
+    storage: redisHealthy ? "redis" : "memory",
+    redisConfigured,
+    redisHealthy,
+    redisHost: getRedisHost(),
+    hasRedisUrl: Boolean(UPSTASH_REDIS_REST_URL),
+    hasRedisToken: Boolean(UPSTASH_REDIS_REST_TOKEN),
+  };
+}
+
 function setMemoryTransfer(record) {
   const now = Date.now();
   const expiresAt = Number(record?.expiresAt);
@@ -721,10 +781,13 @@ async function saveTransferRecord(record) {
         ["SET", txKey(recordWithTimestamp.burnTxHash), JSON.stringify(recordWithTimestamp), "EX", String(TRANSFER_TTL_SECONDS)],
         ["ZADD", walletKey(recordWithTimestamp.userAddress), String(recordWithTimestamp.timestamp), recordWithTimestamp.burnTxHash],
       ]);
+      redisHealthCache = { ok: true, checkedAt: Date.now() };
       console.log(`[bridge] Saved ${recordWithTimestamp.burnTxHash}:`, result);
       return;
     } catch (e) {
       console.error("[bridge] Redis save error:", e);
+      redisHealthCache = { ok: false, checkedAt: Date.now() };
+      throw new StorageError("Bridge persistence unavailable");
     }
   }
 
@@ -1062,6 +1125,7 @@ function sanitizeForResponse(transfer) {
     status: transfer.status,
     mintTxHash: transfer.mintTxHash,
     error: transfer.error,
+    updatedAt: transfer.updatedAt,
   };
 }
 
@@ -1138,7 +1202,8 @@ async function requireSignedOwnership(req, transfer) {
 
 async function handleGet(req, res) {
   if (isTruthyFlag(req.query?.probe)) {
-    return res.status(200).json({ ok: true, storage: HAS_REDIS ? "redis" : "memory" });
+    const storageStatus = await getStorageStatus();
+    return res.status(200).json({ ok: true, ...storageStatus });
   }
 
   const wallet = canonicalAddress(req.query?.wallet || "");
@@ -1146,9 +1211,11 @@ async function handleGet(req, res) {
     return res.status(400).json({ error: "Invalid wallet" });
   }
 
+  const storageStatus = await getStorageStatus();
+
   const hashes = await listWalletHashes(wallet);
   if (!hashes.length) {
-    return res.status(200).json({ transfers: [], storage: HAS_REDIS ? "redis" : "memory" });
+    return res.status(200).json({ transfers: [], ...storageStatus });
   }
 
   const entries = await getManyTransferRecords(hashes);
@@ -1182,7 +1249,19 @@ async function handleGet(req, res) {
     .slice(0, CLAIM_RECONCILE_LIMIT);
 
   const reconcileChecks = reconcileCandidates.map(async (transfer) => {
-    return { transfer, claimed: false };
+    const cachedClaimed = getCachedClaimReconcileResult(transfer.burnTxHash);
+    if (cachedClaimed !== null) {
+      return { transfer, claimed: cachedClaimed };
+    }
+
+    try {
+      const claimed = await isTransferClaimed(transfer);
+      setCachedClaimReconcileResult(transfer.burnTxHash, claimed);
+      return { transfer, claimed };
+    } catch (err) {
+      console.warn(`[bridge] Claim reconcile failed for ${transfer.burnTxHash}:`, err);
+      return { transfer, claimed: false };
+    }
   });
 
   const reconcileResults = await Promise.allSettled(reconcileChecks);
@@ -1208,18 +1287,32 @@ async function handleGet(req, res) {
     );
   }
 
+  const reconciledByHash = new Map(
+    claimedTransfers.map((transfer) => [
+      transfer.burnTxHash,
+      {
+        ...transfer,
+        status: "complete",
+        error: undefined,
+        updatedAt: Date.now(),
+        expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
+      },
+    ]),
+  );
+
   const staleHashes = [...staleHashSet].filter(Boolean);
   if (staleHashes.length) {
     await removeWalletIndexEntries(wallet, staleHashes);
   }
 
   const allTransfers = transfers
+    .map((transfer) => reconciledByHash.get(transfer.burnTxHash) || transfer)
     .filter((t) => !staleHashSet.has(t.burnTxHash) && !t.hiddenAt)
     .sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
 
   const active = allTransfers.slice(0, MAX_TRANSFERS_PER_WALLET).map(sanitizeForResponse);
 
-  return res.status(200).json({ transfers: active, storage: HAS_REDIS ? "redis" : "memory" });
+  return res.status(200).json({ transfers: active, ...storageStatus });
 }
 
 async function handleUpsertBurn(req, res) {
