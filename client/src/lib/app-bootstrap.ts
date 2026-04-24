@@ -4,7 +4,7 @@ import { warmRpcProvider } from "@/lib/config";
 const APP_BOOTSTRAP_SESSION_KEY = "achswap_app_bootstrap_v1";
 const ARC_TESTNET_CHAIN_ID = 5042002;
 const BOOTSTRAP_RPC_TIMEOUT_MS = 900;
-const BACKGROUND_COMMUNITY_PRELOAD_DELAY_MS = 1200;
+const COMMUNITY_PRELOAD_START_DELAY_MS = 60;
 
 export type AppBootstrapPhase = "rpc" | "community" | "ready";
 
@@ -41,18 +41,7 @@ function scheduleCommunityWarmup() {
     void preloadCommunityTokens(ARC_TESTNET_CHAIN_ID).catch(() => undefined);
   };
 
-  const requestIdle = (window as Window & {
-    requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-  }).requestIdleCallback;
-
-  if (typeof requestIdle === "function") {
-    window.setTimeout(() => {
-      requestIdle(run, { timeout: 1500 });
-    }, BACKGROUND_COMMUNITY_PRELOAD_DELAY_MS);
-    return;
-  }
-
-  window.setTimeout(run, BACKGROUND_COMMUNITY_PRELOAD_DELAY_MS);
+  window.setTimeout(run, COMMUNITY_PRELOAD_START_DELAY_MS);
 }
 
 export async function bootstrapAppReadiness(
@@ -64,6 +53,7 @@ export async function bootstrapAppReadiness(
 
   bootstrapPromise = (async () => {
     onPhase?.("rpc");
+    scheduleCommunityWarmup();
     await Promise.race([
       warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch(() => undefined),
       sleep(BOOTSTRAP_RPC_TIMEOUT_MS),
@@ -71,7 +61,6 @@ export async function bootstrapAppReadiness(
 
     onPhase?.("ready");
     markAppBootstrapComplete();
-    scheduleCommunityWarmup();
   })();
 
   return bootstrapPromise;
