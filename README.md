@@ -267,7 +267,7 @@ export const wrappedTokenMap: Record<number, Record<string, string>> = {
 
 ### Pool Not Found
 - V3 pools must be initialized before adding liquidity
-- Use Pool Health Checker to diagnose issues
+- Use Pool Health Checker to diagnose issue
 
 ---
 
