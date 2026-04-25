@@ -1187,10 +1187,18 @@ export default function Bridge() {
       fetchBalance();
 
     } catch (mintErr: any) {
+      let walletProvider = null;
+      if (window.ethereum) {
+        const provider = new BrowserProvider(window.ethereum);
+        const network = await provider.getNetwork();
+        if (Number(network.chainId) === dstChain.chainId) {
+          walletProvider = provider;
+        }
+      }
       const claimedOnDestination = await detectClaimedAfterMintFailure(
         dstChain,
         attestation.message,
-        new BrowserProvider(window.ethereum),
+        walletProvider,
       );
       if (claimedOnDestination || isAlreadyClaimedError(mintErr)) {
         await updateTransferStatus(transferId, {
@@ -1419,7 +1427,7 @@ export default function Bridge() {
         throw new Error("Burn transaction destination chain is not supported");
       }
 
-      let resolvedDestChain: CCTPChain | undefined = decodedDestinationChain;
+       let resolvedDestChain = decodedDestinationChain;
       let attestation: { message: string; attestation: string } | undefined;
 
       try {
@@ -1449,7 +1457,9 @@ export default function Bridge() {
               Number.isFinite(apiDestinationDomain) &&
               Number(apiDestinationDomain) !== decodedDestinationDomain
             ) {
-              throw new Error("Attestation destination does not match burn transaction");
+              const errorMsg = `Destination domain mismatch: expected ${decodedDestinationDomain}, got ${apiDestinationDomain}`;
+              setTransfer(prev => ({ ...prev, step: "error", error: errorMsg }));
+              throw new Error(errorMsg);
             }
 
             if (msg.status === "complete" && msg.attestation) {
@@ -1457,15 +1467,13 @@ export default function Bridge() {
                 message: msg.message,
                 attestation: msg.attestation,
               };
-              
-              // Try to get amount from the message if available
-              if (msg.message && amount === "0") {
-                try {
-                  // Message format: contains amount at specific offset
-                  // Skip if already has amount
-                } catch { /* ignore */ }
-              }
-            }
+               
+               // Extract amount from message if missing
+               if (msg.message && amount === "0") {
+                 const match = msg.message.match(/amount[:\s]+(\d+)/i);
+                 if (match) amount = match[1];
+               }
+             }
           }
         }
       } catch (apiErr) {

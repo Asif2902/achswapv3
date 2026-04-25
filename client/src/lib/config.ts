@@ -25,14 +25,14 @@ export interface ManagedRpcAttempt {
 
 interface RpcFailoverState {
   alchemyFailureCount: number;
-  permanentPublic: boolean;
+  permanentPublicUntil: number | null; // Timestamp when permanent public mode expires, null if inactive
   preferredRole: RpcRole;
   updatedAt: number;
 }
 
 const DEFAULT_FAILOVER_STATE: RpcFailoverState = {
   alchemyFailureCount: 0,
-  permanentPublic: false,
+  permanentPublicUntil: null,
   preferredRole: "primary",
   updatedAt: 0,
 };
@@ -163,24 +163,30 @@ function getNextPreferredRole(chainId: number, currentRole: RpcRole): RpcRole {
   return "public";
 }
 
+const COOLDOWN_MS = 5 * 60 * 1000; // 5 minute cooldown for permanent public mode
+const DEDUPE_WINDOW_MS = 1000; // 1 second dedupe window for failure registration
+const FAILURE_THRESHOLD = 2; // Consecutive failures before registering
+const endpointFailureMap = new Map<string, { count: number, lastRegisteredAt: number }>();
+
 function registerAlchemyFailure(chainId: number, role: RpcRole) {
   if (role === "public") return;
 
   const current = getFailoverState(chainId);
   const nextCount = current.alchemyFailureCount + 1;
+  const now = Date.now();
   const nextState: RpcFailoverState =
     nextCount >= MAX_ALCHEMY_FAILURES
       ? {
           alchemyFailureCount: nextCount,
-          permanentPublic: true,
+          permanentPublicUntil: now + COOLDOWN_MS,
           preferredRole: "public",
-          updatedAt: Date.now(),
+          updatedAt: now,
         }
       : {
           alchemyFailureCount: nextCount,
-          permanentPublic: false,
+          permanentPublicUntil: null,
           preferredRole: getNextPreferredRole(chainId, role),
-          updatedAt: Date.now(),
+          updatedAt: now,
         };
 
   saveFailoverState(chainId, nextState);
@@ -191,8 +197,15 @@ function getRpcAttemptOrder(chainId: number): RpcEndpoint[] {
   const publicEndpoint = getEndpointByRole(endpoints, "public");
   const state = getFailoverState(chainId);
 
+  // Check if permanent public cooldown has expired
+  if (state.permanentPublicUntil && Date.now() > state.permanentPublicUntil) {
+    const updatedState = { ...state, permanentPublicUntil: null, alchemyFailureCount: 0 };
+    saveFailoverState(chainId, updatedState);
+    state.permanentPublicUntil = null;
+  }
+
   if (!publicEndpoint) return endpoints;
-  if (state.permanentPublic) return [publicEndpoint];
+  if (state.permanentPublicUntil) return [publicEndpoint];
 
   const preferred =
     getEndpointByRole(endpoints, state.preferredRole) ??
@@ -307,10 +320,29 @@ class BatchRpcProvider extends JsonRpcProvider {
 
     for (const endpoint of attempts) {
       try {
-        return await fetchJsonRpc(endpoint, payload);
+        const result = await fetchJsonRpc(endpoint, payload);
+        // Reset failure count on success
+        const entry = endpointFailureMap.get(endpoint.url);
+        if (entry) {
+          entry.count = 0;
+          entry.lastRegisteredAt = 0;
+        }
+        return result;
       } catch (error) {
         lastError = error;
-        registerAlchemyFailure(this.chainId, endpoint.role);
+        // Track consecutive failures per endpoint
+        const now = Date.now();
+        let entry = endpointFailureMap.get(endpoint.url);
+        if (!entry) {
+          entry = { count: 0, lastRegisteredAt: 0 };
+          endpointFailureMap.set(endpoint.url, entry);
+        }
+        entry.count++;
+        // Only register if threshold crossed or dedupe window passed
+        if (entry.count >= FAILURE_THRESHOLD || now - entry.lastRegisteredAt > DEDUPE_WINDOW_MS) {
+          registerAlchemyFailure(this.chainId, endpoint.role);
+          entry.lastRegisteredAt = now;
+        }
       }
     }
 

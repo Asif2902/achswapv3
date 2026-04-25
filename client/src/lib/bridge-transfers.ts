@@ -95,11 +95,39 @@ function dispatchTransfersUpdated(): void {
 
 function getFallbackTransfers(): PendingBridgeTransfer[] {
   try {
-    const raw = localStorage.getItem(FALLBACK_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as PendingBridgeTransfer[];
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeTransfer);
+    const LEGACY_KEY = "achswap_bridge_pending_transfers";
+    const legacyRaw = localStorage.getItem(LEGACY_KEY);
+    const currentRaw = localStorage.getItem(FALLBACK_STORAGE_KEY);
+    let merged: PendingBridgeTransfer[] = [];
+
+    // Load legacy entries first
+    if (legacyRaw) {
+      const legacyParsed = JSON.parse(legacyRaw) as PendingBridgeTransfer[];
+      if (Array.isArray(legacyParsed)) merged = legacyParsed.map(normalizeTransfer);
+    }
+
+    // Merge with current fallback entries, dedupe by id
+    if (currentRaw) {
+      const currentParsed = JSON.parse(currentRaw) as PendingBridgeTransfer[];
+      if (Array.isArray(currentParsed)) {
+        const ids = new Set(merged.map(t => t.id));
+        currentParsed.forEach(t => {
+          const normalized = normalizeTransfer(t);
+          if (!ids.has(normalized.id)) {
+            merged.push(normalized);
+            ids.add(normalized.id);
+          }
+        });
+      }
+    }
+
+    // Save merged back to fallback key and remove legacy
+    if (legacyRaw || currentRaw) {
+      localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(merged.map(normalizeTransfer)));
+      if (legacyRaw) localStorage.removeItem(LEGACY_KEY);
+    }
+
+    return merged;
   } catch {
     return [];
   }
@@ -412,7 +440,10 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
     console.warn("[bridge] Failed to fetch from server, using local only", e);
   }
 
-  const localTransfers = getFallbackTransfers();
+  const localTransfers = getFallbackTransfers().filter(tx => {
+    if (!tx.userAddress) return false;
+    return canonicalAddress(tx.userAddress) === wallet;
+  });
   const localByHash = new Map<string, PendingBridgeTransfer>();
   for (const tx of localTransfers) {
     localByHash.set(tx.id, tx);
@@ -542,6 +573,7 @@ export async function updateTransferStatus(
       amount: localRecord?.amount,
       timestamp: localRecord?.timestamp,
     });
+    if (!ok) return false; // Don't update local state if server write failed
   } else if (status === "failed") {
     ok = await postBridgeTransfer("mark_failed", {
       burnTxHash,

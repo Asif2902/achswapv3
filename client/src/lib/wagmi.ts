@@ -76,6 +76,10 @@ function createManagedHttpTransport(chainId: number) {
             try {
               return await transport.request({ method, params: rpcParams } as any);
             } catch (error) {
+              // Rethrow JSON-RPC/application errors (not transport failures)
+              if (error && typeof error === 'object' && 'code' in error && 'message' in error) {
+                throw error;
+              }
               lastError = error;
               reportRpcFailure(chainId, attempt.url);
             }

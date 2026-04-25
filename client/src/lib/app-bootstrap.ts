@@ -9,6 +9,8 @@ const COMMUNITY_PRELOAD_START_DELAY_MS = 60;
 export type AppBootstrapPhase = "rpc" | "community" | "ready";
 
 let bootstrapPromise: Promise<void> | null = null;
+let currentPhase: AppBootstrapPhase | null = null;
+const phaseListeners = new Set<(phase: AppBootstrapPhase) => void>();
 
 function canUseSessionStorage(): boolean {
   return typeof window !== "undefined" && !!window.sessionStorage;
@@ -32,15 +34,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function setPhase(phase: AppBootstrapPhase) {
+  currentPhase = phase;
+  phaseListeners.forEach(callback => callback(phase));
+}
+
 export async function bootstrapAppReadiness(
   onPhase?: (phase: AppBootstrapPhase) => void,
-): Promise<void> {
+): Promise<() => void> {
+  // Register listener if provided
+  if (onPhase) {
+    phaseListeners.add(onPhase);
+    // Immediately notify if phase is already set
+    if (currentPhase) {
+      onPhase(currentPhase);
+    }
+  }
+
   if (bootstrapPromise) {
-    return bootstrapPromise;
+    await bootstrapPromise;
+    return () => {
+      if (onPhase) phaseListeners.delete(onPhase);
+    };
   }
 
   bootstrapPromise = (async () => {
-    onPhase?.("rpc");
+    setPhase("rpc");
     const communityPromise = sleep(COMMUNITY_PRELOAD_START_DELAY_MS)
       .then(() => preloadCommunityTokens(ARC_TESTNET_CHAIN_ID))
       .catch(() => undefined);
@@ -50,12 +69,15 @@ export async function bootstrapAppReadiness(
       sleep(BOOTSTRAP_RPC_TIMEOUT_MS),
     ]);
 
-    onPhase?.("community");
+    setPhase("community");
     await communityPromise;
 
-    onPhase?.("ready");
+    setPhase("ready");
     markAppBootstrapComplete();
   })();
 
-  return bootstrapPromise;
+  await bootstrapPromise;
+  return () => {
+    if (onPhase) phaseListeners.delete(onPhase);
+  };
 }

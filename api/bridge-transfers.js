@@ -18,6 +18,7 @@ try {
 } catch {}
 
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 240;
+const FALLBACK_RATE_LIMIT_PER_MINUTE = 5; // Low cap for Redis fallback
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_TRANSFER_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MAX_TRANSFERS_PER_WALLET = 100;
@@ -353,7 +354,7 @@ function setCachedClaimReconcileResult(burnTxHash, claimed) {
   }
 }
 
-function checkRateLimitInMemory(clientKey) {
+function checkRateLimitInMemory(clientKey, limit = RATE_LIMIT_PER_MINUTE) {
   const now = Date.now();
 
   memoryRateLimitRequestCount += 1;
@@ -367,7 +368,7 @@ function checkRateLimitInMemory(clientKey) {
 
   state.count += 1;
   memoryRateLimitByKey.set(clientKey, state);
-  return state.count <= RATE_LIMIT_PER_MINUTE;
+  return state.count <= limit;
 }
 
 async function checkRateLimit(req) {
@@ -391,8 +392,8 @@ async function checkRateLimit(req) {
 
     return count <= RATE_LIMIT_PER_MINUTE;
   } catch (err) {
-    console.warn("[bridge-transfers] Redis rate limit failed; falling back to memory", err);
-    return checkRateLimitInMemory(clientKey);
+    console.warn("[bridge-transfers] Redis rate limit failed; using fallback with lower cap", err);
+    return checkRateLimitInMemory(clientKey, FALLBACK_RATE_LIMIT_PER_MINUTE);
   }
 }
 
@@ -1580,22 +1581,23 @@ async function handleDismiss(req, res) {
 async function handleRetry(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   if (!isHash(burnTxHash)) return res.status(400).json({ error: "Invalid burnTxHash" });
+  await requireSignedOwnership(req, burnTxHash);
 
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(404).json({ error: "Transfer not found" });
 
-  const events = transfer.events || [];
-  events.push(`retry_started:${Date.now()}`);
+  const events = [...(transfer.events || []), `retry_started:${Date.now()}`];
   let updatedStatus = transfer.status;
-  let updatedError;
+  let updatedError = null;
 
-  if (transfer.status !== "complete" && transfer.status !== "failed" && transfer.attestation?.message) {
-    events.push(`retry_skipped:${Date.now()}`);
-  }
-
-  if (transfer.status === "attesting" && !transfer.attestation?.message) {
+  if (transfer.status === "failed") {
+    updatedStatus = transfer.attestation?.message ? "attesting" : "ready_to_mint";
+    events.push(`retry_status_update:${Date.now()}:${updatedStatus}`);
+  } else if (transfer.status === "attesting" && !transfer.attestation?.message) {
     updatedStatus = "attesting";
     events.push(`needs_attestation:${Date.now()}`);
+  } else if (transfer.status !== "complete" && transfer.status !== "failed" && transfer.attestation?.message) {
+    events.push(`retry_skipped:${Date.now()}`);
   }
 
   if (updatedStatus !== transfer.status) {
@@ -1657,10 +1659,11 @@ export default async function handler(req, res) {
 
     return res.status(400).json({ error: "Unknown action" });
   } catch (err) {
-    if (
-      (err instanceof Error && (err.name === "AggregateError" || err.name === "RPCUnavailableError"))
-      || (err instanceof Error && err.message === "All RPC probes failed")
-    ) {
+    if (err instanceof Error && (
+      err.name === "AggregateError" ||
+      err.name === "RPCUnavailableError" ||
+      err.message === "All RPC probes failed"
+    )) {
       return res.status(502).json({ error: "All RPC endpoints failed" });
     }
     if (
