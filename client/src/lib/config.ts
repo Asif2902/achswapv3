@@ -41,9 +41,7 @@ const networkCache = new Map<number, Network>();
 const failoverStateCache = new Map<number, RpcFailoverState>();
 
 const RPC_CONFIG = {
-  arcTestnet: PRIMARY_ALCHEMY_KEY
-    ? `https://arc-testnet.g.alchemy.com/v2/${PRIMARY_ALCHEMY_KEY}`
-    : PUBLIC_ARC_RPC,
+  arcTestnet: getArcPrimaryUrl(),
 };
 
 function getArcPrimaryUrl(): string {
@@ -103,15 +101,15 @@ function getFailoverState(chainId: number): RpcFailoverState {
   const stored = loadStoredFailoverMap()[String(chainId)];
   const state =
     stored && typeof stored === "object"
-      ? {
-          alchemyFailureCount: Number(stored.alchemyFailureCount) || 0,
-          permanentPublic: stored.permanentPublic === true,
-          preferredRole:
-            stored.preferredRole === "backup" || stored.preferredRole === "public"
-              ? stored.preferredRole
-              : "primary",
-          updatedAt: Number(stored.updatedAt) || 0,
-        }
+       ? {
+           alchemyFailureCount: Number(stored.alchemyFailureCount) || 0,
+           permanentPublicUntil: Number(stored.permanentPublicUntil) || null,
+           preferredRole:
+             stored.preferredRole === "backup" || stored.preferredRole === "public"
+               ? stored.preferredRole
+               : "primary",
+           updatedAt: Number(stored.updatedAt) || 0,
+         }
       : { ...DEFAULT_FAILOVER_STATE };
 
   failoverStateCache.set(chainId, state);
@@ -306,6 +304,9 @@ class BatchRpcProvider extends JsonRpcProvider {
   private readonly chainId: number;
 
   constructor(chainId: number, network: Network) {
+    // Note: Constructor snapshots the first RPC endpoint for initial connection.
+    // The _send() method re-evaluates getRpcAttemptOrder(this.chainId) on every request,
+    // ensuring runtime failover order is always current and no external code reads stale connection URLs.
     super(getRpcAttemptOrder(chainId)[0]?.url ?? getArcPrimaryUrl(), network, {
       batchMaxCount: 20,
       batchStallTime: 10,
@@ -337,11 +338,15 @@ class BatchRpcProvider extends JsonRpcProvider {
           entry = { count: 0, lastRegisteredAt: 0 };
           endpointFailureMap.set(endpoint.url, entry);
         }
-        entry.count++;
-        // Only register if threshold crossed or dedupe window passed
-        if (entry.count >= FAILURE_THRESHOLD || now - entry.lastRegisteredAt > DEDUPE_WINDOW_MS) {
-          registerAlchemyFailure(this.chainId, endpoint.role);
+
+        // Only increment count and update lastRegisteredAt if dedupe window has passed
+        if (now - entry.lastRegisteredAt > DEDUPE_WINDOW_MS) {
+          entry.count++;
           entry.lastRegisteredAt = now;
+          // Only register alchemy failure when crossing the threshold
+          if (entry.count >= FAILURE_THRESHOLD) {
+            registerAlchemyFailure(this.chainId, endpoint.role);
+          }
         }
       }
     }

@@ -1532,13 +1532,15 @@ async function handleMarkComplete(req, res) {
     }
   }
 
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+  }
+
   let verified = false;
-  if (!message && !transfer?.attestation?.message) {
-    verified = false;
-  } else if (isHash(mintTxHash)) {
-    verified = true;
-  } else {
-    verified = false;
+  if (isHash(mintTxHash)) {
+    verified = await isTransferClaimed(transfer, mintTxHash) || await verifyMintTransaction(transfer, mintTxHash);
   }
 
   if (!verified) {
@@ -1548,7 +1550,7 @@ async function handleMarkComplete(req, res) {
   await saveTransferRecord({
     ...transfer,
     status: "complete",
-    attestation: attestation || transfer.attestation,
+    attestation: normalizeAttestation(attestation) || transfer.attestation,
     mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
     error: undefined,
     updatedAt: Date.now(),
@@ -1581,17 +1583,22 @@ async function handleDismiss(req, res) {
 async function handleRetry(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   if (!isHash(burnTxHash)) return res.status(400).json({ error: "Invalid burnTxHash" });
-  await requireSignedOwnership(req, burnTxHash);
 
   const transfer = await getTransferRecord(burnTxHash);
   if (!transfer) return res.status(404).json({ error: "Transfer not found" });
+
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+  }
 
   const events = [...(transfer.events || []), `retry_started:${Date.now()}`];
   let updatedStatus = transfer.status;
   let updatedError = null;
 
   if (transfer.status === "failed") {
-    updatedStatus = transfer.attestation?.message ? "attesting" : "ready_to_mint";
+    updatedStatus = transfer.attestation?.message ? "ready_to_mint" : "attesting";
     events.push(`retry_status_update:${Date.now()}:${updatedStatus}`);
   } else if (transfer.status === "attesting" && !transfer.attestation?.message) {
     updatedStatus = "attesting";

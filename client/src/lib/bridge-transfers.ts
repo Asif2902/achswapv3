@@ -440,51 +440,9 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
     console.warn("[bridge] Failed to fetch from server, using local only", e);
   }
 
-  const localTransfers = getFallbackTransfers().filter(tx => {
-    if (!tx.userAddress) return false;
-    return canonicalAddress(tx.userAddress) === wallet;
-  });
-  const localByHash = new Map<string, PendingBridgeTransfer>();
-  for (const tx of localTransfers) {
-    localByHash.set(tx.id, tx);
-  }
-
-  const result: PendingBridgeTransfer[] = [];
-
-  for (const serverTx of serverTransfers) {
-    if (!serverTx.id) continue;
-    const local = localByHash.get(serverTx.id);
-    if (local) {
-      localByHash.delete(serverTx.id);
-      if (local.status === "complete" || local.status === "failed") {
-        result.push(local);
-      } else {
-        const serverUpdated = serverTx.updatedAt || serverTx.timestamp;
-        const localUpdated = local.updatedAt || local.timestamp;
-        if (serverUpdated >= localUpdated) {
-          result.push({ ...serverTx, userAddress: local.userAddress });
-        } else {
-          result.push(local);
-        }
-      }
-    } else {
-      result.push(serverTx);
-    }
-  }
-
-  if (!serverFailed) {
-    for (const [, local] of localByHash) {
-      if (local.status !== "complete" && local.status !== "failed") {
-        result.push(local);
-      }
-    }
-  } else {
-    for (const [, local] of localByHash) {
-      result.push(local);
-    }
-  }
-
-  const sorted = result.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+  // Use mergeFallbackTransfersForWallet to preserve other wallets' entries
+  const merged = mergeFallbackTransfersForWallet(wallet, serverTransfers);
+  const sorted = merged.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
   setFallbackTransfers(sorted);
   return sorted;
 }

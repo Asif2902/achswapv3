@@ -145,11 +145,13 @@ function App() {
     const startedAt = Date.now();
     let hideTimer: number | null = null;
 
-    bootstrapAppReadiness((phase) => {
+    const { promise, unsubscribe } = bootstrapAppReadiness((phase) => {
       if (!cancelled) {
         setBootPhase(phase);
       }
-    }).finally(() => {
+    });
+
+    promise.finally(() => {
       if (cancelled) return;
 
       const elapsed = Date.now() - startedAt;
@@ -166,6 +168,7 @@ function App() {
 
     return () => {
       cancelled = true;
+      unsubscribe();
       if (hideTimer !== null) {
         window.clearTimeout(hideTimer);
       }

@@ -8,7 +8,7 @@ import {
 } from '@rainbow-me/rainbowkit/wallets';
 import { createConfig, http } from 'wagmi';
 import { createTransport, defineChain } from 'viem';
-import { getManagedRpcAttempts, getRpcUrl, getRpcUrls, reportRpcFailure } from './config';
+import { getManagedRpcAttempts, getRpcUrl, getRpcUrls, reportRpcFailure, isRetryableRpcError } from './config';
 
 const ARC_TESTNET_CHAIN_ID = 5042002;
 const ARC_WALLET_ADD_RPC = getRpcUrl(ARC_TESTNET_CHAIN_ID);
@@ -55,6 +55,8 @@ const connectors = connectorsForWallets(
   { appName: 'Achswap', projectId }
 );
 
+const transportCache = new Map<string, ReturnType<typeof http>>();
+
 function createManagedHttpTransport(chainId: number) {
   return ((params) =>
     createTransport(
@@ -67,17 +69,22 @@ function createManagedHttpTransport(chainId: number) {
           let lastError: unknown = null;
 
           for (const attempt of getManagedRpcAttempts(chainId)) {
-            const transport = http(attempt.url, {
-              batch: { batchSize: 20, wait: 10 },
-              retryCount: 0,
-              timeout: attempt.timeoutMs,
-            })(params);
+            let transport = transportCache.get(attempt.url);
+            if (!transport) {
+              transport = http(attempt.url, {
+                batch: { batchSize: 20, wait: 10 },
+                retryCount: 0,
+                timeout: attempt.timeoutMs,
+              });
+              transportCache.set(attempt.url, transport);
+            }
+            const transportInstance = transport(params);
 
             try {
-              return await transport.request({ method, params: rpcParams } as any);
+              return await transportInstance.request({ method, params: rpcParams } as any);
             } catch (error) {
-              // Rethrow JSON-RPC/application errors (not transport failures)
-              if (error && typeof error === 'object' && 'code' in error && 'message' in error) {
+              // Rethrow non-retryable errors
+              if (!isRetryableRpcError(error)) {
                 throw error;
               }
               lastError = error;
@@ -88,7 +95,7 @@ function createManagedHttpTransport(chainId: number) {
           throw lastError instanceof Error ? lastError : new Error('RPC transport failed');
         },
       },
-      { urls: getRpcUrls(chainId) },
+      { get urls() { return getRpcUrls(chainId); } },
     )) as any;
 }
 

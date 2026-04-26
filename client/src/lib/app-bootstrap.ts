@@ -39,9 +39,15 @@ function setPhase(phase: AppBootstrapPhase) {
   phaseListeners.forEach(callback => callback(phase));
 }
 
-export async function bootstrapAppReadiness(
+export function bootstrapAppReadiness(
   onPhase?: (phase: AppBootstrapPhase) => void,
-): Promise<() => void> {
+): { promise: Promise<void>, unsubscribe: () => void } {
+  const unsubscribe = () => {
+    if (onPhase) {
+      phaseListeners.delete(onPhase);
+    }
+  };
+
   // Register listener if provided
   if (onPhase) {
     phaseListeners.add(onPhase);
@@ -49,6 +55,32 @@ export async function bootstrapAppReadiness(
     if (currentPhase) {
       onPhase(currentPhase);
     }
+  }
+
+  if (!bootstrapPromise) {
+    bootstrapPromise = (async () => {
+      setPhase("rpc");
+      const communityPromise = sleep(COMMUNITY_PRELOAD_START_DELAY_MS)
+        .then(() => preloadCommunityTokens(ARC_TESTNET_CHAIN_ID));
+
+      await Promise.race([
+        warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch(() => undefined),
+        sleep(BOOTSTRAP_RPC_TIMEOUT_MS),
+      ]);
+
+      setPhase("community");
+      await communityPromise;
+
+      setPhase("ready");
+      markAppBootstrapComplete();
+    })();
+  }
+
+  return {
+    promise: bootstrapPromise,
+    unsubscribe,
+  };
+}
   }
 
   if (bootstrapPromise) {
@@ -61,8 +93,7 @@ export async function bootstrapAppReadiness(
   bootstrapPromise = (async () => {
     setPhase("rpc");
     const communityPromise = sleep(COMMUNITY_PRELOAD_START_DELAY_MS)
-      .then(() => preloadCommunityTokens(ARC_TESTNET_CHAIN_ID))
-      .catch(() => undefined);
+      .then(() => preloadCommunityTokens(ARC_TESTNET_CHAIN_ID));
 
     await Promise.race([
       warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch(() => undefined),
