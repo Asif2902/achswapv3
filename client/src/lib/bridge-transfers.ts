@@ -62,7 +62,7 @@ function hasTrustedBridgeStorage(storage: unknown): boolean {
   return false;
 }
 
-function getTransferStatusRank(status: string | null | undefined): number {
+export function getTransferStatusRank(status: string | null | undefined): number {
   switch (String(status || "").toLowerCase()) {
     case "attesting":
       return 1;
@@ -121,10 +121,14 @@ function getFallbackTransfers(): PendingBridgeTransfer[] {
       }
     }
 
-    // Save merged back to fallback key and remove legacy
-    if (legacyRaw || currentRaw) {
-      localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(merged.map(normalizeTransfer)));
-      if (legacyRaw) localStorage.removeItem(LEGACY_KEY);
+    // Save merged back only when migrating legacy entries.
+    if (legacyRaw) {
+      try {
+        localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(merged.map(normalizeTransfer)));
+        localStorage.removeItem(LEGACY_KEY);
+      } catch (error) {
+        console.warn("[bridge-transfers] failed to persist fallback migration", error);
+      }
     }
 
     return merged;
@@ -251,6 +255,7 @@ function isOwnershipAction(status: PendingBridgeTransfer["status"] | undefined):
     status === "ready_to_mint"
     || status === "minting"
     || status === "attesting"
+    || status === "complete"
     || status === "failed"
   );
 }
@@ -540,6 +545,7 @@ export async function updateTransferStatus(
       destChainId: localRecord?.destChainId,
       amount: localRecord?.amount,
       timestamp: localRecord?.timestamp,
+      ownershipProof,
     });
     if (!ok) return false;
   } else if (status === "failed") {

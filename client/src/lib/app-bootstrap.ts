@@ -1,8 +1,7 @@
 import { preloadCommunityTokens } from "@/data/tokens";
-import { warmRpcProvider } from "@/lib/config";
+import { ARC_TESTNET_CHAIN_ID, warmRpcProvider } from "@/lib/config";
 
 const APP_BOOTSTRAP_SESSION_KEY = "achswap_app_bootstrap_v1";
-const ARC_TESTNET_CHAIN_ID = 5042002;
 const BOOTSTRAP_RPC_TIMEOUT_MS = 900;
 const COMMUNITY_PRELOAD_START_DELAY_MS = 60;
 
@@ -34,9 +33,22 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function notifyPhaseListener(
+  callback: (phase: AppBootstrapPhase) => void,
+  phase: AppBootstrapPhase,
+) {
+  try {
+    callback(phase);
+  } catch (error) {
+    console.error("[app-bootstrap] phase listener failed", error);
+  }
+}
+
 function setPhase(phase: AppBootstrapPhase) {
   currentPhase = phase;
-  phaseListeners.forEach(callback => callback(phase));
+  for (const callback of phaseListeners) {
+    notifyPhaseListener(callback, phase);
+  }
 }
 
 export function bootstrapAppReadiness(
@@ -53,7 +65,7 @@ export function bootstrapAppReadiness(
     phaseListeners.add(onPhase);
     // Immediately notify if phase is already set
     if (currentPhase) {
-      onPhase(currentPhase);
+      notifyPhaseListener(onPhase, currentPhase);
     }
   }
 
@@ -61,18 +73,28 @@ export function bootstrapAppReadiness(
     bootstrapPromise = (async () => {
       setPhase("rpc");
       const communityPromise = sleep(COMMUNITY_PRELOAD_START_DELAY_MS)
-        .then(() => preloadCommunityTokens(ARC_TESTNET_CHAIN_ID));
+        .then(() => preloadCommunityTokens(ARC_TESTNET_CHAIN_ID))
+        .catch((error) => {
+          console.error("[app-bootstrap] community preload failed", error);
+        });
+      const warmRpcPromise = warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch((error) => {
+        console.error("[app-bootstrap] RPC warmup failed", error);
+      });
 
-      await Promise.race([
-        warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch(() => undefined),
-        sleep(BOOTSTRAP_RPC_TIMEOUT_MS),
-      ]);
+      try {
+        await Promise.race([
+          warmRpcPromise,
+          sleep(BOOTSTRAP_RPC_TIMEOUT_MS),
+        ]);
 
-      setPhase("community");
-      await communityPromise;
-
-      setPhase("ready");
-      markAppBootstrapComplete();
+        setPhase("community");
+        await communityPromise;
+      } catch (error) {
+        console.error("[app-bootstrap] bootstrap readiness failed", error);
+      } finally {
+        setPhase("ready");
+        markAppBootstrapComplete();
+      }
     })();
   }
 

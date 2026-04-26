@@ -25,6 +25,7 @@ import {
   getCachedPendingTransfersForWallet,
   getTransferHistory,
   getCachedHistoryForWallet,
+  getTransferStatusRank,
   isBridgeTransferApiAvailable,
   removeTransfer,
   type PendingBridgeTransfer,
@@ -265,24 +266,6 @@ function isAlreadyClaimedError(error: unknown): boolean {
     normalized.includes("nonce was already used") ||
     (normalized.includes("nonce") && normalized.includes("used"))
   );
-}
-
-function getTransferStatusRank(status: string | null | undefined): number {
-  switch (String(status || "").toLowerCase()) {
-    case "attesting":
-      return 1;
-    case "ready_to_mint":
-      return 2;
-    case "minting":
-      return 3;
-    case "complete":
-    case "completed":
-      return 4;
-    case "failed":
-      return 5;
-    default:
-      return 0;
-  }
 }
 
 const CHAIN_SWITCH_VERIFY_TIMEOUT_MS = 6000;
@@ -1427,7 +1410,7 @@ export default function Bridge() {
         throw new Error("Burn transaction destination chain is not supported");
       }
 
-       let resolvedDestChain = decodedDestinationChain;
+       let resolvedDestChain: CCTPChain | undefined = decodedDestinationChain;
       let attestation: { message: string; attestation: string } | undefined;
 
       try {
@@ -2529,7 +2512,7 @@ export default function Bridge() {
                                 {dstChain?.logo ? <img src={dstChain.logo} alt={dstChain.shortName} className="w-full h-full object-cover" /> : <span style={{ fontSize: 14, fontWeight: 800, color: dstChain?.color || "#888" }}>{dstChain?.shortName.charAt(0) || "?"}</span>}
                               </div>
                               <div className="flex-1 min-w-0">
-                                <p className="text-sm font-semibold text-white truncate">{tx.amount && formatUnits(tx.amount, 6)} USDC</p>
+                                <p className="text-sm font-semibold text-white truncate">{tx.amount} USDC</p>
                                 <p className="text-[11px] text-white/30 truncate">{ageStr}</p>
                               </div>
                               <div className="flex items-center gap-1.5" style={{ color }}>

@@ -1,7 +1,7 @@
 import { JsonRpcProvider, Network } from "ethers";
 import type { JsonRpcPayload, JsonRpcResult } from "ethers";
 
-const ARC_TESTNET_CHAIN_ID = 5042002;
+export const ARC_TESTNET_CHAIN_ID = 5042002;
 const PUBLIC_ARC_RPC = "https://rpc.testnet.arc.network";
 const PRIMARY_ALCHEMY_KEY = import.meta.env.VITE_ALCHEMY_KEY;
 const BACKUP_ALCHEMY_KEY = import.meta.env.VITE_ALCHEMY_BACKUP_KEY;

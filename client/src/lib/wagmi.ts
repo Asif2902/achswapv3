@@ -8,9 +8,15 @@ import {
 } from '@rainbow-me/rainbowkit/wallets';
 import { createConfig, http } from 'wagmi';
 import { createTransport, defineChain } from 'viem';
-import { getManagedRpcAttempts, getRpcUrl, getRpcUrls, reportRpcFailure, isRetryableRpcError } from './config';
+import {
+  ARC_TESTNET_CHAIN_ID,
+  getManagedRpcAttempts,
+  getRpcUrl,
+  getRpcUrls,
+  reportRpcFailure,
+  isRetryableRpcError,
+} from './config';
 
-const ARC_TESTNET_CHAIN_ID = 5042002;
 const ARC_WALLET_ADD_RPC = getRpcUrl(ARC_TESTNET_CHAIN_ID);
 
 // Define ARC Testnet chain
@@ -65,18 +71,24 @@ function createManagedHttpTransport(chainId: number) {
         name: 'Managed HTTP',
         retryCount: 0,
         type: 'managedHttp',
-        async request({ method, params: rpcParams }: any) {
+        request: (async ({ method, params: rpcParams }: any) => {
           let lastError: unknown = null;
+          const attempts = getManagedRpcAttempts(chainId);
 
-          for (const attempt of getManagedRpcAttempts(chainId)) {
-            let transport = transportCache.get(attempt.url);
+          if (attempts.length === 0) {
+            throw new Error(`RPC transport failed for chain ${chainId}: no RPC attempts configured`);
+          }
+
+          for (const attempt of attempts) {
+            const transportCacheKey = `${attempt.url}::${attempt.timeoutMs}`;
+            let transport = transportCache.get(transportCacheKey);
             if (!transport) {
               transport = http(attempt.url, {
                 batch: { batchSize: 20, wait: 10 },
                 retryCount: 0,
                 timeout: attempt.timeoutMs,
               });
-              transportCache.set(attempt.url, transport);
+              transportCache.set(transportCacheKey, transport);
             }
             const transportInstance = transport(params);
 
@@ -92,8 +104,12 @@ function createManagedHttpTransport(chainId: number) {
             }
           }
 
-          throw lastError instanceof Error ? lastError : new Error('RPC transport failed');
-        },
+          if (lastError == null) {
+            throw new Error(`RPC transport failed for chain ${chainId}: all attempts exhausted without an error`);
+          }
+
+          throw new Error(`RPC transport failed for chain ${chainId}`, { cause: lastError });
+        }) as any,
       },
       { get urls() { return getRpcUrls(chainId); } },
     )) as any;
