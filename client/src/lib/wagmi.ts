@@ -58,14 +58,14 @@ const connectors = connectorsForWallets(
 const transportCache = new Map<string, ReturnType<typeof http>>();
 
 function createManagedHttpTransport(chainId: number) {
-  return ((params) =>
+  return ((params: any) =>
     createTransport(
       {
         key: 'managedHttp',
         name: 'Managed HTTP',
         retryCount: 0,
         type: 'managedHttp',
-        async request({ method, params: rpcParams }) {
+        async request({ method, params: rpcParams }: any) {
           let lastError: unknown = null;
 
           for (const attempt of getManagedRpcAttempts(chainId)) {

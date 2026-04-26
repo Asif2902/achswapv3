@@ -440,7 +440,15 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
     console.warn("[bridge] Failed to fetch from server, using local only", e);
   }
 
-  // Use mergeFallbackTransfersForWallet to preserve other wallets' entries
+  // When server failed, don't overwrite local storage - just return existing local entries
+  if (serverFailed) {
+    const existing = getFallbackTransfers().filter(
+      (tx) => canonicalAddress(tx.userAddress) === wallet
+    );
+    return existing.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+  }
+
+  // Only reconcile and persist when server response was trusted
   const merged = mergeFallbackTransfersForWallet(wallet, serverTransfers);
   const sorted = merged.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
   setFallbackTransfers(sorted);
@@ -510,11 +518,13 @@ export async function updateTransferStatus(
       error: updates.error,
       ownershipProof,
     });
+    if (!ok) return false;
   } else if (status === "minting") {
     ok = await postBridgeTransfer("mark_minting", {
       burnTxHash,
       ownershipProof,
     });
+    if (!ok) return false;
   } else if (status === "complete") {
     const existing = getFallbackTransfers();
     const localRecord = existing.find((t) => t.id === burnTxHash);
@@ -531,7 +541,7 @@ export async function updateTransferStatus(
       amount: localRecord?.amount,
       timestamp: localRecord?.timestamp,
     });
-    if (!ok) return false; // Don't update local state if server write failed
+    if (!ok) return false;
   } else if (status === "failed") {
     ok = await postBridgeTransfer("mark_failed", {
       burnTxHash,
@@ -539,14 +549,17 @@ export async function updateTransferStatus(
       error: updates.error,
       ownershipProof,
     });
+    if (!ok) return false;
   } else if (status === "attesting") {
     ok = await postBridgeTransfer("mark_attesting", {
       burnTxHash,
       error: updates.error,
       ownershipProof,
     });
+    if (!ok) return false;
   }
 
+  // Only update local storage when server write succeeded
   const existing = getFallbackTransfers();
   const idx = existing.findIndex((t) => t.id === burnTxHash);
   if (idx >= 0) {
@@ -593,6 +606,9 @@ export async function removeTransfer(id: string): Promise<boolean> {
   }
 
   if (serverConfirmedAbsent) {
+    if (localRecord) {
+      addToHistory(localRecord);
+    }
     const filteredLocal = localTransfers.filter((t) => t.id !== burnTxHash);
     setFallbackTransfers(filteredLocal);
     dispatchTransfersUpdated();

@@ -81,34 +81,3 @@ export function bootstrapAppReadiness(
     unsubscribe,
   };
 }
-  }
-
-  if (bootstrapPromise) {
-    await bootstrapPromise;
-    return () => {
-      if (onPhase) phaseListeners.delete(onPhase);
-    };
-  }
-
-  bootstrapPromise = (async () => {
-    setPhase("rpc");
-    const communityPromise = sleep(COMMUNITY_PRELOAD_START_DELAY_MS)
-      .then(() => preloadCommunityTokens(ARC_TESTNET_CHAIN_ID));
-
-    await Promise.race([
-      warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch(() => undefined),
-      sleep(BOOTSTRAP_RPC_TIMEOUT_MS),
-    ]);
-
-    setPhase("community");
-    await communityPromise;
-
-    setPhase("ready");
-    markAppBootstrapComplete();
-  })();
-
-  await bootstrapPromise;
-  return () => {
-    if (onPhase) phaseListeners.delete(onPhase);
-  };
-}

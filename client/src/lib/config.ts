@@ -99,7 +99,7 @@ function getFailoverState(chainId: number): RpcFailoverState {
   if (cached) return cached;
 
   const stored = loadStoredFailoverMap()[String(chainId)];
-  const state =
+  const state: RpcFailoverState =
     stored && typeof stored === "object"
        ? {
            alchemyFailureCount: Number(stored.alchemyFailureCount) || 0,
@@ -197,9 +197,11 @@ function getRpcAttemptOrder(chainId: number): RpcEndpoint[] {
 
   // Check if permanent public cooldown has expired
   if (state.permanentPublicUntil && Date.now() > state.permanentPublicUntil) {
-    const updatedState = { ...state, permanentPublicUntil: null, alchemyFailureCount: 0 };
+    const updatedState: RpcFailoverState = { ...state, permanentPublicUntil: null, alchemyFailureCount: 0, preferredRole: "primary" };
     saveFailoverState(chainId, updatedState);
     state.permanentPublicUntil = null;
+    state.alchemyFailureCount = 0;
+    state.preferredRole = "primary";
   }
 
   if (!publicEndpoint) return endpoints;
@@ -231,7 +233,7 @@ function normalizeRpcBatch(json: unknown): Array<JsonRpcResult> {
   return [json as JsonRpcResult];
 }
 
-function isRetryableRpcError(error: unknown): boolean {
+export function isRetryableRpcError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
 
   const code = "code" in error ? Number((error as { code?: unknown }).code) : NaN;

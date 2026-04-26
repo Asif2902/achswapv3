@@ -1187,7 +1187,7 @@ export default function Bridge() {
       fetchBalance();
 
     } catch (mintErr: any) {
-      let walletProvider = null;
+      let walletProvider: BrowserProvider | undefined = undefined;
       if (window.ethereum) {
         const provider = new BrowserProvider(window.ethereum);
         const network = await provider.getNetwork();
