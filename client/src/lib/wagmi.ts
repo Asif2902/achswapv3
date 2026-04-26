@@ -14,6 +14,7 @@ import {
   getRpcUrl,
   getRpcUrls,
   reportRpcFailure,
+  reportRpcSuccess,
   isRetryableRpcError,
 } from './config';
 
@@ -61,7 +62,9 @@ const connectors = connectorsForWallets(
   { appName: 'Achswap', projectId }
 );
 
-const transportCache = new Map<string, ReturnType<typeof http>>();
+type TransportInstance = ReturnType<ReturnType<typeof http>>;
+
+const transportCache = new Map<string, TransportInstance>();
 
 function createManagedHttpTransport(chainId: number) {
   return ((params: any) =>
@@ -80,20 +83,22 @@ function createManagedHttpTransport(chainId: number) {
           }
 
           for (const attempt of attempts) {
-            const transportCacheKey = `${attempt.url}::${attempt.timeoutMs}`;
-            let transport = transportCache.get(transportCacheKey);
-            if (!transport) {
-              transport = http(attempt.url, {
+            const transportCacheKey = `${chainId}::${attempt.url}::${attempt.timeoutMs}`;
+            let transportInstance = transportCache.get(transportCacheKey);
+            if (!transportInstance) {
+              const transport = http(attempt.url, {
                 batch: { batchSize: 20, wait: 10 },
                 retryCount: 0,
                 timeout: attempt.timeoutMs,
               });
-              transportCache.set(transportCacheKey, transport);
+              transportInstance = transport(params);
+              transportCache.set(transportCacheKey, transportInstance);
             }
-            const transportInstance = transport(params);
 
             try {
-              return await transportInstance.request({ method, params: rpcParams } as any);
+              const result = await transportInstance.request({ method, params: rpcParams } as any);
+              reportRpcSuccess(attempt.url);
+              return result;
             } catch (error) {
               // Rethrow non-retryable errors
               if (!isRetryableRpcError(error)) {
