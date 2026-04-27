@@ -197,6 +197,21 @@ function resetEndpointFailure(url: string) {
   entry.lastRegisteredAt = 0;
 }
 
+function resetAlchemyFailureCount(chainId: number) {
+  const state = getFailoverState(chainId);
+  const updatedState: RpcFailoverState = {
+    ...state,
+    alchemyFailureCount: 0,
+    updatedAt: Date.now(),
+  };
+  // If we were in permanent public mode due to alchemy failures, exit it
+  if (state.permanentPublicUntil) {
+    updatedState.permanentPublicUntil = null;
+    updatedState.preferredRole = "primary";
+  }
+  saveFailoverState(chainId, updatedState);
+}
+
 function trackEndpointFailure(chainId: number, endpoint: RpcEndpoint) {
   const now = Date.now();
   let entry = endpointFailureMap.get(endpoint.url);
@@ -399,6 +414,16 @@ export function reportRpcFailure(chainId: number, url: string) {
 
 export function reportRpcSuccess(url: string) {
   resetEndpointFailure(url);
+  // Also reset alchemy failure count for the chain associated with this URL
+  // We need to determine the chainId from the URL to reset the failover state
+  // Since we don't have direct access to chainId here, we'll check all configured chains
+  // This is acceptable as the number of chains is small
+  [ARC_TESTNET_CHAIN_ID].forEach((chainId) => {
+    const endpoints = getConfiguredRpcEndpoints(chainId);
+    if (endpoints.some((endpoint) => endpoint.url === url)) {
+      resetAlchemyFailureCount(chainId);
+    }
+  });
 }
 
 export function createAlchemyProvider(chainId: number): JsonRpcProvider {

@@ -99,14 +99,15 @@ function createManagedHttpTransport(chainId: number) {
               const result = await transportInstance.request({ method, params: rpcParams } as any);
               reportRpcSuccess(attempt.url);
               return result;
-            } catch (error) {
-              // Rethrow non-retryable errors
-              if (!isRetryableRpcError(error)) {
-                throw error;
-              }
-              lastError = error;
-              reportRpcFailure(chainId, attempt.url);
-            }
+} catch (error) {
+    // Rethrow non-retryable errors
+    if (!isRetryableRpcError(error)) {
+      reportRpcSuccess(attempt.url);
+      throw error;
+    }
+    lastError = error;
+    reportRpcFailure(chainId, attempt.url);
+  }
           }
 
           if (lastError == null) {
