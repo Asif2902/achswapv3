@@ -197,15 +197,15 @@ function resetEndpointFailure(url: string) {
   entry.lastRegisteredAt = 0;
 }
 
-function resetAlchemyFailureCount(chainId: number) {
+function resetAlchemyFailureCount(chainId: number, options?: { sourceIsAlchemy?: boolean }) {
   const state = getFailoverState(chainId);
   const updatedState: RpcFailoverState = {
     ...state,
     alchemyFailureCount: 0,
     updatedAt: Date.now(),
   };
-  // If we were in permanent public mode due to alchemy failures, exit it
-  if (state.permanentPublicUntil) {
+  // Only exit permanent public mode if the successful call was from an Alchemy endpoint
+  if (state.permanentPublicUntil && options?.sourceIsAlchemy) {
     updatedState.permanentPublicUntil = null;
     updatedState.preferredRole = "primary";
   }
@@ -412,6 +412,10 @@ export function reportRpcFailure(chainId: number, url: string) {
   trackEndpointFailure(chainId, endpoint);
 }
 
+export function clearEndpointFailureTracking(url: string) {
+  resetEndpointFailure(url);
+}
+
 export function reportRpcSuccess(url: string) {
   resetEndpointFailure(url);
   // Also reset alchemy failure count for the chain associated with this URL
@@ -420,8 +424,11 @@ export function reportRpcSuccess(url: string) {
   // This is acceptable as the number of chains is small
   [ARC_TESTNET_CHAIN_ID].forEach((chainId) => {
     const endpoints = getConfiguredRpcEndpoints(chainId);
-    if (endpoints.some((endpoint) => endpoint.url === url)) {
-      resetAlchemyFailureCount(chainId);
+    const endpoint = endpoints.find((e) => e.url === url);
+    if (endpoint) {
+      // Only reset permanent public mode if this was an Alchemy endpoint (primary or backup)
+      const sourceIsAlchemy = endpoint.role === "primary" || endpoint.role === "backup";
+      resetAlchemyFailureCount(chainId, { sourceIsAlchemy });
     }
   });
 }

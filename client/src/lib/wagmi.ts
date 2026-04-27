@@ -16,6 +16,7 @@ import {
   reportRpcFailure,
   reportRpcSuccess,
   isRetryableRpcError,
+  clearEndpointFailureTracking,
 } from './config';
 
 const ARC_WALLET_ADD_RPC = getRpcUrl(ARC_TESTNET_CHAIN_ID);
@@ -100,9 +101,10 @@ function createManagedHttpTransport(chainId: number) {
               reportRpcSuccess(attempt.url);
               return result;
 } catch (error) {
-    // Rethrow non-retryable errors
+    // Rethrow non-retryable errors without resetting global failure state
     if (!isRetryableRpcError(error)) {
-      reportRpcSuccess(attempt.url);
+      // Only clear this endpoint's failure tracking, don't reset global Alchemy state
+      clearEndpointFailureTracking(attempt.url);
       throw error;
     }
     lastError = error;
