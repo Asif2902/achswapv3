@@ -674,77 +674,8 @@ export async function updateTransferStatus(
 ): Promise<boolean> {
   const burnTxHash = canonicalHash(id);
   const status = updates.status;
-  let ok = true;
-  const requiresOwnership = isOwnershipAction(status);
-  let hasOwnershipProof = !requiresOwnership;
-  let ownershipProof: { signedMessage: string; signature: string; issuedAt: number } | null = null;
 
-  if (requiresOwnership) {
-    const existing = getFallbackTransfers();
-    const localRecord = existing.find((t) => t.id === burnTxHash);
-    const expectedOwner = localRecord?.userAddress;
-    ownershipProof = getCachedOwnershipProof(burnTxHash);
-    if (!ownershipProof) {
-      ownershipProof = await createOwnershipProof(burnTxHash, expectedOwner);
-    }
-
-    if (!ownershipProof) {
-      console.warn(`[bridge-transfers] ${status} skipped: missing ownership proof`);
-      hasOwnershipProof = false;
-    }
-
-    if (!hasOwnershipProof) {
-      return false;
-    }
-  }
-
-  if (status === "ready_to_mint") {
-    ok = await postBridgeTransfer("update_attestation", {
-      burnTxHash,
-      attestation: updates.attestation,
-      destDomain: updates.destDomain,
-      destChainId: updates.destChainId,
-      error: updates.error,
-      ownershipProof,
-    });
-  } else if (status === "minting") {
-    ok = await postBridgeTransfer("mark_minting", {
-      burnTxHash,
-      ownershipProof,
-    });
-  } else if (status === "complete") {
-    const existing = getFallbackTransfers();
-    const localRecord = existing.find((t) => t.id === burnTxHash);
-    ok = await postBridgeTransfer("mark_complete", {
-      burnTxHash,
-      mintTxHash: updates.mintTxHash,
-      message: updates.attestation?.message,
-      attestation: updates.attestation,
-      userAddress: localRecord?.userAddress,
-      sourceDomain: localRecord?.sourceDomain,
-      sourceChainId: localRecord?.sourceChainId,
-      destDomain: localRecord?.destDomain,
-      destChainId: localRecord?.destChainId,
-      amount: localRecord?.amount,
-      timestamp: localRecord?.timestamp,
-      ownershipProof,
-    });
-  } else if (status === "failed") {
-    ok = await postBridgeTransfer("mark_failed", {
-      burnTxHash,
-      mintTxHash: updates.mintTxHash,
-      error: updates.error,
-      ownershipProof,
-    });
-  } else if (status === "attesting") {
-    ok = await postBridgeTransfer("mark_attesting", {
-      burnTxHash,
-      error: updates.error,
-      ownershipProof,
-    });
-  }
-
-  // Update local storage even if server write failed so user isn't stuck
+  // Update local storage FIRST (don't let server failures block UI)
   const existing = getFallbackTransfers();
   const idx = existing.findIndex((t) => t.id === burnTxHash);
   if (idx >= 0) {
@@ -766,7 +697,50 @@ export async function updateTransferStatus(
     setFallbackTransfers(existing);
     dispatchTransfersUpdated();
   }
-  return ok;
+
+  // Try to update server (non-blocking for UI)
+  const requiresOwnership = isOwnershipAction(status);
+  if (requiresOwnership) {
+    const localRecord = existing.find((t) => t.id === burnTxHash) || 
+      getFallbackTransfers().find((t) => t.id === burnTxHash);
+    const expectedOwner = localRecord?.userAddress;
+    let ownershipProof = getCachedOwnershipProof(burnTxHash);
+    if (!ownershipProof) {
+      ownershipProof = await createOwnershipProof(burnTxHash, expectedOwner);
+    }
+
+    if (!ownershipProof) {
+      console.warn(`[bridge-transfers] ${status} skipped server update: missing ownership proof`);
+      return true; // Local update already done
+    }
+
+    const ok = await postBridgeTransfer(
+      status === "ready_to_mint" ? "update_attestation" :
+      status === "minting" ? "mark_minting" :
+      status === "complete" ? "mark_complete" :
+      status === "failed" ? "mark_failed" :
+      status === "attesting" ? "mark_attesting" : "",
+      {
+        burnTxHash,
+        mintTxHash: updates.mintTxHash,
+        message: updates.attestation?.message,
+        attestation: updates.attestation,
+        userAddress: localRecord?.userAddress,
+        sourceDomain: localRecord?.sourceDomain,
+        sourceChainId: localRecord?.sourceChainId,
+        destDomain: localRecord?.destDomain,
+        destChainId: localRecord?.destChainId,
+        amount: localRecord?.amount,
+        timestamp: localRecord?.timestamp,
+        error: updates.error,
+        ownershipProof,
+      }
+    );
+    return ok;
+  }
+
+  // Non-ownership statuses (shouldn't normally happen)
+  return true;
 }
 
 export async function removeTransfer(id: string): Promise<boolean> {

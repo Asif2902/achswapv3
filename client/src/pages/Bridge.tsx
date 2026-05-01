@@ -1132,11 +1132,16 @@ export default function Bridge() {
         destProvider,
       );
       if (nonceAlreadyUsed) {
-        await updateTransferStatus(transferId, {
-          status: "complete",
-          attestation,
-          error: undefined,
-        });
+        // Update local state directly
+        const existing = getFallbackTransfers();
+        const idx = existing.findIndex((t) => t.id === transferId);
+        if (idx >= 0) {
+          const completed = { ...existing[idx], status: "complete", error: undefined, updatedAt: Date.now() };
+          addToHistory(completed);
+          existing.splice(idx, 1);
+          setFallbackTransfers(existing);
+          dispatchTransfersUpdated();
+        }
         setTransfer(prev => ({
           ...prev,
           step: "complete",
@@ -1161,17 +1166,39 @@ export default function Bridge() {
 
       if (!mintReceipt || mintReceipt.status !== 1) {
         const errorMsg = mintReceipt ? "Mint transaction failed" : "Failed to get mint receipt";
-        await updateTransferStatus(transferId, { status: "failed", mintTxHash: mintReceipt?.hash });
+        // Update local state directly (don't rely on updateTransferStatus)
+        const existing = getFallbackTransfers();
+        const idx = existing.findIndex((t) => t.id === transferId);
+        if (idx >= 0) {
+          existing[idx] = { ...existing[idx], status: "failed", error: errorMsg, updatedAt: Date.now() };
+          setFallbackTransfers(existing);
+          dispatchTransfersUpdated();
+        }
         setTransfer(prev => ({ ...prev, step: "error", error: errorMsg }));
         toast({ title: "Mint Failed", description: errorMsg, variant: "destructive" });
         return;
       }
 
-      await updateTransferStatus(transferId, {
+      // Update local state directly to "complete"
+      const existing = getFallbackTransfers();
+      const idx = existing.findIndex((t) => t.id === transferId);
+      if (idx >= 0) {
+        const completed = { ...existing[idx], status: "complete", mintTxHash: mintReceipt.hash, error: undefined, updatedAt: Date.now() };
+        addToHistory(completed);
+        existing.splice(idx, 1);
+        setFallbackTransfers(existing);
+        dispatchTransfersUpdated();
+      }
+
+      // Try server update (non-blocking)
+      updateTransferStatus(transferId, {
         status: "complete",
         mintTxHash: mintReceipt.hash,
         attestation,
+      }).catch((err) => {
+        console.warn("[bridge] Server update failed for complete:", err);
       });
+
       setTransfer(prev => ({
         ...prev,
         step: "complete",
@@ -1200,11 +1227,16 @@ export default function Bridge() {
         walletProvider,
       );
       if (claimedOnDestination || isAlreadyClaimedError(mintErr)) {
-        await updateTransferStatus(transferId, {
-          status: "complete",
-          attestation,
-          error: undefined,
-        });
+        // Update local state directly
+        const existing = getFallbackTransfers();
+        const idx = existing.findIndex((t) => t.id === transferId);
+        if (idx >= 0) {
+          const completed = { ...existing[idx], status: "complete", error: undefined, updatedAt: Date.now() };
+          addToHistory(completed);
+          existing.splice(idx, 1);
+          setFallbackTransfers(existing);
+          dispatchTransfersUpdated();
+        }
         setTransfer(prev => ({
           ...prev,
           step: "complete",
