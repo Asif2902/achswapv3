@@ -533,13 +533,11 @@ export async function updateTransferStatus(
       error: updates.error,
       ownershipProof,
     });
-    if (!ok) return false;
   } else if (status === "minting") {
     ok = await postBridgeTransfer("mark_minting", {
       burnTxHash,
       ownershipProof,
     });
-    if (!ok) return false;
   } else if (status === "complete") {
     const existing = getFallbackTransfers();
     const localRecord = existing.find((t) => t.id === burnTxHash);
@@ -557,7 +555,6 @@ export async function updateTransferStatus(
       timestamp: localRecord?.timestamp,
       ownershipProof,
     });
-    if (!ok) return false;
   } else if (status === "failed") {
     ok = await postBridgeTransfer("mark_failed", {
       burnTxHash,
@@ -565,17 +562,15 @@ export async function updateTransferStatus(
       error: updates.error,
       ownershipProof,
     });
-    if (!ok) return false;
   } else if (status === "attesting") {
     ok = await postBridgeTransfer("mark_attesting", {
       burnTxHash,
       error: updates.error,
       ownershipProof,
     });
-    if (!ok) return false;
   }
 
-  // Only update local storage when server write succeeded
+  // Update local storage even if server write failed so user isn't stuck
   const existing = getFallbackTransfers();
   const idx = existing.findIndex((t) => t.id === burnTxHash);
   if (idx >= 0) {

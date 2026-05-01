@@ -18,7 +18,7 @@ try {
 } catch {}
 
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 240;
-const FALLBACK_RATE_LIMIT_PER_MINUTE = 5; // Low cap for Redis fallback
+const FALLBACK_RATE_LIMIT_PER_MINUTE = 240; // Use normal cap even if Redis fails
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_TRANSFER_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MAX_TRANSFERS_PER_WALLET = 100;
@@ -797,12 +797,17 @@ async function saveTransferRecord(record) {
 
 async function getTransferRecord(burnTxHash) {
   if (HAS_REDIS) {
-    const [raw] = await upstashPipeline([["GET", txKey(burnTxHash)]]);
-    if (!raw || typeof raw !== "string") return null;
     try {
-      return normalizeTransferRecord(JSON.parse(raw));
-    } catch {
-      return null;
+      const [raw] = await upstashPipeline([["GET", txKey(burnTxHash)]]);
+      if (!raw || typeof raw !== "string") return null;
+      try {
+        return normalizeTransferRecord(JSON.parse(raw));
+      } catch {
+        return null;
+      }
+    } catch (e) {
+      console.error("[bridge] Redis getTransferRecord error:", e);
+      // Fallback
     }
   }
 
@@ -814,15 +819,19 @@ async function getTransferRecord(burnTxHash) {
 
 async function deleteTransferRecord(burnTxHash, wallet) {
   if (HAS_REDIS) {
-    if (wallet) {
-      await upstashPipeline([
-        ["DEL", txKey(burnTxHash)],
-        ["ZREM", walletKey(wallet), burnTxHash],
-      ]);
-    } else {
-      await upstashPipeline([["DEL", txKey(burnTxHash)]]);
+    try {
+      if (wallet) {
+        await upstashPipeline([
+          ["DEL", txKey(burnTxHash)],
+          ["ZREM", walletKey(wallet), burnTxHash],
+        ]);
+      } else {
+        await upstashPipeline([["DEL", txKey(burnTxHash)]]);
+      }
+      return;
+    } catch (e) {
+      console.error("[bridge] Redis deleteTransferRecord error:", e);
     }
-    return;
   }
 
   deleteMemoryTransfer(burnTxHash, wallet);
@@ -830,11 +839,16 @@ async function deleteTransferRecord(burnTxHash, wallet) {
 
 async function listWalletHashes(wallet) {
   if (HAS_REDIS) {
-    const [hashes] = await upstashPipeline([
-      ["ZREVRANGE", walletKey(wallet), "0", String(MAX_TRANSFERS_PER_WALLET - 1)],
-    ]);
-    if (!Array.isArray(hashes)) return [];
-    return hashes.map(canonicalHash).filter((hash) => isHash(hash));
+    try {
+      const [hashes] = await upstashPipeline([
+        ["ZREVRANGE", walletKey(wallet), "0", String(MAX_TRANSFERS_PER_WALLET - 1)],
+      ]);
+      if (!Array.isArray(hashes)) return [];
+      return hashes.map(canonicalHash).filter((hash) => isHash(hash));
+    } catch (e) {
+      console.error("[bridge] Redis listWalletHashes error:", e);
+      // Fallback to memory if Redis fails
+    }
   }
 
   touchMemoryTransferPrune();
@@ -851,17 +865,22 @@ async function getManyTransferRecords(hashes) {
   if (!hashes.length) return [];
 
   if (HAS_REDIS) {
-    const commands = hashes.map((hash) => ["GET", txKey(hash)]);
-    const results = await upstashPipeline(commands);
-    return results.map((raw, idx) => {
-      if (!raw || typeof raw !== "string") return { hash: hashes[idx], transfer: null };
-      try {
-        const normalized = normalizeTransferRecord(JSON.parse(raw));
-        return { hash: hashes[idx], transfer: normalized || null };
-      } catch {
-        return { hash: hashes[idx], transfer: null };
-      }
-    });
+    try {
+      const commands = hashes.map((hash) => ["GET", txKey(hash)]);
+      const results = await upstashPipeline(commands);
+      return results.map((raw, idx) => {
+        if (!raw || typeof raw !== "string") return { hash: hashes[idx], transfer: null };
+        try {
+          const normalized = normalizeTransferRecord(JSON.parse(raw));
+          return { hash: hashes[idx], transfer: normalized || null };
+        } catch {
+          return { hash: hashes[idx], transfer: null };
+        }
+      });
+    } catch (e) {
+      console.error("[bridge] Redis getManyTransferRecords error:", e);
+      // Fallback to memory
+    }
   }
 
   touchMemoryTransferPrune();
