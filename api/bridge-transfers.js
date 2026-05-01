@@ -23,7 +23,7 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_TRANSFER_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MAX_TRANSFERS_PER_WALLET = 100;
 const CLAIM_RECONCILE_LIMIT = 10;
-const OWNERSHIP_PROOF_MAX_TTL_MS = 10 * 60_000;
+const OWNERSHIP_PROOF_MAX_TTL_MS = 12 * 60_000; // 12 minutes (allows 2m clock skew/delay relative to client 10m)
 const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
 
 const RPC_PROBE_TIMEOUT_MS = 4_500;
@@ -1540,7 +1540,12 @@ async function handleMarkComplete(req, res) {
 
   let verified = false;
   if (isHash(mintTxHash)) {
-    verified = await isTransferClaimed(transfer, mintTxHash) || await verifyMintTransaction(transfer, mintTxHash);
+    try {
+      verified = await isTransferClaimed(transfer, mintTxHash) || await verifyMintTransaction(transfer, mintTxHash);
+    } catch (err) {
+      console.warn(`[bridge] mark_complete verification threw error:`, err);
+      verified = false;
+    }
   }
 
   if (!verified) {

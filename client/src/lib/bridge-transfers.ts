@@ -455,7 +455,17 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
 
   // Only reconcile and persist when server response was trusted
   const merged = mergeFallbackTransfersForWallet(wallet, serverTransfers);
-  const sorted = merged.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+  
+  const pending: PendingBridgeTransfer[] = [];
+  for (const tx of merged) {
+    if (tx.status === "complete" || tx.status === "failed") {
+      addToHistory(tx);
+    } else {
+      pending.push(tx);
+    }
+  }
+
+  const sorted = pending.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
   setFallbackTransfers(sorted);
   return sorted;
 }
@@ -569,7 +579,7 @@ export async function updateTransferStatus(
   const existing = getFallbackTransfers();
   const idx = existing.findIndex((t) => t.id === burnTxHash);
   if (idx >= 0) {
-    existing[idx] = {
+    const updatedRecord = {
       ...existing[idx],
       ...updates,
       id: existing[idx].id,
@@ -577,6 +587,13 @@ export async function updateTransferStatus(
       userAddress: existing[idx].userAddress,
       updatedAt: Date.now(),
     };
+
+    if (status === "complete" || status === "failed") {
+      addToHistory(updatedRecord);
+      existing.splice(idx, 1);
+    } else {
+      existing[idx] = updatedRecord;
+    }
     setFallbackTransfers(existing);
     dispatchTransfersUpdated();
   }
