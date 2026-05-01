@@ -1018,17 +1018,29 @@ export default function Bridge() {
 
     try {
       if (pendingTx.status === "attesting") {
-        // Resume from attestation polling
-        setTransfer({
-          step: "attesting",
-          burnTxHash: pendingTx.burnTxHash,
-          mintTxHash: null,
-          attestation: null,
-          error: null,
-        });
+        let attestationResult: { message: string; attestation: string; destinationDomain: number };
 
-        toast({ title: "Resuming transfer...", description: "Polling for attestation" });
-        const attestationResult = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
+        // If we already have attestation, use it directly (don't poll again)
+        if (pendingTx.attestation?.message) {
+          toast({ title: "Resuming transfer...", description: "Using existing attestation" });
+          attestationResult = {
+            message: pendingTx.attestation.message,
+            attestation: pendingTx.attestation.attestation || pendingTx.attestation.message,
+            destinationDomain: pendingTx.destDomain || 0,
+          };
+        } else {
+          // Resume from attestation polling
+          setTransfer({
+            step: "attesting",
+            burnTxHash: pendingTx.burnTxHash,
+            mintTxHash: null,
+            attestation: null,
+            error: null,
+          });
+
+          toast({ title: "Resuming transfer...", description: "Polling for attestation" });
+          attestationResult = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
+        }
 
         if (abortRef.current) return;
 
