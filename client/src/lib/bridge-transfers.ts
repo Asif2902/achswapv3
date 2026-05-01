@@ -1,4 +1,9 @@
-import { hexlify, toUtf8Bytes } from "ethers";
+import { hexlify, toUtf8Bytes, JsonRpcProvider, Contract } from "ethers";
+import {
+  getChainByDomain,
+  getWorkingProvider,
+  MESSAGE_TRANSMITTER_V2_ABI,
+} from "./cctp-config";
 
 /**
  * Bridge transfer persistence API client.
@@ -32,6 +37,7 @@ const HISTORY_STORAGE_KEY = "achswap_bridge_transfer_history";
 const OWNERSHIP_INTENT = "bridge_transfer_mutation";
 const OWNERSHIP_PROOF_TTL_MS = 10 * 60_000;
 const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
+const RECONCILIATION_CACHE_TTL_MS = 30_000; // 30 seconds cache for reconciliation results
 
 const ownershipProofCacheByTransferId = new Map<string, {
   signedMessage: string;
@@ -39,6 +45,8 @@ const ownershipProofCacheByTransferId = new Map<string, {
   issuedAt: number;
   expiresAt: number;
 }>();
+
+const reconciliationCache = new Map<string, { claimed: boolean; checkedAt: number }>();
 
 function canonicalHash(value: string): string {
   return String(value || "").trim().toLowerCase();
@@ -392,6 +400,166 @@ async function parseResponseJson(res: Response): Promise<any> {
   }
 }
 
+/**
+ * Extract CCTP message nonce from an attestation message.
+ * The nonce is at bytes 12-44 (after the 0x prefix + 12-byte padding).
+ */
+function extractCctpNonce(message: string): string | null {
+  const normalized = String(message || "").trim().toLowerCase();
+  if (!/^0x[0-9a-f]+$/.test(normalized)) return null;
+  const start = 2 + 12 * 2; // Skip "0x" + 12 bytes (24 chars)
+  const end = start + 32 * 2; // nonce is 32 bytes (64 chars)
+  if (normalized.length < end) return null;
+  return `0x${normalized.slice(start, end)}`;
+}
+
+/**
+ * Check if a transfer's nonce has been used on the destination chain.
+ * This indicates the transfer has been claimed/minted.
+ */
+async function checkIfClaimed(transfer: PendingBridgeTransfer): Promise<boolean> {
+  if (!transfer.attestation?.message) return false;
+  if (!transfer.destDomain && !transfer.destChainId) return false;
+
+  // Check cache first
+  const cached = reconciliationCache.get(transfer.id);
+  if (cached && Date.now() - cached.checkedAt < RECONCILIATION_CACHE_TTL_MS) {
+    return cached.claimed;
+  }
+
+  const chain = transfer.destDomain
+    ? getChainByDomain(transfer.destDomain)
+    : transfer.destChainId
+      ? getChainByChainId(transfer.destChainId)
+      : undefined;
+
+  if (!chain) {
+    console.warn(`[bridge-reconcile] Unknown destination chain for transfer ${transfer.id}`);
+    return false;
+  }
+
+  const nonce = extractCctpNonce(transfer.attestation.message);
+  if (!nonce) return false;
+
+  try {
+    const provider = await getWorkingProvider(chain);
+    const contract = new Contract(
+      chain.messageTransmitterV2,
+      MESSAGE_TRANSMITTER_V2_ABI,
+      provider,
+    );
+    const nonceState = await contract.usedNonces(nonce);
+    const claimed = BigInt(nonceState) > 0n;
+
+    // Cache the result
+    reconciliationCache.set(transfer.id, { claimed, checkedAt: Date.now() });
+
+    return claimed;
+  } catch (err) {
+    console.warn(`[bridge-reconcile] Failed to check nonce for ${transfer.id}:`, err);
+    return false;
+  }
+}
+
+/**
+ * Reconcile a single transfer against the blockchain.
+ * If the transfer is actually complete on-chain but shows as pending locally,
+ * this will update it to "complete".
+ */
+export async function reconcileTransfer(
+  transfer: PendingBridgeTransfer,
+): Promise<PendingBridgeTransfer> {
+  // Only reconcile transfers that should be complete
+  const pendingStatuses = ["attesting", "ready_to_mint", "minting"];
+  if (!pendingStatuses.includes(transfer.status)) {
+    return transfer;
+  }
+
+  // Must have attestation to check
+  if (!transfer.attestation?.message) {
+    return transfer;
+  }
+
+  const claimed = await checkIfClaimed(transfer);
+  if (!claimed) {
+    return transfer;
+  }
+
+  console.log(`[bridge-reconcile] Transfer ${transfer.id} is claimed on-chain, updating to complete`);
+
+  // Update local storage
+  const existing = getFallbackTransfers();
+  const idx = existing.findIndex((t) => t.id === transfer.id);
+  if (idx >= 0) {
+    existing[idx] = {
+      ...existing[idx],
+      status: "complete",
+      error: undefined,
+      updatedAt: Date.now(),
+    };
+    setFallbackTransfers(existing);
+    dispatchTransfersUpdated();
+  }
+
+  // Try to update server
+  try {
+    const ownershipProof = getCachedOwnershipProof(transfer.id);
+    if (ownershipProof) {
+      await postBridgeTransfer("mark_complete", {
+        burnTxHash: transfer.id,
+        mintTxHash: transfer.mintTxHash,
+        message: transfer.attestation?.message,
+        attestation: transfer.attestation,
+        userAddress: transfer.userAddress,
+        sourceDomain: transfer.sourceDomain,
+        sourceChainId: transfer.sourceChainId,
+        destDomain: transfer.destDomain,
+        destChainId: transfer.destChainId,
+        amount: transfer.amount,
+        timestamp: transfer.timestamp,
+        ownershipProof,
+      });
+    }
+  } catch (err) {
+    console.warn(`[bridge-reconcile] Failed to update server for ${transfer.id}:`, err);
+  }
+
+  return {
+    ...transfer,
+    status: "complete",
+    error: undefined,
+  };
+}
+
+/**
+ * Reconcile all pending transfers against the blockchain.
+ * This will scan all pending transfers and update any that are actually complete.
+ */
+export async function reconcileAllPendingTransfers(
+  userAddress: string,
+): Promise<PendingBridgeTransfer[]> {
+  const transfers = getFallbackTransfers().filter(
+    (t) => canonicalAddress(t.userAddress) === canonicalAddress(userAddress),
+  );
+
+  const pending = transfers.filter((t) =>
+    ["attesting", "ready_to_mint", "minting"].includes(t.status),
+  );
+
+  if (pending.length === 0) return transfers;
+
+  console.log(`[bridge-reconcile] Checking ${pending.length} pending transfers against blockchain`);
+
+  const results = await Promise.allSettled(
+    pending.map((t) => reconcileTransfer(t)),
+  );
+
+  // Return updated transfers
+  return getFallbackTransfers().filter(
+    (t) => canonicalAddress(t.userAddress) === canonicalAddress(userAddress),
+  );
+}
+
 async function postBridgeTransfer(action: string, payload: Record<string, unknown>): Promise<boolean> {
   try {
     const res = await fetch("/api/bridge-transfers", {
@@ -467,6 +635,12 @@ export async function fetchPendingTransfers(userAddress: string): Promise<Pendin
 
   const sorted = pending.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
   setFallbackTransfers(sorted);
+
+  // Run reconciliation in the background (don't block on this)
+  void reconcileAllPendingTransfers(wallet).catch((err) => {
+    console.warn("[bridge] Background reconciliation failed:", err);
+  });
+
   return sorted;
 }
 
