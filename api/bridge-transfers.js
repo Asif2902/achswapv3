@@ -1518,19 +1518,18 @@ async function handleMarkFailed(req, res) {
   return res.status(200).json({ ok: true });
 }
 
-async function handleMarkComplete(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
-  const mintTxHash = canonicalHash(req.body?.mintTxHash || "");
-  const message = typeof req.body?.message === "string" ? req.body.message : "";
+  const mintTxHash = canonicalHash(req.body?.mintTxHash || '');
+  const message = typeof req.body?.message === 'string' ? req.body.message : '';
   const attestation = req.body?.attestation;
 
-  if (!isHash(burnTxHash)) return res.status(400).json({ error: "Invalid burnTxHash" });
+  if (!isHash(burnTxHash)) return res.status(400).json({ error: 'Invalid burnTxHash' });
 
   let transfer = await getTransferRecord(burnTxHash);
   if (!transfer) {
-    const userAddress = canonicalAddress(req.body?.userAddress || req.query?.wallet || "");
+    const userAddress = canonicalAddress(req.body?.userAddress || req.query?.wallet || '');
     if (!isWallet(userAddress)) {
-      return res.status(400).json({ error: "Transfer not found and no userAddress provided" });
+      return res.status(400).json({ error: 'Transfer not found and no userAddress provided' });
     }
     transfer = {
       id: burnTxHash,
@@ -1539,22 +1538,46 @@ async function handleMarkComplete(req, res) {
       sourceChainId: Number(req.body?.sourceChainId) || 0,
       destDomain: Number(req.body?.destDomain) || 0,
       destChainId: Number(req.body?.destChainId) || 0,
-      amount: String(req.body?.amount || "0"),
+      amount: String(req.body?.amount || '0'),
       userAddress,
       timestamp: Number(req.body?.timestamp) || Date.now(),
-      status: "attesting",
+      status: 'attesting',
     };
     await saveTransferRecord(transfer);
     transfer = await getTransferRecord(burnTxHash);
     if (!transfer) {
-      return res.status(500).json({ error: "Failed to create transfer record" });
+      return res.status(500).json({ error: 'Failed to create transfer record' });
     }
+  }
+
+  // Check if already claimed on-chain FIRST (before ownership check)
+  let alreadyClaimed = false;
+  if (isHash(mintTxHash)) {
+    try {
+      alreadyClaimed = await isTransferClaimed(transfer, mintTxHash) || await verifyMintTransaction(transfer, mintTxHash);
+    } catch (err) {
+      console.warn(`[bridge] mark_complete verification threw error: `, err);
+    }
+  }
+
+  if (alreadyClaimed) {
+    console.log(`[bridge] Transfer  already claimed, updating to complete`);
+    await saveTransferRecord({
+      ...transfer,
+      status: 'complete',
+      attestation: normalizeAttestation(attestation) || transfer.attestation,
+      mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
+      error: undefined,
+      updatedAt: Date.now(),
+      expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
+    });
+    return res.status(200).json({ ok: true, completed: true, message: 'Transaction already completed' });
   }
 
   try {
     await requireSignedOwnership(req, transfer);
   } catch (err) {
-    return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+    return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
   }
 
   let verified = false;
@@ -1562,18 +1585,18 @@ async function handleMarkComplete(req, res) {
     try {
       verified = await isTransferClaimed(transfer, mintTxHash) || await verifyMintTransaction(transfer, mintTxHash);
     } catch (err) {
-      console.warn(`[bridge] mark_complete verification threw error:`, err);
+      console.warn(`[bridge] mark_complete verification threw error: `, err);
       verified = false;
     }
   }
 
   if (!verified) {
-    console.warn(`[bridge] mark_complete: could not verify ${burnTxHash}, allowing anyway`);
+    console.warn(`[bridge] mark_complete: could not verify , allowing anyway`);
   }
 
   await saveTransferRecord({
     ...transfer,
-    status: "complete",
+    status: 'complete',
     attestation: normalizeAttestation(attestation) || transfer.attestation,
     mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
     error: undefined,
