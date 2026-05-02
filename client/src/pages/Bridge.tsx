@@ -23,12 +23,14 @@ import {
   updateTransferStatus,
   fetchPendingTransfers,
   getCachedPendingTransfersForWallet,
-  getTransferHistory,
   getCachedHistoryForWallet,
   getTransferStatusRank,
   isBridgeTransferApiAvailable,
   removeTransfer,
-  reconcileAllPendingTransfers,
+  getFallbackTransfers,
+  setFallbackTransfers,
+  addToHistory,
+  dispatchTransfersUpdated,
   type PendingBridgeTransfer,
 } from "@/lib/bridge-transfers";
 
@@ -694,8 +696,6 @@ export default function Bridge() {
   const [manualClaimTxHash, setManualClaimTxHash] = useState("");
   const [manualClaimLoading, setManualClaimLoading] = useState(false);
 
-  // Reconciliation state
-  const [reconciling, setReconciling] = useState(false);
   const [manualClaimTxHashValid, setManualClaimTxHashValid] = useState(false);
   const [manualClaimSourceChain, setManualClaimSourceChain] = useState<CCTPChain | null>(null);
   const [manualClaimDestChain, setManualClaimDestChain] = useState<CCTPChain | null>(null);
@@ -1018,7 +1018,7 @@ export default function Bridge() {
 
     try {
       if (pendingTx.status === "attesting") {
-        let attestationResult: { message: string; attestation: string; destinationDomain: number };
+        let attestationResult: AttestationPollResult;
 
         // If we already have attestation, use it directly (don't poll again)
         if (pendingTx.attestation?.message) {
@@ -1136,7 +1136,12 @@ export default function Bridge() {
         const existing = getFallbackTransfers();
         const idx = existing.findIndex((t) => t.id === transferId);
         if (idx >= 0) {
-          const completed = { ...existing[idx], status: "complete", error: undefined, updatedAt: Date.now() };
+          const completed: PendingBridgeTransfer = {
+            ...existing[idx],
+            status: "complete",
+            error: undefined,
+            updatedAt: Date.now(),
+          };
           addToHistory(completed);
           existing.splice(idx, 1);
           setFallbackTransfers(existing);
@@ -1170,7 +1175,12 @@ export default function Bridge() {
         const existing = getFallbackTransfers();
         const idx = existing.findIndex((t) => t.id === transferId);
         if (idx >= 0) {
-          existing[idx] = { ...existing[idx], status: "failed", error: errorMsg, updatedAt: Date.now() };
+          existing[idx] = {
+            ...existing[idx],
+            status: "failed",
+            error: errorMsg,
+            updatedAt: Date.now(),
+          };
           setFallbackTransfers(existing);
           dispatchTransfersUpdated();
         }
@@ -1183,7 +1193,13 @@ export default function Bridge() {
       const existing = getFallbackTransfers();
       const idx = existing.findIndex((t) => t.id === transferId);
       if (idx >= 0) {
-        const completed = { ...existing[idx], status: "complete", mintTxHash: mintReceipt.hash, error: undefined, updatedAt: Date.now() };
+        const completed: PendingBridgeTransfer = {
+          ...existing[idx],
+          status: "complete",
+          mintTxHash: mintReceipt.hash,
+          error: undefined,
+          updatedAt: Date.now(),
+        };
         addToHistory(completed);
         existing.splice(idx, 1);
         setFallbackTransfers(existing);
@@ -1231,7 +1247,12 @@ export default function Bridge() {
         const existing = getFallbackTransfers();
         const idx = existing.findIndex((t) => t.id === transferId);
         if (idx >= 0) {
-          const completed = { ...existing[idx], status: "complete", error: undefined, updatedAt: Date.now() };
+          const completed: PendingBridgeTransfer = {
+            ...existing[idx],
+            status: "complete",
+            error: undefined,
+            updatedAt: Date.now(),
+          };
           addToHistory(completed);
           existing.splice(idx, 1);
           setFallbackTransfers(existing);
@@ -2330,40 +2351,6 @@ export default function Bridge() {
                   >
                     <Zap className="w-3 h-3" />
                     Manual Claim
-                  </button>
-
-                  {/* Reconcile button */}
-                  <button
-                    onClick={async () => {
-                      if (reconciling || !address) return;
-                      setReconciling(true);
-                      try {
-                        await reconcileAllPendingTransfers(address);
-                        void refreshPendingTransfers();
-                        toast({
-                          title: "Reconciliation complete",
-                          description: "Checked pending transfers against blockchain",
-                        });
-                      } catch (err: any) {
-                        toast({
-                          title: "Reconciliation failed",
-                          description: err?.message || "Unknown error",
-                          variant: "destructive",
-                        });
-                      } finally {
-                        setReconciling(false);
-                      }
-                    }}
-                    disabled={reconciling || !address}
-                    className="text-[11px] font-bold px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-all disabled:opacity-50"
-                    style={{
-                      color: "#4ade80",
-                      background: "rgba(74,222,128,0.1)",
-                      border: "1px solid rgba(74,222,128,0.25)",
-                    }}
-                  >
-                    <RotateCcw className={`w-3 h-3 ${reconciling ? "animate-spin" : ""}`} />
-                    {reconciling ? "Reconciling..." : "Reconcile"}
                   </button>
 
                   {allTransfers.length > 0 && (

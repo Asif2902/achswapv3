@@ -1,6 +1,7 @@
 import { hexlify, toUtf8Bytes, JsonRpcProvider, Contract } from "ethers";
 import {
   getChainByDomain,
+  getChainByChainId,
   getWorkingProvider,
   MESSAGE_TRANSMITTER_V2_ABI,
 } from "./cctp-config";
@@ -97,11 +98,11 @@ function normalizeTransfer(transfer: PendingBridgeTransfer): PendingBridgeTransf
   };
 }
 
-function dispatchTransfersUpdated(): void {
+export function dispatchTransfersUpdated(): void {
   window.dispatchEvent(new CustomEvent("bridge-transfers-updated"));
 }
 
-function getFallbackTransfers(): PendingBridgeTransfer[] {
+export function getFallbackTransfers(): PendingBridgeTransfer[] {
   try {
     const LEGACY_KEY = "achswap_bridge_pending_transfers";
     const legacyRaw = localStorage.getItem(LEGACY_KEY);
@@ -145,7 +146,7 @@ function getFallbackTransfers(): PendingBridgeTransfer[] {
   }
 }
 
-function setFallbackTransfers(transfers: PendingBridgeTransfer[]): void {
+export function setFallbackTransfers(transfers: PendingBridgeTransfer[]): void {
   try {
     localStorage.setItem(FALLBACK_STORAGE_KEY, JSON.stringify(transfers.map(normalizeTransfer)));
   } catch {
@@ -243,7 +244,7 @@ function setHistoryTransfers(transfers: PendingBridgeTransfer[]): void {
   } catch {}
 }
 
-function addToHistory(transfer: PendingBridgeTransfer): void {
+export function addToHistory(transfer: PendingBridgeTransfer): void {
   const history = getHistoryTransfers();
   const normalized = normalizeTransfer(transfer);
   const existingIndex = history.findIndex(
@@ -550,7 +551,7 @@ export async function reconcileAllPendingTransfers(
 
   console.log(`[bridge-reconcile] Checking ${pending.length} pending transfers against blockchain`);
 
-  const results = await Promise.allSettled(
+  await Promise.allSettled(
     pending.map((t) => reconcileTransfer(t)),
   );
 
