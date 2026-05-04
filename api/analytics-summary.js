@@ -25,21 +25,18 @@ function readPositiveEnvNumber(name, fallback, min = 1, max = Number.MAX_SAFE_IN
 
 const RATE_LIMIT_MAX = readPositiveEnvNumber("SUBGRAPH_RATE_LIMIT_PER_MINUTE", DEFAULT_RATE_LIMIT_MAX, 1, 100_000);
 const UPSTREAM_TIMEOUT_MS = readPositiveEnvNumber("UPSTREAM_TIMEOUT_MS", DEFAULT_UPSTREAM_TIMEOUT_MS, 250, 120_000);
-const SUMMARY_CACHE_TTL_MS = readPositiveEnvNumber("ANALYTICS_SUMMARY_CACHE_TTL_MS", DEFAULT_SUMMARY_CACHE_TTL_MS, 1_000, 3_600_000);
+const SUMMARY_CACHE_TTL_MS = readPositiveEnvNumber("ANALYTICS_SUMMARY_CACHE_TTL_MS", 600_000, 1_000, 3_600_000); // 10 minutes default
 const MAX_RANK_CACHE_ENTRIES = readPositiveEnvNumber("ANALYTICS_RANK_CACHE_MAX", DEFAULT_MAX_RANK_CACHE_ENTRIES, 1, 100_000);
 const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim();
 const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_SECONDS = Math.max(1, Math.floor(RATE_LIMIT_WINDOW_MS / 1000));
 
+import { serializeAndCompress, deserializeAndDecompress, monitorRedisHealth } from './utils/redis.js';
+
 const rateLimitByKey = new Map();
 let rateLimitRequestCount = 0;
-const summaryCache = {
-  value: null,
-  expiresAt: 0,
-};
-const rankCache = new Map();
-let summaryRefreshPromise = null;
-const rankRefreshPromises = new Map();
+
+// Redis logic handles caching
 
 function normalizeOrigin(origin) {
   if (!origin) return "";
@@ -223,47 +220,6 @@ async function checkRateLimit(req) {
   return state.count <= RATE_LIMIT_MAX;
 }
 
-function getCachedSummaryState() {
-  if (!summaryCache.value) {
-    return { value: null, fresh: false };
-  }
-
-  return {
-    value: summaryCache.value,
-    fresh: Date.now() <= summaryCache.expiresAt,
-  };
-}
-
-function setCachedSummary(value) {
-  summaryCache.value = value;
-  summaryCache.expiresAt = Date.now() + SUMMARY_CACHE_TTL_MS;
-}
-
-function getCachedRankState(wallet) {
-  const cached = rankCache.get(wallet);
-  if (!cached) {
-    return { exists: false, value: null, fresh: false };
-  }
-
-  return {
-    exists: true,
-    value: cached.value,
-    fresh: Date.now() <= cached.expiresAt,
-  };
-}
-
-function setCachedRank(wallet, rank) {
-  rankCache.set(wallet, {
-    value: rank,
-    expiresAt: Date.now() + SUMMARY_CACHE_TTL_MS,
-  });
-
-  if (rankCache.size > MAX_RANK_CACHE_ENTRIES) {
-    const oldest = rankCache.keys().next().value;
-    if (oldest) rankCache.delete(oldest);
-  }
-}
-
 async function fetchSubgraph(token, query, variables) {
   return fetchJsonWithTimeout(
     STUDIO_URL,
@@ -286,11 +242,21 @@ function normalizeAddressInput(value) {
 
 async function countEntityByPagination(token, entity, where = "") {
   let total = 0;
-  let skip = 0;
+  let lastId = "";
 
   while (true) {
-    const filter = where ? `, where: ${where}` : "";
-    const query = `query Count${entity}${skip} { ${entity}(first: 1000, skip: ${skip}${filter}) { id } }`;
+    let filter = "";
+    if (where && lastId) {
+      // Safely inject id_gt into existing where clause without duplicating
+      const innerWhere = where.replace(/^\s*\{\s*/, '').replace(/\s*\}\s*$/, '');
+      filter = `, where: { id_gt: "${lastId}", ${innerWhere} }`;
+    } else if (where) {
+      filter = `, where: ${where}`;
+    } else if (lastId) {
+      filter = `, where: { id_gt: "${lastId}" }`;
+    }
+
+    const query = `query Count${entity} { ${entity}(first: 1000, orderBy: id, orderDirection: asc${filter}) { id } }`;
     const { response: upstream, json: payload } = await fetchSubgraph(token, query, {});
 
     if (!upstream.ok) {
@@ -303,7 +269,7 @@ async function countEntityByPagination(token, entity, where = "") {
     const rows = payload?.data?.[entity] || [];
     total += rows.length;
     if (rows.length < 1000) break;
-    skip += 1000;
+    lastId = rows[rows.length - 1].id;
   }
 
   return total;
@@ -323,26 +289,6 @@ async function buildAggregateSummary(token) {
     rwaUsersCount,
     outlierPoolsCount,
   };
-}
-
-function triggerSummaryRefresh(token) {
-  if (summaryRefreshPromise) return summaryRefreshPromise;
-
-  summaryRefreshPromise = buildAggregateSummary(token)
-    .then((summary) => {
-      setCachedSummary(summary);
-      return summary;
-    })
-    .catch((err) => {
-      const detail = err instanceof Error ? err.message : String(err);
-      console.warn(`[analytics-summary] summary refresh failed: ${detail}`);
-      throw err;
-    })
-    .finally(() => {
-      summaryRefreshPromise = null;
-    });
-
-  return summaryRefreshPromise;
 }
 
 async function getUserRankByEffectiveVolume(token, wallet) {
@@ -388,31 +334,6 @@ async function getUserRankByEffectiveVolume(token, wallet) {
   return higherCount + tiedLowerCount + 1;
 }
 
-function triggerRankRefresh(token, wallet) {
-  const existing = rankRefreshPromises.get(wallet);
-  if (existing) return existing;
-
-  const refresh = getUserRankByEffectiveVolume(token, wallet)
-    .then((rank) => {
-      setCachedRank(wallet, rank);
-      return rank;
-    })
-    .catch((err) => {
-      const detail = err instanceof Error ? err.message : String(err);
-      const maskedWallet = typeof wallet === "string" && wallet.length > 10
-        ? `${wallet.slice(0, 6)}...${wallet.slice(-4)}`
-        : "<redacted>";
-      console.warn(`[analytics-summary] rank refresh failed for ${maskedWallet}: ${detail}`);
-      throw err;
-    })
-    .finally(() => {
-      rankRefreshPromises.delete(wallet);
-    });
-
-  rankRefreshPromises.set(wallet, refresh);
-  return refresh;
-}
-
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
 
@@ -440,43 +361,33 @@ export default async function handler(req, res) {
   const forceRefresh = req.body?.forceRefresh === true && isPrivileged(req);
 
   try {
-    const summaryState = forceRefresh
-      ? { value: null, fresh: false }
-      : getCachedSummaryState();
-
-    let aggregateSummary = summaryState.value;
-    if (!aggregateSummary) {
-      try {
-        aggregateSummary = await triggerSummaryRefresh(token);
-      } catch (err) {
-        throw err;
-      }
-    } else if (!summaryState.fresh || forceRefresh) {
-      void triggerSummaryRefresh(token).catch(() => {});
-    }
-
-    if (!aggregateSummary) {
-      return res.status(503).json({ error: "Analytics summary is warming up. Please retry shortly." });
-    }
-
+    monitorRedisHealth(); // Fire & forget
+    
+    let aggregateSummary = null;
     let targetUserRank = null;
-    if (wallet) {
-      const rankState = forceRefresh
-        ? { exists: false, value: null, fresh: false }
-        : getCachedRankState(wallet);
-
-      if (!rankState.exists) {
-        try {
-          targetUserRank = await triggerRankRefresh(token, wallet);
-        } catch (err) {
-          throw err;
-        }
-      } else {
-        targetUserRank = rankState.value;
-        if (!rankState.fresh || forceRefresh) {
-          void triggerRankRefresh(token, wallet).catch(() => {});
-        }
+    let summaryCached = false;
+    let rankCached = false;
+    const summaryCacheKey = 'analytics:summary';
+    const rankCacheKey = `analytics:rank:${wallet}`;
+    
+    if (!forceRefresh) {
+      aggregateSummary = await deserializeAndDecompress(summaryCacheKey);
+      if (aggregateSummary) summaryCached = true;
+      
+      if (wallet) {
+        targetUserRank = await deserializeAndDecompress(rankCacheKey);
+        if (targetUserRank !== null) rankCached = true;
       }
+    }
+
+    if (!aggregateSummary) {
+      aggregateSummary = await buildAggregateSummary(token);
+      await serializeAndCompress(summaryCacheKey, aggregateSummary, Math.floor(SUMMARY_CACHE_TTL_MS / 1000));
+    }
+
+    if (wallet && targetUserRank === null) {
+      targetUserRank = await getUserRankByEffectiveVolume(token, wallet);
+      await serializeAndCompress(rankCacheKey, targetUserRank, Math.floor(SUMMARY_CACHE_TTL_MS / 1000));
     }
 
     return res.status(200).json({
@@ -485,6 +396,7 @@ export default async function handler(req, res) {
       rwaUsersCount: aggregateSummary.rwaUsersCount,
       outlierPoolsCount: aggregateSummary.outlierPoolsCount,
       targetUserRank,
+      cached: summaryCached && (!wallet || rankCached),
     });
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
