@@ -712,8 +712,8 @@ export async function updateTransferStatus(
   }
 
   // Try to update server (non-blocking for UI)
-  let serverOk = true;
   const requiresOwnership = isOwnershipAction(status);
+  let serverOk = !requiresOwnership;
   if (requiresOwnership) {
     const expectedOwner = snapshot?.userAddress;
     let ownershipProof = getCachedOwnershipProof(burnTxHash);
@@ -723,6 +723,7 @@ export async function updateTransferStatus(
 
     if (!ownershipProof) {
       console.warn(`[bridge-transfers] ${status} skipped server update: missing ownership proof`);
+      serverOk = false;
     } else {
       serverOk = await postBridgeTransfer(
         status === "ready_to_mint" ? "update_attestation" :
@@ -750,7 +751,7 @@ export async function updateTransferStatus(
   }
 
   // Now perform the splice and history addition if status was terminal
-  if (idx >= 0 && (status === "complete" || status === "failed")) {
+  if (serverOk && idx >= 0 && (status === "complete" || status === "failed")) {
     const updatedRecord = {
       ...snapshot!,
       ...updates,
