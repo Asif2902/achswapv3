@@ -195,6 +195,12 @@ function resetEndpointFailure(url: string) {
   entry.lastRegisteredAt = 0;
 }
 
+function clearEndpointFailureStateForChain(chainId: number) {
+  for (const endpoint of getConfiguredRpcEndpoints(chainId)) {
+    endpointFailureMap.delete(endpoint.url);
+  }
+}
+
 function resetAlchemyFailureCount(chainId: number, options?: { sourceIsAlchemy?: boolean }) {
   const state = getFailoverState(chainId);
   const updatedState: RpcFailoverState = {
@@ -207,6 +213,7 @@ function resetAlchemyFailureCount(chainId: number, options?: { sourceIsAlchemy?:
     if (state.permanentPublicUntil) {
       updatedState.permanentPublicUntil = null;
       updatedState.preferredRole = "primary";
+      clearEndpointFailureStateForChain(chainId);
     }
   }
 
@@ -230,17 +237,28 @@ function trackEndpointFailure(chainId: number, endpoint: RpcEndpoint) {
   }
 }
 
+function refreshFailoverState(chainId: number): RpcFailoverState {
+  const state = getFailoverState(chainId);
+  if (!state.permanentPublicUntil || Date.now() <= state.permanentPublicUntil) {
+    return state;
+  }
+
+  const updatedState: RpcFailoverState = {
+    ...state,
+    permanentPublicUntil: null,
+    alchemyFailureCount: 0,
+    preferredRole: "primary",
+    updatedAt: Date.now(),
+  };
+  clearEndpointFailureStateForChain(chainId);
+  saveFailoverState(chainId, updatedState);
+  return updatedState;
+}
+
 function getRpcAttemptOrder(chainId: number): RpcEndpoint[] {
   const endpoints = getConfiguredRpcEndpoints(chainId);
   const publicEndpoint = getEndpointByRole(endpoints, "public");
-  let state = getFailoverState(chainId);
-
-  // Check if permanent public cooldown has expired
-  if (state.permanentPublicUntil && Date.now() > state.permanentPublicUntil) {
-    const updatedState: RpcFailoverState = { ...state, permanentPublicUntil: null, alchemyFailureCount: 0, preferredRole: "primary" };
-    saveFailoverState(chainId, updatedState);
-    state = updatedState;
-  }
+  const state = getFailoverState(chainId);
 
   if (!publicEndpoint) return endpoints;
   if (state.permanentPublicUntil) return [publicEndpoint];
@@ -271,13 +289,110 @@ function normalizeRpcBatch(json: unknown): Array<JsonRpcResult> {
   return [json as JsonRpcResult];
 }
 
-export function isRetryableRpcError(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
+function getErrorText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return value.message;
+  if (value && typeof value === "object" && "message" in value) {
+    return String((value as { message?: unknown }).message ?? "");
+  }
+  return "";
+}
 
-  const code = "code" in error ? Number((error as { code?: unknown }).code) : NaN;
-  const message = "message" in error ? String((error as { message?: unknown }).message ?? "").toLowerCase() : "";
+function getErrorName(value: unknown): string {
+  if (value instanceof Error) return value.name;
+  if (value && typeof value === "object" && "name" in value) {
+    return String((value as { name?: unknown }).name ?? "");
+  }
+  return "";
+}
+
+function summarizeRpcError(error: unknown): string {
+  if (!error || typeof error !== "object") return "";
+
+  const errorRecord = error as {
+    code?: unknown;
+    details?: unknown;
+    message?: unknown;
+    shortMessage?: unknown;
+  };
+  const code = Number(errorRecord.code);
+  const codePrefix = Number.isFinite(code) ? `[${code}] ` : "";
+  const message = getErrorText(errorRecord.shortMessage)
+    || getErrorText(errorRecord.message)
+    || getErrorText(errorRecord.details);
+
+  return message ? `${codePrefix}${message}` : "";
+}
+
+function buildRetryableRpcResponseError(json: unknown): Error {
+  const summaries = (Array.isArray(json) ? json : [json])
+    .map((entry) => {
+      if (entry && typeof entry === "object" && "error" in entry) {
+        return summarizeRpcError((entry as { error?: unknown }).error);
+      }
+      return "";
+    })
+    .filter(Boolean);
+
+  const message = summaries.length
+    ? `Retryable RPC upstream failure: ${summaries.join("; ")}`
+    : "Retryable RPC upstream failure";
+
+  return new Error(message, { cause: json });
+}
+
+export function isRetryableRpcError(error: unknown): boolean {
+  if (!error) return true;
+
+  const errorRecord = typeof error === "object" ? error as {
+    cause?: unknown;
+    code?: unknown;
+    details?: unknown;
+    message?: unknown;
+    name?: unknown;
+    shortMessage?: unknown;
+  } : null;
+
+  const code = errorRecord ? Number(errorRecord.code) : NaN;
+  const name = getErrorName(errorRecord ?? error);
+  const details = [
+    getErrorText(errorRecord?.message),
+    getErrorText(errorRecord?.shortMessage),
+    getErrorText(errorRecord?.details),
+    getErrorText(errorRecord?.cause),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
 
   if ([-32005, -32016, 429].includes(code)) return true;
+  if ([-32700, -32600, -32601, -32602].includes(code)) return false;
+
+  if (name === "TimeoutError" || name === "AbortError") return true;
+  if ([
+    "HttpRequestError",
+    "InternalRpcError",
+    "LimitExceededRpcError",
+    "UnknownRpcError",
+    "WebSocketRequestError",
+  ].includes(name)) {
+    return true;
+  }
+  if ([
+    "CallExecutionError",
+    "ContractFunctionExecutionError",
+    "EstimateGasExecutionError",
+    "InvalidInputRpcError",
+    "InvalidParamsRpcError",
+    "InvalidRequestRpcError",
+    "MethodNotFoundRpcError",
+    "ParseRpcError",
+    "TransactionExecutionError",
+    "TransactionRejectedRpcError",
+    "UserRejectedRequestError",
+  ].includes(name)) {
+    return false;
+  }
 
   return [
     "alchemy",
@@ -294,7 +409,27 @@ export function isRetryableRpcError(error: unknown): boolean {
     "capacity",
     "payment required",
     "limit exceeded",
-  ].some((token) => message.includes(token));
+    "fetch failed",
+    "network error",
+    "connection reset",
+    "socket hang up",
+    "econnreset",
+    "etimedout",
+    "timeout",
+  ].some((token) => details.includes(token))
+    ? true
+    : [
+      "execution reverted",
+      "invalid params",
+      "invalid request",
+      "method not found",
+      "parse error",
+      "user rejected",
+      "insufficient funds",
+      "nonce too low",
+    ].some((token) => details.includes(token))
+      ? false
+      : true;
 }
 
 function shouldFailoverFromResponse(json: unknown): boolean {
@@ -331,7 +466,7 @@ async function fetchJsonRpc(endpoint: RpcEndpoint, payload: Array<JsonRpcPayload
 
     const json = await response.json();
     if (shouldFailoverFromResponse(json)) {
-      throw new Error("Retryable RPC upstream failure");
+      throw buildRetryableRpcResponseError(json);
     }
 
     return normalizeRpcBatch(json);
@@ -356,6 +491,7 @@ class BatchRpcProvider extends JsonRpcProvider {
   }
 
   async _send(payload: Array<JsonRpcPayload>): Promise<Array<JsonRpcResult>> {
+    refreshFailoverState(this.chainId);
     const attempts = getRpcAttemptOrder(this.chainId);
     let lastError: unknown = null;
 
@@ -388,6 +524,7 @@ export function getRpcUrls(chainId: number): string[] {
 }
 
 export function getManagedRpcAttempts(chainId: number): ManagedRpcAttempt[] {
+  refreshFailoverState(chainId);
   return getRpcAttemptOrder(chainId).map(({ timeoutMs, url }) => ({ timeoutMs, url }));
 }
 

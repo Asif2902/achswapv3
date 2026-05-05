@@ -16,14 +16,13 @@ import {
   reportRpcFailure,
   reportRpcSuccess,
   isRetryableRpcError,
-  clearEndpointFailureTracking,
 } from './config';
 
 const ARC_WALLET_ADD_RPC = getRpcUrl(ARC_TESTNET_CHAIN_ID);
 
 // Define ARC Testnet chain
 export const arcTestnet = defineChain({
-  id: 5042002,
+  id: ARC_TESTNET_CHAIN_ID,
   name: 'ARC Testnet',
   nativeCurrency: {
     decimals: 18,
@@ -100,16 +99,13 @@ function createManagedHttpTransport(chainId: number) {
               const result = await transportInstance.request({ method, params: rpcParams } as any);
               reportRpcSuccess(chainId, attempt.url);
               return result;
-} catch (error) {
-    // Rethrow non-retryable errors without resetting global failure state
-    if (!isRetryableRpcError(error)) {
-      // Only clear this endpoint's failure tracking, don't reset global Alchemy state
-      clearEndpointFailureTracking(attempt.url);
-      throw error;
-    }
-    lastError = error;
-    reportRpcFailure(chainId, attempt.url);
-  }
+            } catch (error) {
+              if (!isRetryableRpcError(error)) {
+                throw error;
+              }
+              lastError = error;
+              reportRpcFailure(chainId, attempt.url);
+            }
           }
 
           if (lastError == null) {

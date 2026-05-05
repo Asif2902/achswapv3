@@ -212,6 +212,12 @@ const TRANSFER_TTL_SECONDS = readPositiveEnvNumber(
   60,
   60 * 60 * 24 * 30,
 );
+const UPSTASH_PIPELINE_TIMEOUT_MS = readPositiveEnvNumber(
+  "UPSTASH_PIPELINE_TIMEOUT_MS",
+  3_500,
+  100,
+  60_000,
+);
 
 function normalizeOrigin(origin) {
   if (!origin) return "";
@@ -667,37 +673,45 @@ function walletKey(wallet) {
 
 async function upstashPipeline(commands) {
   const pipelineUrl = `${UPSTASH_REDIS_REST_URL.replace(/\/$/, "")}/pipeline`;
-  const response = await fetch(pipelineUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(commands),
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), UPSTASH_PIPELINE_TIMEOUT_MS);
 
-  const rawBody = await response.text();
-  if (!response.ok) {
-    const bodySnippet = rawBody.length > 500 ? `${rawBody.slice(0, 500)}...` : rawBody;
-    throw new Error(`Redis pipeline failed: ${response.status} ${bodySnippet}`);
-  }
-
-  let payload;
   try {
-    payload = rawBody ? JSON.parse(rawBody) : null;
-  } catch {
-    const bodySnippet = rawBody.length > 500 ? `${rawBody.slice(0, 500)}...` : rawBody;
-    throw new Error(`Redis pipeline returned non-JSON payload: ${bodySnippet}`);
-  }
+    const response = await fetch(pipelineUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(commands),
+      signal: controller.signal,
+    });
 
-  if (!Array.isArray(payload)) {
-    throw new Error("Redis pipeline returned invalid response");
-  }
+    const rawBody = await response.text();
+    if (!response.ok) {
+      const bodySnippet = rawBody.length > 500 ? `${rawBody.slice(0, 500)}...` : rawBody;
+      throw new Error(`Redis pipeline failed: ${response.status} ${bodySnippet}`);
+    }
 
-  return payload.map((item) => {
-    if (item && item.error) throw new Error(`Redis command failed: ${item.error}`);
-    return item ? item.result : null;
-  });
+    let payload;
+    try {
+      payload = rawBody ? JSON.parse(rawBody) : null;
+    } catch {
+      const bodySnippet = rawBody.length > 500 ? `${rawBody.slice(0, 500)}...` : rawBody;
+      throw new Error(`Redis pipeline returned non-JSON payload: ${bodySnippet}`);
+    }
+
+    if (!Array.isArray(payload)) {
+      throw new Error("Redis pipeline returned invalid response");
+    }
+
+    return payload.map((item) => {
+      if (item && item.error) throw new Error(`Redis command failed: ${item.error}`);
+      return item ? item.result : null;
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 async function isRedisHealthy(force = false) {
@@ -927,9 +941,17 @@ async function removeWalletIndexEntries(wallet, hashes) {
   if (!hashes.length) return;
 
   if (HAS_REDIS) {
-    await upstashPipeline([
-      ["ZREM", walletKey(wallet), ...hashes],
-    ]);
+    try {
+      await upstashPipeline([
+        ["ZREM", walletKey(wallet), ...hashes],
+      ]);
+    } catch (err) {
+      console.warn("[bridge] removeWalletIndexEntries Redis cleanup failed:", {
+        wallet,
+        hashes,
+        error: err instanceof Error ? err.message : err,
+      });
+    }
     return;
   }
 
@@ -1405,11 +1427,15 @@ async function handleUpsertBurn(req, res) {
     }
   } else {
     // Check immutable fields
+    const normalizedExistingAmount = normalizeTransferAmountToBaseUnits(existing.amount);
+    const normalizedRecordAmount = normalizeTransferAmountToBaseUnits(record.amount);
     const mismatch = existing.sourceDomain !== record.sourceDomain ||
                      existing.sourceChainId !== record.sourceChainId ||
                      existing.destDomain !== record.destDomain ||
                      existing.destChainId !== record.destChainId ||
-                     existing.amount !== record.amount ||
+                     normalizedExistingAmount == null ||
+                     normalizedRecordAmount == null ||
+                     normalizedExistingAmount !== normalizedRecordAmount ||
                      existing.userAddress !== record.userAddress;
     if (mismatch) {
       return res.status(400).json({ error: "Immutable field mismatch with existing record" });
@@ -1493,10 +1519,16 @@ async function handleUpdateAttestation(req, res) {
     return res.status(400).json({ error: "Destination chain unavailable" });
   }
 
+  const nextStatus = "ready_to_mint";
+  const currentStatus = normalizeTransferStatus(transfer.status);
+  if (!VALID_TRANSITIONS[currentStatus]?.includes(nextStatus)) {
+    return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
+  }
+
   const updated = {
     ...transfer,
     attestation,
-    status: "ready_to_mint",
+    status: nextStatus,
     destDomain: nextDestination.domain,
     destChainId: nextDestination.chainId,
     error: trimErrorMessage(req.body?.error),
@@ -1544,9 +1576,15 @@ async function handleMarkAttesting(req, res) {
     return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
   }
 
+  const nextStatus = "attesting";
+  const currentStatus = normalizeTransferStatus(transfer.status);
+  if (!VALID_TRANSITIONS[currentStatus]?.includes(nextStatus)) {
+    return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
+  }
+
   const updated = {
     ...transfer,
-    status: "attesting",
+    status: nextStatus,
     error: trimErrorMessage(req.body?.error),
     updatedAt: Date.now(),
   };
@@ -1570,9 +1608,15 @@ async function handleMarkFailed(req, res) {
     return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
   }
 
+  const nextStatus = "failed";
+  const currentStatus = normalizeTransferStatus(transfer.status);
+  if (!VALID_TRANSITIONS[currentStatus]?.includes(nextStatus)) {
+    return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
+  }
+
   const updated = {
     ...transfer,
-    status: "failed",
+    status: nextStatus,
     mintTxHash: mergeTransferField(transfer.mintTxHash, mintTxHash),
     error: trimErrorMessage(req.body?.error),
     updatedAt: Date.now(),
@@ -1617,51 +1661,46 @@ async function handleMarkComplete(req, res) {
     return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
   }
 
+  const nextStatus = "complete";
+  const currentStatus = normalizeTransferStatus(transfer.status);
+  if (!VALID_TRANSITIONS[currentStatus]?.includes(nextStatus)) {
+    return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
+  }
+
   const attestationPayload = normalizeAttestation(attestation) || transfer.attestation;
   const claimMessage = message || attestationPayload?.message;
-
-  let alreadyClaimed = false;
-  if (isHash(mintTxHash)) {
-    try {
-      alreadyClaimed = await isTransferClaimed(transfer, claimMessage) || await verifyMintTransaction(transfer, mintTxHash);
-    } catch (err) {
-      console.warn(`[bridge] mark_complete verification threw error: `, err);
-    }
-  }
-
-  if (alreadyClaimed) {
-    console.log(`[bridge] Transfer  already claimed, updating to complete`);
-    await saveTransferRecord({
-      ...transfer,
-      status: 'complete',
-      attestation: attestationPayload,
-      mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
-      error: undefined,
-      updatedAt: Date.now(),
-      expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
-    });
-    return res.status(200).json({ ok: true, completed: true, message: 'Transaction already completed' });
-  }
+  const resolvedMintTxHash = isHash(mintTxHash) ? mintTxHash : undefined;
 
   let verified = false;
-  if (isHash(mintTxHash)) {
+  if (resolvedMintTxHash) {
     try {
-      verified = await isTransferClaimed(transfer, claimMessage) || await verifyMintTransaction(transfer, mintTxHash);
+      verified = await isTransferClaimed(transfer, claimMessage) || await verifyMintTransaction(transfer, resolvedMintTxHash);
     } catch (err) {
-      console.warn(`[bridge] mark_complete verification threw error: `, err);
+      console.warn(`[bridge] mark_complete verification threw error for ${burnTxHash}:`, {
+        mintTxHash: resolvedMintTxHash,
+        error: err instanceof Error ? err.message : err,
+      });
       verified = false;
     }
   }
 
   if (!verified) {
-    console.warn(`[bridge] mark_complete: could not verify , allowing anyway`);
+    console.warn(`[bridge] mark_complete verification failed for ${burnTxHash}:`, {
+      mintTxHash: resolvedMintTxHash || null,
+      status: currentStatus,
+    });
+    return res.status(409).json({
+      error: 'Mint transaction verification failed',
+      burnTxHash,
+      mintTxHash: resolvedMintTxHash || null,
+    });
   }
 
   await saveTransferRecord({
     ...transfer,
-    status: 'complete',
+    status: nextStatus,
     attestation: attestationPayload,
-    mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
+    mintTxHash: mergeTransferField(transfer.mintTxHash, resolvedMintTxHash),
     error: undefined,
     updatedAt: Date.now(),
     expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,

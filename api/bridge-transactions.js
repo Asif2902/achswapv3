@@ -26,7 +26,10 @@ function optimizeBridgeData(data) {
 function getCircleIrisBaseUrl() {
   const configuredHost = String(process.env.CIRCLE_IRIS_HOST || "").trim().replace(/\/+$/, "");
   if (!configuredHost) return "https://iris-api-sandbox.circle.com";
-  if (/^https?:\/\//i.test(configuredHost)) return configuredHost;
+  if (/^https:\/\//i.test(configuredHost)) return configuredHost;
+  if (/^http:\/\//i.test(configuredHost)) {
+    throw new Error("Insecure CIRCLE_IRIS_HOST is disallowed");
+  }
   return `https://${configuredHost}`;
 }
 
@@ -84,8 +87,15 @@ export default async function handler(req, res) {
   }
 
   try {
-    let rawSourceDomainId = req.query.sourceDomainId || req.body?.sourceDomainId || '';
-    if (Array.isArray(rawSourceDomainId)) rawSourceDomainId = rawSourceDomainId[0];
+    let rawSourceDomainId = req.query.sourceDomainId ?? req.body?.sourceDomainId ?? '';
+    if (Array.isArray(rawSourceDomainId)) rawSourceDomainId = rawSourceDomainId[0] ?? '';
+    if (
+      rawSourceDomainId == null
+      || rawSourceDomainId === ''
+      || (typeof rawSourceDomainId === 'string' && rawSourceDomainId.trim() === '')
+    ) {
+      return res.status(400).json({ error: 'Missing sourceDomainId' });
+    }
     const sourceDomainId = Number(rawSourceDomainId);
     
     if (!Number.isInteger(sourceDomainId) || sourceDomainId < 0) {
