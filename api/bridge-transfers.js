@@ -496,12 +496,13 @@ function normalizeTransferRecord(input) {
   const amount = typeof input.amount === "string" ? input.amount : String(input.amount || "");
   const timestampRaw = Number(input.timestamp);
   const timestamp = Number.isFinite(timestampRaw) && timestampRaw > 0 ? Math.trunc(timestampRaw) : Date.now();
+  const hasDecimalAmountFormat = /^\d+\.\d+$/.test(amount);
 
   if (!isHash(burnTxHash)) return null;
   if (!isWallet(userAddress)) return null;
   if (!Number.isInteger(sourceDomain) || !Number.isInteger(sourceChainId)) return null;
   if (!Number.isInteger(destDomain) || !Number.isInteger(destChainId)) return null;
-  if (!amount || Number.isNaN(Number(amount))) return null;
+  if (!amount || !hasDecimalAmountFormat || normalizeTransferAmountToBaseUnits(amount) == null) return null;
 
   const requestedStatus = String(input.status || "attesting").toLowerCase();
   let status = "attesting";
@@ -1573,7 +1574,8 @@ async function handleMarkAttesting(req, res) {
 
   const nextStatus = "attesting";
   const currentStatus = normalizeTransferStatus(transfer.status);
-  if (!VALID_TRANSITIONS[currentStatus]?.includes(nextStatus)) {
+  const canResetToAttesting = currentStatus !== "complete" && currentStatus !== "failed";
+  if (!canResetToAttesting) {
     return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
   }
 
