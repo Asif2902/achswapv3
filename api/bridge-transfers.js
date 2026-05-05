@@ -32,6 +32,7 @@ const RPC_PROBE_TIMEOUT_MS = 4_500;
 const RPC_CACHE_REVALIDATE_MS = 30_000;
 const CLAIM_RECONCILE_CACHE_TTL_MS = 5_000;
 const REDIS_HEALTH_CACHE_TTL_MS = 10_000;
+const CIRCLE_IRIS_TIMEOUT_MS = 10_000;
 
 const memoryRateLimitByKey = new Map();
 let memoryRateLimitRequestCount = 0;
@@ -47,8 +48,8 @@ let memoryTransferOperationCount = 0;
 const inMemoryTransfersByHash = new Map();
 const inMemoryWalletIndex = new Map();
 
-const TOKEN_MESSENGER_V2_ABI = [
-  "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)",
+const TOKEN_MESSENGER_EVENTS_ABI = [
+  "event DepositForBurn(uint64 indexed nonce, address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)",
 ];
 
 const MESSAGE_TRANSMITTER_V2_ABI = [
@@ -61,7 +62,7 @@ const MESSAGE_TRANSMITTER_EVENTS_ABI = [
   "event MessageReceived(address indexed caller, uint32 sourceDomain, bytes32 nonce, bytes32 sender, bytes messageBody)",
 ];
 
-const tokenMessengerInterface = new ethers.Interface(TOKEN_MESSENGER_V2_ABI);
+const tokenMessengerEventsInterface = new ethers.Interface(TOKEN_MESSENGER_EVENTS_ABI);
 const messageTransmitterEventsInterface = new ethers.Interface(MESSAGE_TRANSMITTER_EVENTS_ABI);
 
 const TESTNET_TOKEN_MESSENGER_V2 = "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA";
@@ -825,21 +826,52 @@ async function saveTransferRecord(record) {
   if (HAS_REDIS) {
     try {
       await pruneOldTransfers(recordWithTimestamp.userAddress);
-      const result = await upstashPipeline([
-        ["SET", txKey(recordWithTimestamp.burnTxHash), JSON.stringify(recordWithTimestamp), "EX", String(TRANSFER_TTL_SECONDS)],
-        ["ZADD", walletKey(recordWithTimestamp.userAddress), String(recordWithTimestamp.timestamp), recordWithTimestamp.burnTxHash],
-      ]);
-      redisHealthCache = { ok: true, checkedAt: Date.now() };
-      console.log(`[bridge] Saved ${recordWithTimestamp.burnTxHash}:`, result);
-      return;
+    } catch (e) {
+      console.warn("[bridge] Redis pruneOldTransfers failed; continuing write:", e);
+    }
+
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const result = await upstashPipeline([
+          ["SET", txKey(recordWithTimestamp.burnTxHash), JSON.stringify(recordWithTimestamp), "EX", String(TRANSFER_TTL_SECONDS)],
+          ["ZADD", walletKey(recordWithTimestamp.userAddress), String(recordWithTimestamp.timestamp), recordWithTimestamp.burnTxHash],
+        ]);
+        redisHealthCache = { ok: true, checkedAt: Date.now() };
+        console.log(`[bridge] Saved ${recordWithTimestamp.burnTxHash}:`, result);
+        return;
+      } catch (e) {
+        lastError = e;
+        console.error(`[bridge] Redis save attempt ${attempt} failed:`, e);
+        redisHealthCache = { ok: false, checkedAt: Date.now() };
+        if (attempt < 2) {
+          await sleep(150 * attempt);
+        }
+      }
+    }
+
+    try {
+      throw lastError || new Error("Unknown Redis save failure");
     } catch (e) {
       console.error("[bridge] Redis save error:", e);
-      redisHealthCache = { ok: false, checkedAt: Date.now() };
       throw new StorageError("Bridge persistence unavailable");
     }
   }
 
   setMemoryTransfer(recordWithTimestamp);
+}
+
+async function saveTransferRecordBestEffort(record, context) {
+  try {
+    await saveTransferRecord(record);
+    return true;
+  } catch (err) {
+    if (err instanceof StorageError) {
+      console.error(`[bridge] ${context} persistence failed:`, err.message);
+      return false;
+    }
+    throw err;
+  }
 }
 
 async function getTransferRecord(burnTxHash) {
@@ -979,6 +1011,10 @@ function withTimeout(promise, timeoutMs, errorMessage) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function uniqueRpcUrls(urls) {
   return Array.from(new Set((Array.isArray(urls) ? urls : []).filter((v) => typeof v === "string" && v.length > 0)));
 }
@@ -1053,6 +1089,100 @@ async function getWorkingProvider(chain) {
   }
 }
 
+function getCircleIrisBaseUrl() {
+  const configuredHost = String(process.env.CIRCLE_IRIS_HOST || "").trim().replace(/\/+$/, "");
+  if (!configuredHost) return "https://iris-api-sandbox.circle.com";
+  if (/^https:\/\//i.test(configuredHost)) return configuredHost;
+  if (/^http:\/\//i.test(configuredHost)) {
+    throw new Error("Insecure CIRCLE_IRIS_HOST is disallowed");
+  }
+  return `https://${configuredHost}`;
+}
+
+async function fetchOfficialAttestation(transfer) {
+  if (!transfer || !isHash(transfer.burnTxHash)) return undefined;
+  if (!Number.isInteger(Number(transfer.sourceDomain))) return undefined;
+
+  const endpoint = new URL(
+    `/v2/messages/${encodeURIComponent(String(transfer.sourceDomain))}`,
+    `${getCircleIrisBaseUrl()}/`,
+  );
+  endpoint.searchParams.set("transactionHash", transfer.burnTxHash);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), CIRCLE_IRIS_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(endpoint, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Circle Iris returned ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    if (!data || !Array.isArray(data.messages)) return undefined;
+
+    for (const message of data.messages) {
+      const attestation = normalizeAttestation(message);
+      if (!attestation) continue;
+
+      const destinationDomain = Number(message?.destinationDomain);
+      if (Number.isFinite(destinationDomain) && destinationDomain !== Number(transfer.destDomain)) {
+        continue;
+      }
+
+      return attestation;
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  return undefined;
+}
+
+async function resolveTransferAttestation(transfer) {
+  const storedAttestation = normalizeAttestation(transfer?.attestation);
+  if (storedAttestation) return storedAttestation;
+
+  try {
+    return await fetchOfficialAttestation(transfer);
+  } catch (err) {
+    console.warn(`[bridge] failed to resolve official attestation for ${transfer?.burnTxHash || "unknown"}:`, {
+      error: err instanceof Error ? err.message : err,
+    });
+    return undefined;
+  }
+}
+
+async function loadTransferForMutation(req, burnTxHash) {
+  let transfer = await getTransferRecord(burnTxHash);
+  if (transfer) {
+    await requireSignedOwnership(req, transfer);
+    return transfer;
+  }
+
+  const userAddress = canonicalAddress(req.body?.userAddress || req.query?.wallet || "");
+  if (!isWallet(userAddress)) {
+    throw new ValidationError("Transfer not found and no userAddress provided");
+  }
+
+  transfer = {
+    id: burnTxHash,
+    burnTxHash,
+    sourceDomain: Number(req.body?.sourceDomain) || 0,
+    sourceChainId: Number(req.body?.sourceChainId) || 0,
+    destDomain: Number(req.body?.destDomain) || 0,
+    destChainId: Number(req.body?.destChainId) || 0,
+    amount: String(req.body?.amount || "0"),
+    userAddress,
+    timestamp: Number(req.body?.timestamp) || Date.now(),
+    status: "attesting",
+  };
+
+  await requireSignedOwnership(req, transfer);
+  await verifyBurnTransaction(transfer);
+  return transfer;
+}
+
 async function verifyBurnTransaction(transfer) {
   const chain = chainById.get(Number(transfer.sourceChainId));
   if (!chain) throw new ValidationError("Unsupported source chain");
@@ -1067,52 +1197,61 @@ async function verifyBurnTransaction(transfer) {
   }
 
   const provider = await getWorkingProvider(chain);
-  const [tx, receipt] = await Promise.all([
-    provider.getTransaction(transfer.burnTxHash),
-    provider.getTransactionReceipt(transfer.burnTxHash),
-  ]);
+  const receipt = await provider.getTransactionReceipt(transfer.burnTxHash);
 
-  if (!tx || !receipt || receipt.status !== 1) {
+  if (!receipt || receipt.status !== 1) {
     throw new ValidationError("Burn transaction not confirmed on-chain");
   }
 
-  const txTo = canonicalAddress(tx.to || "");
   const expectedTokenMessenger = canonicalAddress(chain.tokenMessengerV2);
-  if (!txTo || txTo !== expectedTokenMessenger) {
-    throw new ValidationError("Burn transaction was not sent to TokenMessengerV2");
-  }
-
-  const txFrom = canonicalAddress(tx.from || "");
-  if (!txFrom || txFrom !== canonicalAddress(transfer.userAddress)) {
-    throw new ValidationError("Burn transaction sender mismatch");
-  }
-
-  let parsed;
-  try {
-    parsed = tokenMessengerInterface.parseTransaction({ data: tx.data, value: tx.value ?? 0n });
-  } catch {
-    parsed = null;
-  }
-
-  if (!parsed || parsed.name !== "depositForBurn") {
-    throw new ValidationError("Burn transaction is not depositForBurn");
-  }
-
-  const decodedAmount = normalizeTransferAmountToBaseUnits(parsed.args[0]);
-  if (decodedAmount == null) {
-    throw new ValidationError("Burn transaction amount is invalid");
-  }
-
   const expectedAmount = normalizeTransferAmountToBaseUnits(transfer.amount);
   if (expectedAmount == null) {
     throw new ValidationError("Transfer amount is invalid");
+  }
+
+  let depositForBurnEvent = null;
+  for (const log of receipt.logs || []) {
+    if (!log || canonicalAddress(log.address || "") !== expectedTokenMessenger) continue;
+
+    try {
+      const parsed = tokenMessengerEventsInterface.parseLog({
+        topics: log.topics,
+        data: log.data,
+      });
+      if (parsed?.name === "DepositForBurn") {
+        depositForBurnEvent = parsed;
+        break;
+      }
+    } catch {
+      // Ignore unrelated TokenMessengerV2 logs.
+    }
+  }
+
+  if (!depositForBurnEvent) {
+    throw new ValidationError("Burn transaction missing DepositForBurn event");
+  }
+
+  const decodedDepositor = canonicalAddress(
+    depositForBurnEvent.args?.depositor ?? depositForBurnEvent.args?.[3] ?? "",
+  );
+  if (!decodedDepositor || decodedDepositor !== canonicalAddress(transfer.userAddress)) {
+    throw new ValidationError("Burn transaction depositor mismatch");
+  }
+
+  const decodedAmount = normalizeTransferAmountToBaseUnits(
+    depositForBurnEvent.args?.amount ?? depositForBurnEvent.args?.[2],
+  );
+  if (decodedAmount == null) {
+    throw new ValidationError("Burn transaction amount is invalid");
   }
 
   if (decodedAmount !== expectedAmount) {
     throw new ValidationError("Burn transaction amount mismatch");
   }
 
-  const decodedDestinationDomain = Number(parsed.args[1]);
+  const decodedDestinationDomain = Number(
+    depositForBurnEvent.args?.destinationDomain ?? depositForBurnEvent.args?.[5],
+  );
   if (!Number.isFinite(decodedDestinationDomain) || decodedDestinationDomain !== Number(transfer.destDomain)) {
     throw new ValidationError("Burn transaction destination domain mismatch");
   }
@@ -1464,8 +1603,12 @@ async function handleUpsertBurn(req, res) {
     updatedAt: Date.now(),
   };
 
-  await saveTransferRecord(merged);
-  return res.status(200).json({ ok: true, storage: HAS_REDIS ? "redis" : "memory" });
+  const persisted = await saveTransferRecordBestEffort(merged, "upsert_burn");
+  return res.status(200).json({
+    ok: true,
+    persisted,
+    storage: persisted ? (HAS_REDIS ? "redis" : "memory") : "degraded",
+  });
 }
 
 async function handleUpdateAttestation(req, res) {
@@ -1475,12 +1618,13 @@ async function handleUpdateAttestation(req, res) {
     return res.status(400).json({ error: "Invalid attestation payload" });
   }
 
-  const transfer = await getTransferRecord(burnTxHash);
-  if (!transfer) return res.status(404).json({ error: "Transfer not found" });
-
+  let transfer;
   try {
-    await requireSignedOwnership(req, transfer);
+    transfer = await loadTransferForMutation(req, burnTxHash);
   } catch (err) {
+    if (err instanceof ValidationError) {
+      return res.status(err.statusCode || 400).json({ error: err.message });
+    }
     return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
   }
 
@@ -1525,20 +1669,21 @@ async function handleUpdateAttestation(req, res) {
     updatedAt: Date.now(),
   };
 
-  await saveTransferRecord(updated);
-  return res.status(200).json({ ok: true });
+  const persisted = await saveTransferRecordBestEffort(updated, "update_attestation");
+  return res.status(200).json({ ok: true, persisted });
 }
 
 async function handleMarkMinting(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   if (!isHash(burnTxHash)) return res.status(400).json({ error: "Invalid burnTxHash" });
 
-  const transfer = await getTransferRecord(burnTxHash);
-  if (!transfer) return res.status(404).json({ error: "Transfer not found" });
-
+  let transfer;
   try {
-    await requireSignedOwnership(req, transfer);
+    transfer = await loadTransferForMutation(req, burnTxHash);
   } catch (err) {
+    if (err instanceof ValidationError) {
+      return res.status(err.statusCode || 400).json({ error: err.message });
+    }
     return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
   }
 
@@ -1555,20 +1700,21 @@ async function handleMarkMinting(req, res) {
     updatedAt: Date.now(),
   };
 
-  await saveTransferRecord(updated);
-  return res.status(200).json({ ok: true });
+  const persisted = await saveTransferRecordBestEffort(updated, "mark_minting");
+  return res.status(200).json({ ok: true, persisted });
 }
 
 async function handleMarkAttesting(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   if (!isHash(burnTxHash)) return res.status(400).json({ error: "Invalid burnTxHash" });
 
-  const transfer = await getTransferRecord(burnTxHash);
-  if (!transfer) return res.status(404).json({ error: "Transfer not found" });
-
+  let transfer;
   try {
-    await requireSignedOwnership(req, transfer);
+    transfer = await loadTransferForMutation(req, burnTxHash);
   } catch (err) {
+    if (err instanceof ValidationError) {
+      return res.status(err.statusCode || 400).json({ error: err.message });
+    }
     return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
   }
 
@@ -1586,8 +1732,8 @@ async function handleMarkAttesting(req, res) {
     updatedAt: Date.now(),
   };
 
-  await saveTransferRecord(updated);
-  return res.status(200).json({ ok: true });
+  const persisted = await saveTransferRecordBestEffort(updated, "mark_attesting");
+  return res.status(200).json({ ok: true, persisted });
 }
 
 async function handleMarkFailed(req, res) {
@@ -1596,12 +1742,13 @@ async function handleMarkFailed(req, res) {
   const mintTxHashInput = canonicalHash(req.body?.mintTxHash || "");
   const mintTxHash = isHash(mintTxHashInput) ? mintTxHashInput : undefined;
 
-  const transfer = await getTransferRecord(burnTxHash);
-  if (!transfer) return res.status(404).json({ error: "Transfer not found" });
-
+  let transfer;
   try {
-    await requireSignedOwnership(req, transfer);
+    transfer = await loadTransferForMutation(req, burnTxHash);
   } catch (err) {
+    if (err instanceof ValidationError) {
+      return res.status(err.statusCode || 400).json({ error: err.message });
+    }
     return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
   }
 
@@ -1619,48 +1766,24 @@ async function handleMarkFailed(req, res) {
     updatedAt: Date.now(),
   };
 
-  await saveTransferRecord(updated);
-  return res.status(200).json({ ok: true });
+  const persisted = await saveTransferRecordBestEffort(updated, "mark_failed");
+  return res.status(200).json({ ok: true, persisted });
 }
 
 async function handleMarkComplete(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   const mintTxHash = canonicalHash(req.body?.mintTxHash || '');
-  const message = typeof req.body?.message === 'string' ? req.body.message : '';
-  const attestation = req.body?.attestation;
 
   if (!isHash(burnTxHash)) return res.status(400).json({ error: 'Invalid burnTxHash' });
 
-  let transfer = await getTransferRecord(burnTxHash);
-  if (!transfer) {
-    const userAddress = canonicalAddress(req.body?.userAddress || req.query?.wallet || '');
-    if (!isWallet(userAddress)) {
-      return res.status(400).json({ error: 'Transfer not found and no userAddress provided' });
+  let transfer;
+  try {
+    transfer = await loadTransferForMutation(req, burnTxHash);
+  } catch (err) {
+    if (err instanceof ValidationError) {
+      return res.status(err.statusCode || 400).json({ error: err.message });
     }
-    transfer = {
-      id: burnTxHash,
-      burnTxHash,
-      sourceDomain: Number(req.body?.sourceDomain) || 0,
-      sourceChainId: Number(req.body?.sourceChainId) || 0,
-      destDomain: Number(req.body?.destDomain) || 0,
-      destChainId: Number(req.body?.destChainId) || 0,
-      amount: String(req.body?.amount || '0'),
-      userAddress,
-      timestamp: Number(req.body?.timestamp) || Date.now(),
-      status: 'attesting',
-    };
-    try {
-      await requireSignedOwnership(req, transfer);
-    } catch (err) {
-      return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
-    }
-    await verifyBurnTransaction(transfer);
-  } else {
-    try {
-      await requireSignedOwnership(req, transfer);
-    } catch (err) {
-      return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
-    }
+    return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
   }
 
   const nextStatus = "complete";
@@ -1669,14 +1792,16 @@ async function handleMarkComplete(req, res) {
     return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
   }
 
-  const attestationPayload = normalizeAttestation(attestation) || transfer.attestation;
-  const claimMessage = message || attestationPayload?.message;
+  const storedAttestation = await resolveTransferAttestation(transfer);
   const resolvedMintTxHash = isHash(mintTxHash) ? mintTxHash : undefined;
 
   let verified = false;
   if (resolvedMintTxHash) {
     try {
-      verified = await isTransferClaimed(transfer, claimMessage) || await verifyMintTransaction(transfer, resolvedMintTxHash);
+      verified = await verifyMintTransaction(
+        { ...transfer, attestation: storedAttestation },
+        resolvedMintTxHash,
+      );
     } catch (err) {
       console.warn(`[bridge] mark_complete verification threw error for ${burnTxHash}:`, {
         mintTxHash: resolvedMintTxHash,
@@ -1698,16 +1823,16 @@ async function handleMarkComplete(req, res) {
     });
   }
 
-  await saveTransferRecord({
+  const persisted = await saveTransferRecordBestEffort({
     ...transfer,
     status: nextStatus,
-    attestation: attestationPayload,
+    attestation: storedAttestation,
     mintTxHash: mergeTransferField(transfer.mintTxHash, resolvedMintTxHash),
     error: undefined,
     updatedAt: Date.now(),
     expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
-  });
-  return res.status(200).json({ ok: true, completed: true });
+  }, "mark_complete");
+  return res.status(200).json({ ok: true, completed: true, persisted });
 }
 
 async function handleDismiss(req, res) {
@@ -1760,13 +1885,13 @@ async function handleRetry(req, res) {
   }
   events = events.slice(-MAX_TRANSFER_EVENTS);
 
-  await saveTransferRecord({
+  await saveTransferRecordBestEffort({
     ...transfer,
     status: updatedStatus,
     error: updatedError,
     events,
     updatedAt: Date.now(),
-  });
+  }, "retry");
 
   const refreshed = await getTransferRecord(burnTxHash);
   return res.status(200).json({ ok: true, status: refreshed?.status, events });

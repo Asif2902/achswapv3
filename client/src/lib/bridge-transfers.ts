@@ -577,6 +577,12 @@ async function postBridgeTransfer(action: string, payload: Record<string, unknow
       return false;
     }
 
+    const data = await parseResponseJson(res);
+    if (data?.persisted === false || data?.storage === "degraded") {
+      console.warn(`[bridge-transfers] ${action} completed without durable persistence`);
+      return false;
+    }
+
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -661,11 +667,6 @@ export async function savePendingTransfer(
   const ok = await postBridgeTransfer("upsert_burn", {
     transfer: normalized,
   });
-
-  if (!ok && options?.strict) {
-    throw new Error("Failed to persist transfer to database");
-  }
-
   return ok;
 }
 
