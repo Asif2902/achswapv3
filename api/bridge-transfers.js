@@ -22,6 +22,7 @@ const FALLBACK_RATE_LIMIT_PER_MINUTE = 240; // Use normal cap even if Redis fail
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_TRANSFER_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MAX_TRANSFERS_PER_WALLET = 100;
+const MAX_TRANSFER_EVENTS = 100;
 const CLAIM_RECONCILE_LIMIT = 10;
 const OWNERSHIP_PROOF_MAX_TTL_MS = 12 * 60_000; // 12 minutes total in ms (12 * 60_000): client proofs live 10m, server accepts an extra 2m for clock skew/delivery.
 const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
@@ -545,8 +546,8 @@ const TRANSFER_STATUS_ORDER = {
 };
 
 const VALID_TRANSITIONS = {
-  attesting: ["ready_to_mint", "failed"],
-  ready_to_mint: ["minting", "failed"],
+  attesting: ["ready_to_mint", "complete", "failed"],
+  ready_to_mint: ["minting", "complete", "failed"],
   minting: ["complete", "failed"],
   complete: [],
   failed: [],
@@ -1165,12 +1166,8 @@ async function verifyMintTransaction(transfer, mintTxHash) {
 
   if (!tx || !receipt || receipt.status !== 1) return false;
   const txTo = canonicalAddress(tx.to || "");
-  const txFrom = canonicalAddress(tx.from || "");
 
-  if (
-    txTo !== canonicalAddress(chain.messageTransmitterV2)
-    || txFrom !== canonicalAddress(transfer.userAddress)
-  ) {
+  if (txTo !== canonicalAddress(chain.messageTransmitterV2)) {
     return false;
   }
 
@@ -1497,20 +1494,9 @@ async function handleUpdateAttestation(req, res) {
     return res.status(400).json({ error: "Destination chain does not match burn transaction" });
   }
 
-  let nextDestination = chainById.get(Number(transfer.destChainId)) || chainByDomain.get(Number(transfer.destDomain)) || null;
-
-  if (Number.isInteger(destChainIdInput)) {
-    const byId = chainById.get(destChainIdInput);
-    if (!byId) return res.status(400).json({ error: "Unsupported destination chain" });
-    if (Number.isInteger(destDomainInput) && byId.domain !== destDomainInput) {
-      return res.status(400).json({ error: "Destination domain/chain mismatch" });
-    }
-    nextDestination = byId;
-  } else if (Number.isInteger(destDomainInput)) {
-    const byDomain = chainByDomain.get(destDomainInput);
-    if (!byDomain) return res.status(400).json({ error: "Unsupported destination domain" });
-    nextDestination = byDomain;
-  }
+  const nextDestination = chainById.get(Number(transfer.destChainId))
+    || chainByDomain.get(Number(transfer.destDomain))
+    || null;
 
   if (!nextDestination) {
     return res.status(400).json({ error: "Destination chain unavailable" });
@@ -1549,9 +1535,15 @@ async function handleMarkMinting(req, res) {
     return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
   }
 
+  const nextStatus = "minting";
+  const currentStatus = normalizeTransferStatus(transfer.status);
+  if (!VALID_TRANSITIONS[currentStatus]?.includes(nextStatus)) {
+    return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
+  }
+
   const updated = {
     ...transfer,
-    status: "minting",
+    status: nextStatus,
     error: trimErrorMessage(req.body?.error),
     updatedAt: Date.now(),
   };
@@ -1744,12 +1736,13 @@ async function handleRetry(req, res) {
     return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
   }
 
-  const events = [...(transfer.events || []), `retry_started:${Date.now()}`];
+  let events = [...(transfer.events || []), `retry_started:${Date.now()}`];
   let updatedStatus = transfer.status;
-  let updatedError = null;
+  let updatedError = transfer.error;
 
   if (transfer.status === "failed") {
     updatedStatus = transfer.attestation?.message ? "ready_to_mint" : "attesting";
+    updatedError = null;
     events.push(`retry_status_update:${Date.now()}:${updatedStatus}`);
   } else if (transfer.status === "attesting" && !transfer.attestation?.message) {
     updatedStatus = "attesting";
@@ -1757,6 +1750,7 @@ async function handleRetry(req, res) {
   } else if (transfer.status !== "complete" && transfer.status !== "failed" && transfer.attestation?.message) {
     events.push(`retry_skipped:${Date.now()}`);
   }
+  events = events.slice(-MAX_TRANSFER_EVENTS);
 
   await saveTransferRecord({
     ...transfer,
@@ -1788,6 +1782,7 @@ export default async function handler(req, res) {
     }
 
     if (!await checkRateLimit(req)) {
+      res.set("Retry-After", String(RATE_LIMIT_WINDOW_MS / 1000));
       return res.status(429).json({ error: "Rate limit exceeded" });
     }
   } catch (err) {

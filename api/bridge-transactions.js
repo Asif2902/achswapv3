@@ -104,9 +104,13 @@ export default async function handler(req, res) {
     ) {
       return res.status(400).json({ error: 'Missing sourceDomainId' });
     }
-    const sourceDomainId = Number(rawSourceDomainId);
+    const sourceDomainIdText = String(rawSourceDomainId).trim();
+    if (!/^\d+$/.test(sourceDomainIdText)) {
+      return res.status(400).json({ error: 'Invalid sourceDomainId' });
+    }
+    const sourceDomainId = Number(sourceDomainIdText);
     
-    if (!Number.isInteger(sourceDomainId) || sourceDomainId < 0) {
+    if (sourceDomainId < 0) {
       return res.status(400).json({ error: 'Invalid sourceDomainId' });
     }
 
@@ -115,10 +119,26 @@ export default async function handler(req, res) {
     const transactionHash = String(rawTransactionHash || '').trim().toLowerCase();
     let rawNonce = req.query.nonce ?? req.body?.nonce ?? '';
     if (Array.isArray(rawNonce)) rawNonce = rawNonce[0] ?? '';
-    const nonce = typeof rawNonce === 'string' ? rawNonce.trim() : rawNonce;
+    let nonce = typeof rawNonce === 'number'
+      ? String(rawNonce)
+      : (typeof rawNonce === 'string' ? rawNonce.trim() : rawNonce);
 
     if (transactionHash && !/^0x[a-f0-9]{64}$/.test(transactionHash)) {
       return res.status(400).json({ error: 'Invalid transactionHash' });
+    }
+
+    if (!transactionHash) {
+      if (typeof rawNonce === 'number') {
+        nonce = String(rawNonce);
+      } else if (typeof rawNonce === 'string') {
+        nonce = rawNonce.trim();
+      } else {
+        return res.status(400).json({ error: 'Invalid nonce' });
+      }
+
+      if (nonce === '') {
+        return res.status(400).json({ error: 'Invalid nonce' });
+      }
     }
 
     if (!transactionHash && (nonce == null || nonce === '')) {
