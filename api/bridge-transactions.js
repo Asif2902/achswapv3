@@ -23,28 +23,55 @@ function optimizeBridgeData(data) {
   };
 }
 
-async function fetchBridgeTransactionsAPI(address) {
-  const url = `https://iris-api-sandbox.circle.com/v2/transactions?address=${encodeURIComponent(address)}`;
+function getCircleIrisBaseUrl() {
+  const configuredHost = String(process.env.CIRCLE_IRIS_HOST || "").trim().replace(/\/+$/, "");
+  if (!configuredHost) return "https://iris-api-sandbox.circle.com";
+  if (/^https?:\/\//i.test(configuredHost)) return configuredHost;
+  return `https://${configuredHost}`;
+}
+
+function mapCircleMessageToTransaction(message) {
+  return {
+    hash: typeof message?.transactionHash === "string" ? message.transactionHash : "",
+    amount: message?.amount != null ? String(message.amount) : "0",
+    timestamp: message?.blockTimestamp || message?.timestamp || message?.createdAt || null,
+    token: typeof message?.token === "string" && message.token ? message.token : "USDC",
+    status: typeof message?.status === "string" && message.status ? message.status : "unknown",
+  };
+}
+
+async function fetchBridgeTransactionsAPI(sourceDomainId, transactionHash) {
+  const baseUrl = getCircleIrisBaseUrl();
+  const endpoint = new URL(`/v2/messages/${encodeURIComponent(String(sourceDomainId))}`, `${baseUrl}/`);
+  if (transactionHash) {
+    endpoint.searchParams.set("transactionHash", transactionHash);
+  }
   
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);
   
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(endpoint, { signal: controller.signal });
     if (!response.ok) {
-      throw new Error(`Upstream CCTP API returned ${response.status} ${response.statusText}`);
+      throw new Error(`Upstream Circle Iris endpoint ${endpoint.pathname} returned ${response.status} ${response.statusText}`);
     }
     
     const data = await response.json();
     
-    if (!data || !Array.isArray(data.transactions)) {
-      throw new Error('Invalid response shape from CCTP API: expected transactions array');
+    if (!data || !Array.isArray(data.messages)) {
+      throw new Error(`Invalid response shape from Circle Iris endpoint ${endpoint.pathname}: expected messages array`);
     }
+
+    const transactions = data.messages.map(mapCircleMessageToTransaction);
+    const totalVolume = transactions.reduce((sum, tx) => {
+      const amount = Number(tx.amount);
+      return Number.isFinite(amount) ? sum + amount : sum;
+    }, 0);
     
     return {
-      transactions: data.transactions,
-      totalVolume: data.totalVolume || 0,
-      transactionCount: data.transactionCount || 0
+      transactions,
+      totalVolume,
+      transactionCount: transactions.length,
     };
   } finally {
     clearTimeout(timeoutId);
@@ -57,17 +84,25 @@ export default async function handler(req, res) {
   }
 
   try {
-    let rawAddress = req.query.address || req.body?.address || '';
-    if (Array.isArray(rawAddress)) rawAddress = rawAddress[0];
-    const address = String(rawAddress).toLowerCase();
+    let rawSourceDomainId = req.query.sourceDomainId || req.body?.sourceDomainId || '';
+    if (Array.isArray(rawSourceDomainId)) rawSourceDomainId = rawSourceDomainId[0];
+    const sourceDomainId = Number(rawSourceDomainId);
     
-    if (!/^0x[a-f0-9]{40}$/.test(address)) {
-      return res.status(400).json({ error: 'Invalid address' });
+    if (!Number.isInteger(sourceDomainId) || sourceDomainId < 0) {
+      return res.status(400).json({ error: 'Invalid sourceDomainId' });
+    }
+
+    let rawTransactionHash = req.query.transactionHash || req.body?.transactionHash || '';
+    if (Array.isArray(rawTransactionHash)) rawTransactionHash = rawTransactionHash[0];
+    const transactionHash = String(rawTransactionHash || '').trim().toLowerCase();
+
+    if (transactionHash && !/^0x[a-f0-9]{64}$/.test(transactionHash)) {
+      return res.status(400).json({ error: 'Invalid transactionHash' });
     }
 
     monitorRedisHealth(); // Fire & forget monitor
 
-    const cacheKey = `bridge:transactions:${address}`;
+    const cacheKey = `bridge:transactions:${sourceDomainId}:${transactionHash || 'all'}`;
     
     // 1. Try Cache
     try {
@@ -80,7 +115,7 @@ export default async function handler(req, res) {
     }
 
     // 2. Fetch Data
-    const rawData = await fetchBridgeTransactionsAPI(address);
+    const rawData = await fetchBridgeTransactionsAPI(sourceDomainId, transactionHash || undefined);
     const optimizedData = optimizeBridgeData(rawData);
 
     // 3. Set Cache

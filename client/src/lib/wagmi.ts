@@ -98,7 +98,7 @@ function createManagedHttpTransport(chainId: number) {
 
             try {
               const result = await transportInstance.request({ method, params: rpcParams } as any);
-              reportRpcSuccess(attempt.url);
+              reportRpcSuccess(chainId, attempt.url);
               return result;
 } catch (error) {
     // Rethrow non-retryable errors without resetting global failure state

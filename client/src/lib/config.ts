@@ -141,9 +141,7 @@ function getConfiguredRpcEndpoints(chainId: number): RpcEndpoint[] {
         { role: "public", timeoutMs: PUBLIC_TIMEOUT_MS, url: PUBLIC_ARC_RPC },
       ]);
     default:
-      return uniqueEndpoints([
-        { role: "public", timeoutMs: PUBLIC_TIMEOUT_MS, url: getArcPrimaryUrl() },
-      ]);
+      return [];
   }
 }
 
@@ -380,12 +378,9 @@ export const FALLBACK_RPC = PUBLIC_ARC_RPC;
 export { RPC_CONFIG };
 
 export function getRpcUrl(chainId: number): string {
-  switch (chainId) {
-    case ARC_TESTNET_CHAIN_ID:
-      return getArcPrimaryUrl();
-    default:
-      return getArcPrimaryUrl();
-  }
+  const [primary] = getConfiguredRpcEndpoints(chainId);
+  if (primary) return primary.url;
+  return getPublicRpcUrl(chainId);
 }
 
 export function getRpcUrls(chainId: number): string[] {
@@ -405,7 +400,7 @@ export function getPublicRpcUrl(chainId: number): string {
     case ARC_TESTNET_CHAIN_ID:
       return PUBLIC_ARC_RPC;
     default:
-      return getArcPrimaryUrl();
+      throw new Error(`Unsupported chainId for public RPC: ${chainId}`);
   }
 }
 
@@ -419,21 +414,15 @@ export function clearEndpointFailureTracking(url: string) {
   resetEndpointFailure(url);
 }
 
-export function reportRpcSuccess(url: string) {
+export function reportRpcSuccess(chainId: number, url: string) {
   resetEndpointFailure(url);
-  // Also reset alchemy failure count for the chain associated with this URL
-  // We need to determine the chainId from the URL to reset the failover state
-  // Since we don't have direct access to chainId here, we'll check all configured chains
-  // This is acceptable as the number of chains is small
-  [ARC_TESTNET_CHAIN_ID].forEach((chainId) => {
-    const endpoints = getConfiguredRpcEndpoints(chainId);
-    const endpoint = endpoints.find((e) => e.url === url);
-    if (endpoint) {
-      // Only reset permanent public mode if this was an Alchemy endpoint (primary or backup)
-      const sourceIsAlchemy = endpoint.role === "primary" || endpoint.role === "backup";
-      resetAlchemyFailureCount(chainId, { sourceIsAlchemy });
-    }
-  });
+  const endpoint = getConfiguredRpcEndpoints(chainId).find((candidate) => candidate.url === url);
+  if (!endpoint) return;
+
+  const sourceIsAlchemy = endpoint.role === "primary" || endpoint.role === "backup";
+  if (sourceIsAlchemy) {
+    resetAlchemyFailureCount(chainId, { sourceIsAlchemy });
+  }
 }
 
 export function createAlchemyProvider(chainId: number): JsonRpcProvider {

@@ -23,8 +23,9 @@ const RATE_LIMIT_WINDOW_MS = 60_000;
 const DEFAULT_TRANSFER_TTL_SECONDS = 30 * 24 * 60 * 60;
 const MAX_TRANSFERS_PER_WALLET = 100;
 const CLAIM_RECONCILE_LIMIT = 10;
-const OWNERSHIP_PROOF_MAX_TTL_MS = 12 * 60_000; // 12 minutes (allows 2m clock skew/delay relative to client 10m)
+const OWNERSHIP_PROOF_MAX_TTL_MS = 12 * 60_000; // 12 minutes total in ms (12 * 60_000): client proofs live 10m, server accepts an extra 2m for clock skew/delivery.
 const OWNERSHIP_PROOF_CLOCK_SKEW_MS = 30_000;
+const CCTP_USDC_DECIMALS = 6;
 
 const RPC_PROBE_TIMEOUT_MS = 4_500;
 const RPC_CACHE_REVALIDATE_MS = 30_000;
@@ -436,6 +437,36 @@ function trimErrorMessage(value) {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
   return trimmed.length > 400 ? `${trimmed.slice(0, 400)}...` : trimmed;
+}
+
+function normalizeTransferAmountToBaseUnits(value) {
+  if (value == null) return null;
+
+  try {
+    if (typeof value === "bigint") {
+      return value >= 0n ? value : null;
+    }
+
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || value < 0) return null;
+      return ethers.parseUnits(String(value), CCTP_USDC_DECIMALS);
+    }
+
+    if (typeof value === "string") {
+      const normalized = value.trim();
+      if (!normalized) return null;
+      if (!Number.isFinite(Number(normalized)) || Number(normalized) < 0) return null;
+      return ethers.parseUnits(normalized, CCTP_USDC_DECIMALS);
+    }
+
+    if (typeof value === "object" && value !== null && "toString" in value) {
+      return normalizeTransferAmountToBaseUnits(String(value));
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
 }
 
 function normalizeAttestation(input) {
@@ -1043,6 +1074,20 @@ async function verifyBurnTransaction(transfer) {
     throw new ValidationError("Burn transaction is not depositForBurn");
   }
 
+  const decodedAmount = normalizeTransferAmountToBaseUnits(parsed.args[0]);
+  if (decodedAmount == null) {
+    throw new ValidationError("Burn transaction amount is invalid");
+  }
+
+  const expectedAmount = normalizeTransferAmountToBaseUnits(transfer.amount);
+  if (expectedAmount == null) {
+    throw new ValidationError("Transfer amount is invalid");
+  }
+
+  if (decodedAmount !== expectedAmount) {
+    throw new ValidationError("Burn transaction amount mismatch");
+  }
+
   const decodedDestinationDomain = Number(parsed.args[1]);
   if (!Number.isFinite(decodedDestinationDomain) || decodedDestinationDomain !== Number(transfer.destDomain)) {
     throw new ValidationError("Burn transaction destination domain mismatch");
@@ -1563,18 +1608,22 @@ async function handleMarkComplete(req, res) {
       timestamp: Number(req.body?.timestamp) || Date.now(),
       status: 'attesting',
     };
-    await saveTransferRecord(transfer);
-    transfer = await getTransferRecord(burnTxHash);
-    if (!transfer) {
-      return res.status(500).json({ error: 'Failed to create transfer record' });
-    }
+    await verifyBurnTransaction(transfer);
   }
 
-  // Check if already claimed on-chain FIRST (before ownership check)
+  try {
+    await requireSignedOwnership(req, transfer);
+  } catch (err) {
+    return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
+  }
+
+  const attestationPayload = normalizeAttestation(attestation) || transfer.attestation;
+  const claimMessage = message || attestationPayload?.message;
+
   let alreadyClaimed = false;
   if (isHash(mintTxHash)) {
     try {
-      alreadyClaimed = await isTransferClaimed(transfer, mintTxHash) || await verifyMintTransaction(transfer, mintTxHash);
+      alreadyClaimed = await isTransferClaimed(transfer, claimMessage) || await verifyMintTransaction(transfer, mintTxHash);
     } catch (err) {
       console.warn(`[bridge] mark_complete verification threw error: `, err);
     }
@@ -1585,7 +1634,7 @@ async function handleMarkComplete(req, res) {
     await saveTransferRecord({
       ...transfer,
       status: 'complete',
-      attestation: normalizeAttestation(attestation) || transfer.attestation,
+      attestation: attestationPayload,
       mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
       error: undefined,
       updatedAt: Date.now(),
@@ -1594,16 +1643,10 @@ async function handleMarkComplete(req, res) {
     return res.status(200).json({ ok: true, completed: true, message: 'Transaction already completed' });
   }
 
-  try {
-    await requireSignedOwnership(req, transfer);
-  } catch (err) {
-    return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
-  }
-
   let verified = false;
   if (isHash(mintTxHash)) {
     try {
-      verified = await isTransferClaimed(transfer, mintTxHash) || await verifyMintTransaction(transfer, mintTxHash);
+      verified = await isTransferClaimed(transfer, claimMessage) || await verifyMintTransaction(transfer, mintTxHash);
     } catch (err) {
       console.warn(`[bridge] mark_complete verification threw error: `, err);
       verified = false;
@@ -1617,7 +1660,7 @@ async function handleMarkComplete(req, res) {
   await saveTransferRecord({
     ...transfer,
     status: 'complete',
-    attestation: normalizeAttestation(attestation) || transfer.attestation,
+    attestation: attestationPayload,
     mintTxHash: mergeTransferField(transfer.mintTxHash, isHash(mintTxHash) ? mintTxHash : undefined),
     error: undefined,
     updatedAt: Date.now(),
