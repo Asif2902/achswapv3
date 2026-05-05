@@ -43,11 +43,19 @@ function mapCircleMessageToTransaction(message) {
   };
 }
 
-async function fetchBridgeTransactionsAPI(sourceDomainId, transactionHash) {
+async function fetchBridgeTransactionsAPI(sourceDomainId, transactionHash, nonce) {
+  if (!transactionHash && (nonce == null || nonce === "")) {
+    const error = new Error("Missing transactionHash or nonce");
+    error.statusCode = 400;
+    throw error;
+  }
+
   const baseUrl = getCircleIrisBaseUrl();
   const endpoint = new URL(`/v2/messages/${encodeURIComponent(String(sourceDomainId))}`, `${baseUrl}/`);
   if (transactionHash) {
     endpoint.searchParams.set("transactionHash", transactionHash);
+  } else {
+    endpoint.searchParams.set("nonce", String(nonce));
   }
   
   const controller = new AbortController();
@@ -105,14 +113,23 @@ export default async function handler(req, res) {
     let rawTransactionHash = req.query.transactionHash || req.body?.transactionHash || '';
     if (Array.isArray(rawTransactionHash)) rawTransactionHash = rawTransactionHash[0];
     const transactionHash = String(rawTransactionHash || '').trim().toLowerCase();
+    let rawNonce = req.query.nonce ?? req.body?.nonce ?? '';
+    if (Array.isArray(rawNonce)) rawNonce = rawNonce[0] ?? '';
+    const nonce = typeof rawNonce === 'string' ? rawNonce.trim() : rawNonce;
 
     if (transactionHash && !/^0x[a-f0-9]{64}$/.test(transactionHash)) {
       return res.status(400).json({ error: 'Invalid transactionHash' });
     }
 
-    monitorRedisHealth(); // Fire & forget monitor
+    if (!transactionHash && (nonce == null || nonce === '')) {
+      return res.status(400).json({ error: 'Missing transactionHash or nonce' });
+    }
 
-    const cacheKey = `bridge:transactions:${sourceDomainId}:${transactionHash || 'all'}`;
+    monitorRedisHealth().catch((err) => {
+      console.error('monitorRedisHealth failed', err);
+    });
+
+    const cacheKey = `bridge:transactions:${sourceDomainId}:${transactionHash || `nonce:${String(nonce)}`}`;
     
     // 1. Try Cache
     try {
@@ -125,7 +142,7 @@ export default async function handler(req, res) {
     }
 
     // 2. Fetch Data
-    const rawData = await fetchBridgeTransactionsAPI(sourceDomainId, transactionHash || undefined);
+    const rawData = await fetchBridgeTransactionsAPI(sourceDomainId, transactionHash || undefined, nonce);
     const optimizedData = optimizeBridgeData(rawData);
 
     // 3. Set Cache
@@ -138,6 +155,9 @@ export default async function handler(req, res) {
     return res.status(200).json({ ...optimizedData, cached: false });
   } catch (error) {
     console.error('API Error (bridge-transactions):', error);
+    if (error?.statusCode === 400) {
+      return res.status(400).json({ error: error.message });
+    }
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 }

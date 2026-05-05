@@ -270,9 +270,9 @@ function isAllowedBrowserOrigin(req) {
 
 function setCorsHeaders(req, res) {
   const origin = req.headers.origin;
+  res.setHeader("Vary", "Origin");
   if (origin && isAllowedBrowserOrigin(req)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -1421,10 +1421,7 @@ async function handleUpsertBurn(req, res) {
   const existing = await getTransferRecord(record.burnTxHash);
   
   if (!existing) {
-    const isBurnValid = await verifyBurnTransaction(record);
-    if (!isBurnValid) {
-      return res.status(400).json({ error: "Burn transaction verification failed" });
-    }
+    await verifyBurnTransaction(record);
   } else {
     // Check immutable fields
     const normalizedExistingAmount = normalizeTransferAmountToBaseUnits(existing.amount);
@@ -1652,13 +1649,18 @@ async function handleMarkComplete(req, res) {
       timestamp: Number(req.body?.timestamp) || Date.now(),
       status: 'attesting',
     };
+    try {
+      await requireSignedOwnership(req, transfer);
+    } catch (err) {
+      return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
+    }
     await verifyBurnTransaction(transfer);
-  }
-
-  try {
-    await requireSignedOwnership(req, transfer);
-  } catch (err) {
-    return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
+  } else {
+    try {
+      await requireSignedOwnership(req, transfer);
+    } catch (err) {
+      return res.status(403).json({ error: err instanceof Error ? err.message : 'Ownership validation failed' });
+    }
   }
 
   const nextStatus = "complete";
@@ -1756,15 +1758,13 @@ async function handleRetry(req, res) {
     events.push(`retry_skipped:${Date.now()}`);
   }
 
-  if (updatedStatus !== transfer.status) {
-    await saveTransferRecord({
-      ...transfer,
-      status: updatedStatus,
-      error: updatedError,
-      events,
-      updatedAt: Date.now(),
-    });
-  }
+  await saveTransferRecord({
+    ...transfer,
+    status: updatedStatus,
+    error: updatedError,
+    events,
+    updatedAt: Date.now(),
+  });
 
   const refreshed = await getTransferRecord(burnTxHash);
   return res.status(200).json({ ok: true, status: refreshed?.status, events });
