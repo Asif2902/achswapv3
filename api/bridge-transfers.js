@@ -1420,6 +1420,12 @@ async function handleUpsertBurn(req, res) {
   if (!existing) {
     await verifyBurnTransaction(record);
   } else {
+    try {
+      await requireSignedOwnership(req, existing);
+    } catch (err) {
+      return res.status(403).json({ error: err instanceof Error ? err.message : "Ownership validation failed" });
+    }
+
     // Check immutable fields
     const normalizedExistingAmount = normalizeTransferAmountToBaseUnits(existing.amount);
     const normalizedRecordAmount = normalizeTransferAmountToBaseUnits(record.amount);
@@ -1782,7 +1788,7 @@ export default async function handler(req, res) {
     }
 
     if (!await checkRateLimit(req)) {
-      res.set("Retry-After", String(RATE_LIMIT_WINDOW_MS / 1000));
+      res.setHeader("Retry-After", String(RATE_LIMIT_WINDOW_MS / 1000));
       return res.status(429).json({ error: "Rate limit exceeded" });
     }
   } catch (err) {
