@@ -1427,7 +1427,7 @@ async function requireSignedOwnership(req, transfer) {
 async function handleGet(req, res) {
   if (isTruthyFlag(req.query?.probe)) {
     const storageStatus = await getStorageStatus();
-    return res.status(200).json({ ok: true, storage: storageStatus.storage });
+    return res.status(200).json({ ok: true, ...storageStatus });
   }
 
   const wallet = canonicalAddress(req.query?.wallet || "");
@@ -1536,10 +1536,11 @@ async function handleGet(req, res) {
 
   const active = allTransfers.slice(0, MAX_TRANSFERS_PER_WALLET).map(sanitizeForResponse);
 
-  return res.status(200).json({ transfers: active, storage: storageStatus.storage });
+  return res.status(200).json({ transfers: active, ...storageStatus });
 }
 
 async function handleUpsertBurn(req, res) {
+  const storageStatus = await getStorageStatus();
   const record = normalizeTransferRecord(req.body?.transfer);
   if (!record) return res.status(400).json({ error: "Invalid transfer payload" });
 
@@ -1607,7 +1608,10 @@ async function handleUpsertBurn(req, res) {
   return res.status(200).json({
     ok: true,
     persisted,
-    storage: persisted ? (HAS_REDIS ? "redis" : "memory") : "degraded",
+    storage: persisted ? storageStatus.storage : "degraded",
+    redisConfigured: storageStatus.redisConfigured,
+    redisHealthy: persisted ? storageStatus.redisHealthy : false,
+    redisHost: storageStatus.redisHost,
   });
 }
 

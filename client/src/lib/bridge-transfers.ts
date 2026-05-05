@@ -329,6 +329,11 @@ export async function isBridgeTransferApiAvailable(userAddress: string): Promise
     });
     if (!res.ok) return false;
     const data = await parseResponseJson(res);
+    if (data && data.redisConfigured === false) {
+      console.warn("[bridge-transfers] Redis is not configured on the server");
+    } else if (data && data.redisConfigured && data.redisHealthy === false) {
+      console.warn(`[bridge-transfers] Redis is configured but unhealthy${data.redisHost ? ` (${data.redisHost})` : ""}`);
+    }
     return hasTrustedBridgeStorage(data?.storage);
   } catch {
     return false;
@@ -579,7 +584,13 @@ async function postBridgeTransfer(action: string, payload: Record<string, unknow
 
     const data = await parseResponseJson(res);
     if (data?.persisted === false || data?.storage === "degraded") {
-      console.warn(`[bridge-transfers] ${action} completed without durable persistence`);
+      const detail =
+        data?.redisConfigured === false
+          ? "Redis not configured"
+          : data?.redisHealthy === false
+            ? `Redis unhealthy${data?.redisHost ? ` (${data.redisHost})` : ""}`
+            : "durable persistence unavailable";
+      console.warn(`[bridge-transfers] ${action} completed without durable persistence: ${detail}`);
       return false;
     }
 
