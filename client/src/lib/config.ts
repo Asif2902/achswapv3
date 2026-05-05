@@ -201,14 +201,17 @@ function resetAlchemyFailureCount(chainId: number, options?: { sourceIsAlchemy?:
   const state = getFailoverState(chainId);
   const updatedState: RpcFailoverState = {
     ...state,
-    alchemyFailureCount: 0,
     updatedAt: Date.now(),
   };
-  // Only exit permanent public mode if the successful call was from an Alchemy endpoint
-  if (state.permanentPublicUntil && options?.sourceIsAlchemy) {
-    updatedState.permanentPublicUntil = null;
-    updatedState.preferredRole = "primary";
+
+  if (options?.sourceIsAlchemy) {
+    updatedState.alchemyFailureCount = 0;
+    if (state.permanentPublicUntil) {
+      updatedState.permanentPublicUntil = null;
+      updatedState.preferredRole = "primary";
+    }
   }
+
   saveFailoverState(chainId, updatedState);
 }
 

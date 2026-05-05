@@ -1352,18 +1352,37 @@ async function handleUpsertBurn(req, res) {
   }
 
   const existing = await getTransferRecord(record.burnTxHash);
+  
+  if (!existing) {
+    const isBurnValid = await verifyBurnTransaction(record);
+    if (!isBurnValid) {
+      return res.status(400).json({ error: "Burn transaction verification failed" });
+    }
+  } else {
+    // Check immutable fields
+    const mismatch = existing.sourceDomain !== record.sourceDomain ||
+                     existing.sourceChainId !== record.sourceChainId ||
+                     existing.destDomain !== record.destDomain ||
+                     existing.destChainId !== record.destChainId ||
+                     existing.amount !== record.amount ||
+                     existing.userAddress !== record.userAddress;
+    if (mismatch) {
+      return res.status(400).json({ error: "Immutable field mismatch with existing record" });
+    }
+  }
+
   const recordHasAttestation = Boolean(record.attestation?.message && record.attestation?.attestation);
   const mergedStatus = selectProgressStatus(existing?.status, record.status, recordHasAttestation);
 
   const merged = {
     id: record.burnTxHash,
     burnTxHash: record.burnTxHash,
-    sourceDomain: record.sourceDomain,
-    sourceChainId: record.sourceChainId,
-    destDomain: record.destDomain,
-    destChainId: record.destChainId,
-    amount: record.amount,
-    userAddress: record.userAddress,
+    sourceDomain: existing?.sourceDomain ?? record.sourceDomain,
+    sourceChainId: existing?.sourceChainId ?? record.sourceChainId,
+    destDomain: existing?.destDomain ?? record.destDomain,
+    destChainId: existing?.destChainId ?? record.destChainId,
+    amount: existing?.amount ?? record.amount,
+    userAddress: existing?.userAddress ?? record.userAddress,
     timestamp: existing?.timestamp || record.timestamp,
     attestation: mergeTransferField(existing?.attestation, record.attestation),
     mintTxHash: mergeTransferField(existing?.mintTxHash, record.mintTxHash),
@@ -1518,6 +1537,7 @@ async function handleMarkFailed(req, res) {
   return res.status(200).json({ ok: true });
 }
 
+async function handleMarkComplete(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   const mintTxHash = canonicalHash(req.body?.mintTxHash || '');
   const message = typeof req.body?.message === 'string' ? req.body.message : '';

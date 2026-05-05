@@ -1021,11 +1021,11 @@ export default function Bridge() {
         let attestationResult: AttestationPollResult;
 
         // If we already have attestation, use it directly (don't poll again)
-        if (pendingTx.attestation?.message) {
+        if (pendingTx.attestation?.message && pendingTx.attestation?.attestation) {
           toast({ title: "Resuming transfer...", description: "Using existing attestation" });
           attestationResult = {
             message: pendingTx.attestation.message,
-            attestation: pendingTx.attestation.attestation || pendingTx.attestation.message,
+            attestation: pendingTx.attestation.attestation,
             destinationDomain: pendingTx.destDomain || 0,
           };
         } else {
@@ -1053,12 +1053,12 @@ export default function Bridge() {
           throw new Error("Could not resolve destination chain from attestation");
         }
 
-        await updateTransferStatus(pendingTx.id, {
+        updateTransferStatus(pendingTx.id, {
           status: "ready_to_mint",
           attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
           destDomain: resolvedDst.domain,
           destChainId: resolvedDst.chainId,
-        });
+        }).catch(e => console.error("Failed server update for ready_to_mint:", e));
         setDestChain(resolvedDst);
         setTransfer(prev => ({
           ...prev,
@@ -1092,10 +1092,10 @@ export default function Bridge() {
       const isTimeout = /timeout/i.test(message);
       if (isTimeout) {
         // Keep transfer resumable — don't mark as failed
-        await updateTransferStatus(pendingTx.id, { status: "attesting", error: message });
+        updateTransferStatus(pendingTx.id, { status: "attesting", error: message }).catch(e => console.error("Server update failed:", e));
         setTransfer(prev => ({ ...prev, step: "error", error: message }));
       } else {
-        await updateTransferStatus(pendingTx.id, { status: "failed", error: message });
+        updateTransferStatus(pendingTx.id, { status: "failed", error: message }).catch(e => console.error("Server update failed:", e));
         setTransfer(prev => ({ ...prev, step: "error", error: message }));
       }
       toast({
@@ -1116,7 +1116,7 @@ export default function Bridge() {
   ) => {
     if (!window.ethereum) throw new Error("No wallet connected");
 
-    await updateTransferStatus(transferId, { status: "minting" });
+    updateTransferStatus(transferId, { status: "minting" }).catch(e => console.error("Server update failed:", e));
 
     try {
       await switchToChain(dstChain, "receive USDC");
@@ -1132,6 +1132,9 @@ export default function Bridge() {
         destProvider,
       );
       if (nonceAlreadyUsed) {
+        // Non-blocking server update
+        updateTransferStatus(transferId, { status: "complete" }).catch(e => console.error("Failed server update for complete:", e));
+        
         // Update local state directly
         const existing = getFallbackTransfers();
         const idx = existing.findIndex((t) => t.id === transferId);
@@ -1243,6 +1246,9 @@ export default function Bridge() {
         walletProvider,
       );
       if (claimedOnDestination || isAlreadyClaimedError(mintErr)) {
+        // Non-blocking server update
+        updateTransferStatus(transferId, { status: "complete" }).catch(e => console.error("Failed server update for complete:", e));
+        
         // Update local state directly
         const existing = getFallbackTransfers();
         const idx = existing.findIndex((t) => t.id === transferId);
@@ -1274,7 +1280,7 @@ export default function Bridge() {
       // Mint failed or was cancelled — keep transfer resumable with attestation intact
       const signerAddress = address || "";
       const msg = await resolveMintErrorMessage(dstChain, signerAddress, attestation, mintErr);
-      await updateTransferStatus(transferId, { status: "ready_to_mint", attestation, error: msg });
+      updateTransferStatus(transferId, { status: "ready_to_mint", attestation, error: msg }).catch(e => console.error("Server update failed:", e));
       setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({
         title: "Mint Failed — Your Funds Are Safe",
@@ -1437,7 +1443,7 @@ export default function Bridge() {
       let amount = "0";
 
       try {
-        amount = (Number(decodedDepositForBurn.amount) / 1000000).toString();
+        amount = formatUnits(decodedDepositForBurn.amount, 6);
       } catch {
         amount = "0";
       }
@@ -1454,10 +1460,10 @@ export default function Bridge() {
             // Transfer(address,address,uint256) - topic[0] is signature
             // Check if it's a burn (to address is 0)
             try {
-              const parsed = usdcIface.parseLog({ topics: log.topics, data: log.data });
+              const parsed = usdcIface.parseLog({ topics: log.topics as string[], data: log.data });
               if (parsed && parsed.args.to === "0x0000000000000000000000000000000000000000") {
                 const amountWei = parsed.args.value as bigint;
-                amount = (Number(amountWei) / 1000000).toString();
+                amount = formatUnits(amountWei, 6);
                 break;
               }
             } catch { continue; }
@@ -1600,10 +1606,10 @@ export default function Bridge() {
           typeof fetchedAttestationResult.destinationDomain === "number" &&
           fetchedAttestationResult.destinationDomain !== decodedDestinationDomain
         ) {
-          await updateTransferStatus(txHash, {
+          updateTransferStatus(txHash, {
             status: "attesting",
             error: "Attestation destination does not match burn transaction",
-          });
+          }).catch(e => console.error("Server update failed:", e));
           setTransfer(prev => ({ ...prev, step: "error", error: "Attestation destination does not match burn transaction" }));
           toast({
             title: "Destination mismatch",
@@ -1619,10 +1625,10 @@ export default function Bridge() {
         );
 
       if (!resolvedDestChain) {
-        await updateTransferStatus(txHash, {
+        updateTransferStatus(txHash, {
             status: "attesting",
             error: "Attestation did not provide a valid destination chain",
-          });
+          }).catch(e => console.error("Server update failed:", e));
           setTransfer(prev => ({ ...prev, step: "error", error: "Attestation did not provide a valid destination chain" }));
 
           toast({
@@ -1633,7 +1639,7 @@ export default function Bridge() {
           return;
         }
         
-        await updateTransferStatus(txHash, {
+        updateTransferStatus(txHash, {
           status: "ready_to_mint",
           attestation: {
             message: fetchedAttestationResult.message,
@@ -1641,7 +1647,7 @@ export default function Bridge() {
           },
           destDomain: resolvedDestChain.domain,
           destChainId: resolvedDestChain.chainId,
-        });
+        }).catch(e => console.error("Server update failed:", e));
         
         // Use destination resolved from attestation when available
         setDestChain(resolvedDestChain);
@@ -1687,10 +1693,10 @@ export default function Bridge() {
         }
 
         if (shouldDowngradeToAttesting) {
-          await updateTransferStatus(currentTransferIdRef.current, {
+          updateTransferStatus(currentTransferIdRef.current, {
             status: "attesting",
             error: msg,
-          });
+          }).catch(e => console.error("Server update failed:", e));
         }
       }
       setTransfer(prev => ({ ...prev, step: "error", error: msg }));
@@ -1816,12 +1822,12 @@ export default function Bridge() {
         throw new Error("Could not resolve destination chain from attestation");
       }
 
-      await updateTransferStatus(transferId, {
+      updateTransferStatus(transferId, {
         status: "ready_to_mint",
         attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
         destDomain: resolvedDestChain.domain,
         destChainId: resolvedDestChain.chainId,
-      });
+      }).catch(e => console.error("Server update failed:", e));
       setDestChain(resolvedDestChain);
       setTransfer(prev => ({
         ...prev,
@@ -1845,9 +1851,9 @@ export default function Bridge() {
       if (currentTransferIdRef.current) {
         if (isTimeout) {
           // Keep transfer resumable — don't mark as failed
-          await updateTransferStatus(currentTransferIdRef.current, { status: "attesting", error: message });
+          updateTransferStatus(currentTransferIdRef.current, { status: "attesting", error: message }).catch(e => console.error("Server update failed:", e));
         } else {
-          await updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message });
+          updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message }).catch(e => console.error("Server update failed:", e));
         }
       }
       setTransfer(prev => ({ ...prev, step: "error", error: message }));

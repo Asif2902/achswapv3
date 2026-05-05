@@ -679,7 +679,10 @@ export async function updateTransferStatus(
   // Update local storage FIRST (don't let server failures block UI)
   const existing = getFallbackTransfers();
   const idx = existing.findIndex((t) => t.id === burnTxHash);
+  let snapshot: PendingBridgeTransfer | undefined = undefined;
+
   if (idx >= 0) {
+    snapshot = existing[idx];
     const updatedRecord = {
       ...existing[idx],
       ...updates,
@@ -689,22 +692,18 @@ export async function updateTransferStatus(
       updatedAt: Date.now(),
     };
 
-    if (status === "complete" || status === "failed") {
-      addToHistory(updatedRecord);
-      existing.splice(idx, 1);
-    } else {
+    if (status !== "complete" && status !== "failed") {
       existing[idx] = updatedRecord;
+      setFallbackTransfers(existing);
+      dispatchTransfersUpdated();
     }
-    setFallbackTransfers(existing);
-    dispatchTransfersUpdated();
   }
 
   // Try to update server (non-blocking for UI)
+  let serverOk = true;
   const requiresOwnership = isOwnershipAction(status);
   if (requiresOwnership) {
-    const localRecord = existing.find((t) => t.id === burnTxHash) || 
-      getFallbackTransfers().find((t) => t.id === burnTxHash);
-    const expectedOwner = localRecord?.userAddress;
+    const expectedOwner = snapshot?.userAddress;
     let ownershipProof = getCachedOwnershipProof(burnTxHash);
     if (!ownershipProof) {
       ownershipProof = await createOwnershipProof(burnTxHash, expectedOwner);
@@ -712,36 +711,50 @@ export async function updateTransferStatus(
 
     if (!ownershipProof) {
       console.warn(`[bridge-transfers] ${status} skipped server update: missing ownership proof`);
-      return true; // Local update already done
+    } else {
+      serverOk = await postBridgeTransfer(
+        status === "ready_to_mint" ? "update_attestation" :
+        status === "minting" ? "mark_minting" :
+        status === "complete" ? "mark_complete" :
+        status === "failed" ? "mark_failed" :
+        status === "attesting" ? "mark_attesting" : "",
+        {
+          burnTxHash,
+          mintTxHash: updates.mintTxHash,
+          message: updates.attestation?.message,
+          attestation: updates.attestation,
+          userAddress: snapshot?.userAddress,
+          sourceDomain: snapshot?.sourceDomain,
+          sourceChainId: snapshot?.sourceChainId,
+          destDomain: snapshot?.destDomain,
+          destChainId: snapshot?.destChainId,
+          amount: snapshot?.amount,
+          timestamp: snapshot?.timestamp,
+          error: updates.error,
+          ownershipProof,
+        }
+      );
     }
-
-    const ok = await postBridgeTransfer(
-      status === "ready_to_mint" ? "update_attestation" :
-      status === "minting" ? "mark_minting" :
-      status === "complete" ? "mark_complete" :
-      status === "failed" ? "mark_failed" :
-      status === "attesting" ? "mark_attesting" : "",
-      {
-        burnTxHash,
-        mintTxHash: updates.mintTxHash,
-        message: updates.attestation?.message,
-        attestation: updates.attestation,
-        userAddress: localRecord?.userAddress,
-        sourceDomain: localRecord?.sourceDomain,
-        sourceChainId: localRecord?.sourceChainId,
-        destDomain: localRecord?.destDomain,
-        destChainId: localRecord?.destChainId,
-        amount: localRecord?.amount,
-        timestamp: localRecord?.timestamp,
-        error: updates.error,
-        ownershipProof,
-      }
-    );
-    return ok;
   }
 
-  // Non-ownership statuses (shouldn't normally happen)
-  return true;
+  // Now perform the splice and history addition if status was terminal
+  if (idx >= 0 && (status === "complete" || status === "failed")) {
+    const updatedRecord = {
+      ...snapshot!,
+      ...updates,
+      updatedAt: Date.now(),
+    };
+    addToHistory(updatedRecord);
+    const latestExisting = getFallbackTransfers();
+    const latestIdx = latestExisting.findIndex((t) => t.id === burnTxHash);
+    if (latestIdx >= 0) {
+      latestExisting.splice(latestIdx, 1);
+      setFallbackTransfers(latestExisting);
+      dispatchTransfersUpdated();
+    }
+  }
+
+  return serverOk;
 }
 
 export async function removeTransfer(id: string): Promise<boolean> {

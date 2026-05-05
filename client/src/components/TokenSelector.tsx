@@ -86,7 +86,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         // Keep open interaction lightweight; hydrate community after panel is visible
         setCommunityTokens(getCachedCommunityTokens(chainId) ?? []);
         setLoadingCommunity(false);
-      } else if (rwaOnly) {
+      } else if (rwaOnly || !chainId) {
         setCommunityTokens([]);
         setLoadingCommunity(false);
       }

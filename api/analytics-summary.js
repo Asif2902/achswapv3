@@ -371,23 +371,37 @@ export default async function handler(req, res) {
     const rankCacheKey = `analytics:rank:${wallet}`;
     
     if (!forceRefresh) {
-      aggregateSummary = await deserializeAndDecompress(summaryCacheKey);
-      if (aggregateSummary) summaryCached = true;
+      try {
+        aggregateSummary = await deserializeAndDecompress(summaryCacheKey);
+        if (aggregateSummary) summaryCached = true;
+      } catch (err) {
+        aggregateSummary = null;
+        summaryCached = false;
+      }
       
       if (wallet) {
-        targetUserRank = await deserializeAndDecompress(rankCacheKey);
-        if (targetUserRank !== null) rankCached = true;
+        try {
+          targetUserRank = await deserializeAndDecompress(rankCacheKey);
+          if (targetUserRank !== null) rankCached = true;
+        } catch (err) {
+          targetUserRank = null;
+          rankCached = false;
+        }
       }
     }
 
     if (!aggregateSummary) {
       aggregateSummary = await buildAggregateSummary(token);
-      await serializeAndCompress(summaryCacheKey, aggregateSummary, Math.floor(SUMMARY_CACHE_TTL_MS / 1000));
+      try {
+        await serializeAndCompress(summaryCacheKey, aggregateSummary, Math.floor(SUMMARY_CACHE_TTL_MS / 1000));
+      } catch (err) {}
     }
 
     if (wallet && targetUserRank === null) {
       targetUserRank = await getUserRankByEffectiveVolume(token, wallet);
-      await serializeAndCompress(rankCacheKey, targetUserRank, Math.floor(SUMMARY_CACHE_TTL_MS / 1000));
+      try {
+        await serializeAndCompress(rankCacheKey, targetUserRank, Math.floor(SUMMARY_CACHE_TTL_MS / 1000));
+      } catch (err) {}
     }
 
     return res.status(200).json({

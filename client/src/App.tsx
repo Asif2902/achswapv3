@@ -136,7 +136,7 @@ function AppBootstrapOverlay({ phase, visible }: { phase: AppBootstrapPhase; vis
 }
 
 function App() {
-  const initiallyVisible = !hasCompletedAppBootstrap();
+  const [initiallyVisible] = useState(() => !hasCompletedAppBootstrap());
   const [bootPhase, setBootPhase] = useState<AppBootstrapPhase>("rpc");
   const [bootVisible, setBootVisible] = useState(initiallyVisible);
 

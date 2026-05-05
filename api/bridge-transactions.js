@@ -24,8 +24,31 @@ function optimizeBridgeData(data) {
 }
 
 async function fetchBridgeTransactionsAPI(address) {
-  // Replace with actual external CCTP V2 API fetch
-  return { transactions: [], totalVolume: 0, transactionCount: 0 };
+  const url = `https://iris-api-sandbox.circle.com/v2/transactions?address=${encodeURIComponent(address)}`;
+  
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) {
+      throw new Error(`Upstream CCTP API returned ${response.status} ${response.statusText}`);
+    }
+    
+    const data = await response.json();
+    
+    if (!data || !Array.isArray(data.transactions)) {
+      throw new Error('Invalid response shape from CCTP API: expected transactions array');
+    }
+    
+    return {
+      transactions: data.transactions,
+      totalVolume: data.totalVolume || 0,
+      transactionCount: data.transactionCount || 0
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 export default async function handler(req, res) {
@@ -34,7 +57,10 @@ export default async function handler(req, res) {
   }
 
   try {
-    const address = (req.query.address || req.body?.address || '').toLowerCase();
+    let rawAddress = req.query.address || req.body?.address || '';
+    if (Array.isArray(rawAddress)) rawAddress = rawAddress[0];
+    const address = String(rawAddress).toLowerCase();
+    
     if (!/^0x[a-f0-9]{40}$/.test(address)) {
       return res.status(400).json({ error: 'Invalid address' });
     }

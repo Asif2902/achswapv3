@@ -9,26 +9,41 @@ const COMPRESSION_THRESHOLD_BYTES = 10240; // Compress if > 10KB
 const UPSTASH_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim().replace(/\/$/, "");
 const UPSTASH_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 const HAS_REDIS = !!(UPSTASH_URL && UPSTASH_TOKEN);
+const UPSTASH_TIMEOUT_MS = 5000;
 
 async function upstashRequest(command, ...args) {
   if (!HAS_REDIS) return null;
   const url = `${UPSTASH_URL}/${command}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${UPSTASH_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(args),
-  });
-  if (!response.ok) {
-    throw new Error(`Upstash error: ${response.statusText}`);
+  
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), UPSTASH_TIMEOUT_MS);
+  
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${UPSTASH_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(args),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Upstash error: ${response.statusText}`);
+    }
+    const json = await response.json();
+    if (json.error) {
+      throw new Error(`Upstash command error: ${json.error}`);
+    }
+    return json.result;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error('Upstash request timed out');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeoutId);
   }
-  const json = await response.json();
-  if (json.error) {
-    throw new Error(`Upstash command error: ${json.error}`);
-  }
-  return json.result;
 }
 
 export async function serializeAndCompress(cacheKey, dataObj, ttlSeconds) {
@@ -46,7 +61,8 @@ export async function serializeAndCompress(cacheKey, dataObj, ttlSeconds) {
       await upstashRequest('SETEX', cacheKey, ttlSeconds, jsonStr);
     }
   } catch (err) {
-    console.error(`[Redis] Cache Write Error for ${cacheKey}:`, err.message);
+    const redactedKey = cacheKey.replace(/:[^:]+$/, ':<redacted>');
+    console.error(`[Redis] Cache Write Error for ${redactedKey}:`, err.message);
   }
 }
 
@@ -66,7 +82,8 @@ export async function deserializeAndDecompress(cacheKey) {
     // If it's a string that doesn't start with gz: and not parsed yet, or object
     return typeof data === 'string' ? JSON.parse(data) : data;
   } catch (err) {
-    console.error(`[Redis] Cache Read Error for ${cacheKey}:`, err.message);
+    const redactedKey = cacheKey.replace(/:[^:]+$/, ':<redacted>');
+    console.error(`[Redis] Cache Read Error for ${redactedKey}:`, err.message);
     return null;
   }
 }
