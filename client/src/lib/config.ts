@@ -9,6 +9,9 @@ const FAILOVER_STORAGE_KEY = "achswap_rpc_failover_v1";
 const MAX_ALCHEMY_FAILURES = 3;
 const ALCHEMY_TIMEOUT_MS = 2200;
 const PUBLIC_TIMEOUT_MS = 3200;
+const BOOTSTRAP_WARMUP_ALCHEMY_TIMEOUT_MS = 500;
+const BOOTSTRAP_WARMUP_PUBLIC_TIMEOUT_MS = 700;
+const BOOTSTRAP_WARMUP_STAGGER_MS = 120;
 
 type RpcRole = "primary" | "backup" | "public";
 
@@ -282,6 +285,10 @@ function createTimeoutSignal(timeoutMs: number): { cancel: () => void; signal: A
     signal: controller.signal,
     cancel: () => globalThis.clearTimeout(timer),
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
 }
 
 function normalizeRpcBatch(json: unknown): Array<JsonRpcResult> {
@@ -562,11 +569,79 @@ export function reportRpcSuccess(chainId: number, url: string) {
   }
 }
 
+function preferWarmRpcEndpoint(chainId: number, endpoint: RpcEndpoint) {
+  if (endpoint.role !== "primary" && endpoint.role !== "backup") return;
+
+  const state = refreshFailoverState(chainId);
+  saveFailoverState(chainId, {
+    ...state,
+    alchemyFailureCount: 0,
+    permanentPublicUntil: null,
+    preferredRole: endpoint.role,
+    updatedAt: Date.now(),
+  });
+}
+
 export function createAlchemyProvider(chainId: number): JsonRpcProvider {
   return new BatchRpcProvider(chainId, getNetwork(chainId));
 }
 
 export async function warmRpcProvider(chainId: number): Promise<void> {
-  const provider = createAlchemyProvider(chainId);
-  await provider.getBlockNumber();
+  refreshFailoverState(chainId);
+  const attempts = getRpcAttemptOrder(chainId);
+  if (attempts.length === 0) return;
+
+  const payload: JsonRpcPayload[] = [{
+    id: Date.now(),
+    jsonrpc: "2.0",
+    method: "eth_blockNumber",
+    params: [],
+  }];
+
+  let settled = false;
+  let lastError: unknown = null;
+
+  const probes = attempts.map((endpoint, index) => (async () => {
+    if (index > 0) {
+      await sleep(BOOTSTRAP_WARMUP_STAGGER_MS * index);
+    }
+    if (settled) {
+      throw new Error("RPC warmup already settled");
+    }
+
+    const warmEndpoint: RpcEndpoint = {
+      ...endpoint,
+      timeoutMs: Math.min(
+        endpoint.timeoutMs,
+        endpoint.role === "public"
+          ? BOOTSTRAP_WARMUP_PUBLIC_TIMEOUT_MS
+          : BOOTSTRAP_WARMUP_ALCHEMY_TIMEOUT_MS,
+      ),
+    };
+
+    try {
+      await fetchJsonRpc(warmEndpoint, payload);
+      if (settled) {
+        throw new Error("RPC warmup already settled");
+      }
+      settled = true;
+      resetEndpointFailure(endpoint.url);
+      preferWarmRpcEndpoint(chainId, endpoint);
+      return;
+    } catch (error) {
+      if (!settled && isRetryableRpcError(error)) {
+        lastError = error;
+        trackEndpointFailure(chainId, endpoint);
+      }
+      throw error;
+    }
+  })());
+
+  try {
+    await Promise.any(probes);
+  } catch {
+    if (lastError instanceof Error) throw lastError;
+    if (lastError) throw new Error(String(lastError));
+    throw new Error(`RPC warmup failed for chain ${chainId}`);
+  }
 }

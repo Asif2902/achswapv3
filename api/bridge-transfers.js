@@ -1623,8 +1623,8 @@ async function handleUpsertBurn(req, res) {
 async function handleUpdateAttestation(req, res) {
   const burnTxHash = canonicalHash(req.body?.burnTxHash);
   const attestation = normalizeAttestation(req.body?.attestation);
-  if (!isHash(burnTxHash) || !attestation) {
-    return res.status(400).json({ error: "Invalid attestation payload" });
+  if (!isHash(burnTxHash)) {
+    return res.status(400).json({ error: "Invalid burnTxHash" });
   }
 
   let transfer;
@@ -1662,11 +1662,7 @@ async function handleUpdateAttestation(req, res) {
     return res.status(400).json({ error: "Destination chain unavailable" });
   }
 
-  const nextStatus = "ready_to_mint";
   const currentStatus = normalizeTransferStatus(transfer.status);
-  if (!VALID_TRANSITIONS[currentStatus]?.includes(nextStatus)) {
-    return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
-  }
 
   let verifiedAttestation;
   try {
@@ -1678,9 +1674,23 @@ async function handleUpdateAttestation(req, res) {
     verifiedAttestation = undefined;
   }
 
+  const resolvedAttestation = verifiedAttestation || attestation || normalizeAttestation(transfer.attestation);
+  const hasResolvedAttestation = Boolean(
+    resolvedAttestation?.message && resolvedAttestation?.attestation,
+  );
+  const nextStatus = hasResolvedAttestation ? "ready_to_mint" : "attesting";
+
+  if (nextStatus === "ready_to_mint") {
+    if (!VALID_TRANSITIONS[currentStatus]?.includes(nextStatus)) {
+      return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
+    }
+  } else if (currentStatus === "complete" || currentStatus === "failed") {
+    return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
+  }
+
   const updated = {
     ...transfer,
-    attestation: verifiedAttestation || transfer.attestation,
+    attestation: resolvedAttestation,
     status: nextStatus,
     destDomain: nextDestination.domain,
     destChainId: nextDestination.chainId,

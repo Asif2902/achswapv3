@@ -2,8 +2,8 @@ import { preloadCommunityTokens } from "@/data/tokens";
 import { ARC_TESTNET_CHAIN_ID, warmRpcProvider } from "@/lib/config";
 
 const APP_BOOTSTRAP_SESSION_KEY = "achswap_app_bootstrap_v1";
-const BOOTSTRAP_RPC_TIMEOUT_MS = 900;
-const COMMUNITY_PRELOAD_START_DELAY_MS = 60;
+const BOOTSTRAP_RPC_TIMEOUT_MS = 1000;
+const COMMUNITY_PRELOAD_START_DELAY_MS = 24;
 
 export type AppBootstrapPhase = "rpc" | "community" | "ready";
 
@@ -72,11 +72,6 @@ export function bootstrapAppReadiness(
   if (!bootstrapPromise) {
     bootstrapPromise = (async () => {
       setPhase("rpc");
-      const communityPromise = sleep(COMMUNITY_PRELOAD_START_DELAY_MS)
-        .then(() => preloadCommunityTokens(ARC_TESTNET_CHAIN_ID))
-        .catch((error) => {
-          console.error("[app-bootstrap] community preload failed", error);
-        });
       const warmRpcPromise = warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch((error) => {
         console.error("[app-bootstrap] RPC warmup failed", error);
       });
@@ -88,7 +83,8 @@ export function bootstrapAppReadiness(
         ]);
 
         setPhase("community");
-        await communityPromise;
+        await sleep(COMMUNITY_PRELOAD_START_DELAY_MS);
+        await preloadCommunityTokens(ARC_TESTNET_CHAIN_ID);
       } catch (error) {
         console.error("[app-bootstrap] bootstrap readiness failed", error);
       } finally {

@@ -33,7 +33,7 @@ function Router() {
   );
 }
 
-const BOOTSTRAP_MIN_VISIBLE_MS = 420;
+const BOOTSTRAP_MIN_VISIBLE_MS = 360;
 
 function AppBootstrapOverlay({ phase, visible }: { phase: AppBootstrapPhase; visible: boolean }) {
   const copy: Record<AppBootstrapPhase, { kicker: string; title: string }> = {
@@ -163,7 +163,7 @@ function App() {
         if (!cancelled) {
           setBootVisible(false);
         }
-      }, remainingMinVisible + (initiallyVisible ? 160 : 0));
+      }, remainingMinVisible + (initiallyVisible ? 100 : 0));
     });
 
     return () => {
