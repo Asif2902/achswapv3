@@ -46,6 +46,11 @@ const ownershipProofCacheByTransferId = new Map<string, {
   issuedAt: number;
   expiresAt: number;
 }>();
+const ownershipProofRequestByTransferId = new Map<string, Promise<{
+  signedMessage: string;
+  signature: string;
+  issuedAt: number;
+} | null>>();
 
 const reconciliationCache = new Map<string, { claimed: boolean; checkedAt: number }>();
 
@@ -398,6 +403,37 @@ async function createOwnershipProof(burnTxHash: string, expectedOwner?: string):
   }
 }
 
+async function getOrCreateOwnershipProof(burnTxHash: string, expectedOwner?: string): Promise<{
+  signedMessage: string;
+  signature: string;
+  issuedAt: number;
+} | null> {
+  const transferKey = canonicalHash(burnTxHash);
+  const cached = getCachedOwnershipProof(transferKey);
+  if (cached) return cached;
+
+  const existingRequest = ownershipProofRequestByTransferId.get(transferKey);
+  if (existingRequest) {
+    return existingRequest;
+  }
+
+  const request = (async () => {
+    const latestCached = getCachedOwnershipProof(transferKey);
+    if (latestCached) return latestCached;
+    return createOwnershipProof(transferKey, expectedOwner);
+  })();
+
+  ownershipProofRequestByTransferId.set(transferKey, request);
+
+  try {
+    return await request;
+  } finally {
+    if (ownershipProofRequestByTransferId.get(transferKey) === request) {
+      ownershipProofRequestByTransferId.delete(transferKey);
+    }
+  }
+}
+
 async function parseResponseJson(res: Response): Promise<any> {
   try {
     return await res.json();
@@ -716,10 +752,7 @@ export async function updateTransferStatus(
   let serverOk = !requiresOwnership;
   if (requiresOwnership) {
     const expectedOwner = snapshot?.userAddress;
-    let ownershipProof = getCachedOwnershipProof(burnTxHash);
-    if (!ownershipProof) {
-      ownershipProof = await createOwnershipProof(burnTxHash, expectedOwner);
-    }
+    const ownershipProof = await getOrCreateOwnershipProof(burnTxHash, expectedOwner);
 
     if (!ownershipProof) {
       console.warn(`[bridge-transfers] ${status} skipped server update: missing ownership proof`);
@@ -808,10 +841,7 @@ export async function removeTransfer(id: string): Promise<boolean> {
     return true;
   }
 
-  let ownershipProof = getCachedOwnershipProof(burnTxHash);
-  if (!ownershipProof) {
-    ownershipProof = await createOwnershipProof(burnTxHash, localRecord?.userAddress);
-  }
+  const ownershipProof = await getOrCreateOwnershipProof(burnTxHash, localRecord?.userAddress);
 
   if (!ownershipProof) {
     return false;
