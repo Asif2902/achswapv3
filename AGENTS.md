@@ -44,7 +44,7 @@ Do not suggest:
 - converting persistence warnings into thrown errors on the user path
 - requiring the user to retry the whole bridge because a save/update endpoint returned degraded status
 - asking the maintainer to "check env vars" as a default response
-
+- if new environment variable added or need to added after the solution you must exclusively say what they have to add and where they can found it.
 Environment variables for this project should be assumed to be intentionally configured unless a task explicitly says otherwise. Focus review on code paths, error propagation, persistence strategy, and user safety instead of defaulting to env-var advice.
 
 ## Database safety expectations
