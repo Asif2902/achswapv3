@@ -114,25 +114,35 @@ export function getFallbackTransfers(): PendingBridgeTransfer[] {
     const currentRaw = localStorage.getItem(FALLBACK_STORAGE_KEY);
     let merged: PendingBridgeTransfer[] = [];
 
-    // Load legacy entries first
+    // Migrate legacy entries, but let the current fallback cache win on conflict.
     if (legacyRaw) {
       const legacyParsed = JSON.parse(legacyRaw) as PendingBridgeTransfer[];
-      if (Array.isArray(legacyParsed)) merged = legacyParsed.map(normalizeTransfer);
+      const currentParsed = currentRaw ? JSON.parse(currentRaw) as PendingBridgeTransfer[] : null;
+      const mergedById = new Map<string, PendingBridgeTransfer>();
+
+      if (Array.isArray(legacyParsed)) {
+        legacyParsed
+          .map(normalizeTransfer)
+          .forEach((transfer) => {
+            mergedById.set(transfer.id, transfer);
+          });
+      }
+
+      if (Array.isArray(currentParsed)) {
+        currentParsed
+          .map(normalizeTransfer)
+          .forEach((transfer) => {
+            mergedById.set(transfer.id, transfer);
+          });
+      }
+
+      merged = Array.from(mergedById.values());
     }
 
-    // Merge with current fallback entries, dedupe by id
-    if (currentRaw) {
+    // Normal non-migration read path.
+    if (!legacyRaw && currentRaw) {
       const currentParsed = JSON.parse(currentRaw) as PendingBridgeTransfer[];
-      if (Array.isArray(currentParsed)) {
-        const ids = new Set(merged.map(t => t.id));
-        currentParsed.forEach(t => {
-          const normalized = normalizeTransfer(t);
-          if (!ids.has(normalized.id)) {
-            merged.push(normalized);
-            ids.add(normalized.id);
-          }
-        });
-      }
+      if (Array.isArray(currentParsed)) merged = currentParsed.map(normalizeTransfer);
     }
 
     // Save merged back only when migrating legacy entries.
@@ -225,7 +235,7 @@ function resolveTransferConflict(
 
   return {
     ...local,
-    status: server.status,
+    status: local.status || server.status,
     mintTxHash: server.mintTxHash || local.mintTxHash,
     error: server.error || local.error,
   };
@@ -619,12 +629,17 @@ async function postBridgeTransfer(action: string, payload: Record<string, unknow
     }
 
     const data = await parseResponseJson(res);
-    if (data?.persisted === false || data?.storage === "degraded") {
+    if (!data) {
+      console.warn(`[bridge-transfers] ${action} completed without durable persistence: empty response`);
+      return false;
+    }
+
+    if (data.persisted !== true || data.storage === "degraded") {
       const detail =
-        data?.redisConfigured === false
+        data.redisConfigured === false
           ? "Redis not configured"
-          : data?.redisHealthy === false
-            ? `Redis unhealthy${data?.redisHost ? ` (${data.redisHost})` : ""}`
+          : data.redisHealthy === false
+            ? `Redis unhealthy${data.redisHost ? ` (${data.redisHost})` : ""}`
             : "durable persistence unavailable";
       console.warn(`[bridge-transfers] ${action} completed without durable persistence: ${detail}`);
       return false;
@@ -702,6 +717,11 @@ export async function savePendingTransfer(
   transfer: PendingBridgeTransfer,
   options?: { strict?: boolean },
 ): Promise<boolean> {
+  // `strict` is intentionally non-enforcing here. Bridge execution must not be
+  // blocked on durable storage availability; callers may still use the boolean
+  // result for diagnostics or degraded-mode UI.
+  void options;
+
   const normalized = normalizeTransfer(transfer);
 
   const existing = getFallbackTransfers();

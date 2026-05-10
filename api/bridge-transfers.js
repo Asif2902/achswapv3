@@ -907,13 +907,16 @@ async function deleteTransferRecord(burnTxHash, wallet) {
       } else {
         await upstashPipeline([["DEL", txKey(burnTxHash)]]);
       }
-      return;
+      redisHealthCache = { ok: true, checkedAt: Date.now() };
+      return true;
     } catch (e) {
       console.error("[bridge] Redis deleteTransferRecord error:", e);
+      redisHealthCache = { ok: false, checkedAt: Date.now() };
     }
   }
 
   deleteMemoryTransfer(burnTxHash, wallet);
+  return !HAS_REDIS;
 }
 
 async function listWalletHashes(wallet) {
@@ -1856,8 +1859,17 @@ async function handleDismiss(req, res) {
     return res.status(409).json({ error: "Only failed or completed transfers can be dismissed" });
   }
 
-  await deleteTransferRecord(burnTxHash, transfer.userAddress);
-  return res.status(200).json({ ok: true, deleted: true });
+  const storageStatus = await getStorageStatus();
+  const persisted = await deleteTransferRecord(burnTxHash, transfer.userAddress);
+  return res.status(200).json({
+    ok: true,
+    deleted: true,
+    persisted,
+    storage: persisted ? storageStatus.storage : "degraded",
+    redisConfigured: storageStatus.redisConfigured,
+    redisHealthy: persisted ? storageStatus.redisHealthy : false,
+    redisHost: storageStatus.redisHost,
+  });
 }
 
 async function handleRetry(req, res) {

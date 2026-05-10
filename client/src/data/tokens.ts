@@ -148,6 +148,15 @@ const arcTestnetTokens: Token[] = [
     chainId: 5042002
   },
   {
+    address: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+    name: "EURC",
+    symbol: "EURC",
+    decimals: 6,
+    logoURI: "/img/eurc.png",
+    verified: true,
+    chainId: 5042002
+  },
+  {
     address: "0xDe5DB9049a8dd344dC1B7Bbb098f9da60930A6dA",
     name: "Wrapped USDC",
     symbol: "wUSDC",
