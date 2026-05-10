@@ -21,9 +21,9 @@ For this codebase:
 
 When reviewing or modifying bridge code in:
 
-- [client/src/pages/Bridge.tsx](/data/data/com.termux/files/home/achswapv3/client/src/pages/Bridge.tsx)
-- [client/src/lib/bridge-transfers.ts](/data/data/com.termux/files/home/achswapv3/client/src/lib/bridge-transfers.ts)
-- [api/bridge-transfers.js](/data/data/com.termux/files/home/achswapv3/api/bridge-transfers.js)
+- [client/src/pages/Bridge.tsx](client/src/pages/Bridge.tsx)
+- [client/src/lib/bridge-transfers.ts](client/src/lib/bridge-transfers.ts)
+- [api/bridge-transfers.js](api/bridge-transfers.js)
 
 follow these rules:
 

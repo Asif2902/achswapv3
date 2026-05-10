@@ -812,9 +812,9 @@ async function pruneOldTransfers(wallet) {
   ]);
   if (!Array.isArray(oldest) || !oldest.length) return;
 
-  const deleteKeys = oldest.map((hash) => ["DEL", txKey(hash)]);
-  deleteKeys.push(["ZREM", walletKey(wallet), ...oldest]);
-  await upstashPipeline(deleteKeys);
+  await upstashPipeline([
+    ["ZREM", walletKey(wallet), ...oldest],
+  ]);
 }
 
 async function saveTransferRecord(record) {
@@ -1587,7 +1587,9 @@ async function handleUpsertBurn(req, res) {
   }
 
   const recordHasAttestation = Boolean(record.attestation?.message && record.attestation?.attestation);
-  const mergedStatus = selectProgressStatus(existing?.status, record.status, recordHasAttestation);
+  const mergedStatus = existing
+    ? selectProgressStatus(existing.status, record.status, recordHasAttestation)
+    : "attesting";
 
   const merged = {
     id: record.burnTxHash,
@@ -1599,9 +1601,9 @@ async function handleUpsertBurn(req, res) {
     amount: existing?.amount ?? record.amount,
     userAddress: existing?.userAddress ?? record.userAddress,
     timestamp: existing?.timestamp || record.timestamp,
-    attestation: mergeTransferField(existing?.attestation, record.attestation),
-    mintTxHash: mergeTransferField(existing?.mintTxHash, record.mintTxHash),
-    error: mergeTransferField(existing?.error, record.error),
+    attestation: existing ? mergeTransferField(existing.attestation, record.attestation) : undefined,
+    mintTxHash: existing ? mergeTransferField(existing.mintTxHash, record.mintTxHash) : undefined,
+    error: existing ? mergeTransferField(existing.error, record.error) : undefined,
     status: mergedStatus,
     expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
     updatedAt: Date.now(),
@@ -1666,9 +1668,19 @@ async function handleUpdateAttestation(req, res) {
     return res.status(409).json({ error: `Invalid status transition from ${currentStatus} to ${nextStatus}` });
   }
 
+  let verifiedAttestation;
+  try {
+    verifiedAttestation = await fetchOfficialAttestation(transfer);
+  } catch (err) {
+    console.warn(`[bridge] failed to fetch official attestation for ${burnTxHash}:`, {
+      error: err instanceof Error ? err.message : err,
+    });
+    verifiedAttestation = undefined;
+  }
+
   const updated = {
     ...transfer,
-    attestation,
+    attestation: verifiedAttestation || transfer.attestation,
     status: nextStatus,
     destDomain: nextDestination.domain,
     destChainId: nextDestination.chainId,
