@@ -13,6 +13,7 @@ type CommunityCacheEntry = { tokens: CommunityToken[]; ts: number };
 
 const COMMUNITY_FULL_CACHE_TTL = 5 * 60 * 1000; // 5 min
 const COMMUNITY_SEED_CACHE_TTL = 30 * 60 * 1000; // 30 min
+const COMMUNITY_API_TIMEOUT_MS = 9000;
 const communityCache = new Map<number, CommunityCacheEntry>();
 const communityInFlight = new Map<number, Promise<CommunityToken[]>>();
 const communitySeedCache = new Map<number, CommunityCacheEntry>();
@@ -96,6 +97,87 @@ function createCommunityToken(info: any, nativeAddedSource: unknown): CommunityT
   };
 }
 
+function updateCommunityCaches(chainId: number, tokens: CommunityToken[]): CommunityToken[] {
+  const normalizedTokens = tokens.map(normalizeCommunityTokenLogo);
+  communityCache.set(chainId, { tokens: normalizedTokens, ts: Date.now() });
+  persistCommunityCache(getCommunityCacheStorageKey(chainId), normalizedTokens);
+  communitySeedCache.set(chainId, { tokens: normalizedTokens, ts: Date.now() });
+  persistCommunityCache(getCommunitySeedStorageKey(chainId), normalizedTokens);
+  return normalizedTokens;
+}
+
+function normalizeApiCommunityToken(row: unknown): CommunityToken | null {
+  if (!row || typeof row !== "object") return null;
+
+  const token = row as Partial<CommunityToken>;
+  if (typeof token.address !== "string" || !token.address) return null;
+  if (typeof token.symbol !== "string" || !token.symbol) return null;
+  if (typeof token.name !== "string" || !token.name) return null;
+
+  return normalizeCommunityTokenLogo({
+    address: token.address,
+    name: token.name,
+    symbol: token.symbol,
+    decimals: typeof token.decimals === "number" ? token.decimals : 18,
+    logoURI: typeof token.logoURI === "string" ? token.logoURI : "",
+    verified: false,
+    chainId: typeof token.chainId === "number" ? token.chainId : 5042002,
+    community: true,
+    nativeAdded: typeof token.nativeAdded === "string" ? token.nativeAdded : "0",
+  });
+}
+
+async function fetchCommunityTokensFromApi(chainId: number): Promise<CommunityToken[] | null> {
+  if (typeof window === "undefined") return null;
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), COMMUNITY_API_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`/api/community-tokens?chainId=${chainId}`, {
+      headers: {
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Community API returned ${response.status}`);
+    }
+
+    const parsed = await response.json() as { tokens?: unknown[] };
+    if (!parsed || !Array.isArray(parsed.tokens)) {
+      throw new Error("Community API returned an invalid payload");
+    }
+
+    const tokens = parsed.tokens
+      .map(normalizeApiCommunityToken)
+      .filter((token): token is CommunityToken => token !== null);
+
+    return tokens;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function fetchCommunityTokensDirect(chainId: number): Promise<CommunityToken[]> {
+  const provider = createAlchemyProvider(chainId);
+  const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
+
+  const [infos, liquidities] = await factory.getAllTokensLiquidity();
+
+  const result: CommunityToken[] = [];
+  for (let i = 0; i < infos.length; i++) {
+    const info = infos[i];
+    const liq = liquidities[i];
+    if (!liq.hasEnoughLiquidity) continue;
+
+    result.push(createCommunityToken(info, liq.nativeReserve));
+  }
+
+  return result;
+}
+
 export async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> {
   // Only on Arc testnet
   if (chainId !== 5042002) return [];
@@ -122,27 +204,17 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
   }
 
   const request = (async () => {
-    // Use the batch provider for better performance
-    const provider = createAlchemyProvider(chainId);
-    const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
-
-    const [infos, liquidities] = await factory.getAllTokensLiquidity();
-
-    const result: CommunityToken[] = [];
-    for (let i = 0; i < infos.length; i++) {
-      const info = infos[i];
-      const liq = liquidities[i];
-      if (!liq.hasEnoughLiquidity) continue; // ≥500 USDC threshold
-
-      result.push(createCommunityToken(info, liq.nativeReserve));
+    try {
+      const apiTokens = await fetchCommunityTokensFromApi(chainId);
+      if (apiTokens !== null) {
+        return updateCommunityCaches(chainId, apiTokens);
+      }
+    } catch (error) {
+      console.warn("[community-tokens] Community API fetch failed, falling back to direct RPC", error);
     }
 
-    const normalizedResult = result.map(normalizeCommunityTokenLogo);
-    communityCache.set(chainId, { tokens: normalizedResult, ts: Date.now() });
-    persistCommunityCache(getCommunityCacheStorageKey(chainId), normalizedResult);
-    communitySeedCache.set(chainId, { tokens: normalizedResult, ts: Date.now() });
-    persistCommunityCache(getCommunitySeedStorageKey(chainId), normalizedResult);
-    return normalizedResult;
+    const fallbackTokens = await fetchCommunityTokensDirect(chainId);
+    return updateCommunityCaches(chainId, fallbackTokens);
   })().finally(() => {
       communityInFlight.delete(chainId);
     });

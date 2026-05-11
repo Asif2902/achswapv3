@@ -41,17 +41,13 @@ function AppBootstrapOverlay({ phase, visible }: { phase: AppBootstrapPhase; vis
       kicker: "RPC failover ready",
       title: "Checking the fastest live endpoint",
     },
-    community: {
-      kicker: "Warm cache",
-      title: "Loading community tokens and swap data",
-    },
     ready: {
       kicker: "Ready",
       title: "Preparing your first screen",
     },
   };
 
-  const activeIndex = phase === "rpc" ? 0 : phase === "community" ? 1 : 2;
+  const activeIndex = phase === "rpc" ? 0 : 1;
 
   return (
     <div
@@ -82,13 +78,13 @@ function AppBootstrapOverlay({ phase, visible }: { phase: AppBootstrapPhase; vis
           <div
             className="absolute left-5 top-4 h-2 rounded-full transition-all duration-300"
             style={{
-              width: `${(activeIndex + 1) * 33.33}%`,
+              width: `${(activeIndex + 1) * 50}%`,
               background: "linear-gradient(90deg, #60a5fa 0%, #38bdf8 100%)",
               boxShadow: "0 0 18px rgba(56,189,248,0.28)",
             }}
           />
           <div className="absolute inset-x-5 bottom-4 flex items-end gap-2">
-            {[0, 1, 2, 3, 4].map((bar) => (
+            {[0, 1, 2, 3].map((bar) => (
               <div
                 key={bar}
                 className="flex-1 rounded-full"
@@ -113,11 +109,11 @@ function AppBootstrapOverlay({ phase, visible }: { phase: AppBootstrapPhase; vis
           {copy[phase].title}
         </h2>
         <p className="mt-2 text-sm leading-6 text-white/45">
-          Backup RPC and token caches are being primed so balances, liquidity views, and swap inputs open warm.
+          Checking the active RPC path so the app opens on a live endpoint without waiting on token hydration.
         </p>
 
         <div className="mt-6 flex gap-2">
-          {[0, 1, 2].map((step) => (
+          {[0, 1].map((step) => (
             <span
               key={step}
               className="h-1.5 flex-1 rounded-full transition-all duration-300"

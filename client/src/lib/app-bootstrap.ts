@@ -1,12 +1,9 @@
-import { getCachedCommunityTokenSeed, getCachedCommunityTokens, preloadCommunityTokens } from "@/data/tokens";
 import { ARC_TESTNET_CHAIN_ID, warmRpcProvider } from "@/lib/config";
 
 const APP_BOOTSTRAP_SESSION_KEY = "achswap_app_bootstrap_v1";
 const BOOTSTRAP_RPC_TIMEOUT_MS = 1000;
-const BOOTSTRAP_COMMUNITY_TIMEOUT_MS = 1200;
-const COMMUNITY_PRELOAD_START_DELAY_MS = 24;
 
-export type AppBootstrapPhase = "rpc" | "community" | "ready";
+export type AppBootstrapPhase = "rpc" | "ready";
 
 let bootstrapPromise: Promise<void> | null = null;
 let currentPhase: AppBootstrapPhase | null = null;
@@ -16,16 +13,9 @@ function canUseSessionStorage(): boolean {
   return typeof window !== "undefined" && !!window.sessionStorage;
 }
 
-function hasWarmCommunityTokenCache(): boolean {
-  return (
-    getCachedCommunityTokens(ARC_TESTNET_CHAIN_ID) !== null
-    || getCachedCommunityTokenSeed(ARC_TESTNET_CHAIN_ID) !== null
-  );
-}
-
 export function hasCompletedAppBootstrap(): boolean {
   if (!canUseSessionStorage()) return false;
-  return window.sessionStorage.getItem(APP_BOOTSTRAP_SESSION_KEY) === "1" && hasWarmCommunityTokenCache();
+  return window.sessionStorage.getItem(APP_BOOTSTRAP_SESSION_KEY) === "1";
 }
 
 function markAppBootstrapComplete() {
@@ -80,7 +70,6 @@ export function bootstrapAppReadiness(
   if (!bootstrapPromise) {
     bootstrapPromise = (async () => {
       setPhase("rpc");
-      const hasWarmCommunityCache = hasWarmCommunityTokenCache();
       const warmRpcPromise = warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch((error) => {
         console.error("[app-bootstrap] RPC warmup failed", error);
       });
@@ -90,20 +79,6 @@ export function bootstrapAppReadiness(
           warmRpcPromise,
           sleep(BOOTSTRAP_RPC_TIMEOUT_MS),
         ]);
-
-        setPhase("community");
-        await sleep(COMMUNITY_PRELOAD_START_DELAY_MS);
-        const communityPreloadPromise = preloadCommunityTokens(ARC_TESTNET_CHAIN_ID).catch((error) => {
-          console.error("[app-bootstrap] community preload failed", error);
-          return [];
-        });
-
-        if (!hasWarmCommunityCache) {
-          await Promise.race([
-            communityPreloadPromise,
-            sleep(BOOTSTRAP_COMMUNITY_TIMEOUT_MS),
-          ]);
-        }
       } catch (error) {
         console.error("[app-bootstrap] bootstrap readiness failed", error);
       } finally {
