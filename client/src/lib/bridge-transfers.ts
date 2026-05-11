@@ -538,17 +538,19 @@ export async function reconcileTransfer(
   }
 
   console.log(`[bridge-reconcile] Transfer ${transfer.id} is claimed on-chain, updating to complete`);
+  const completedTransfer: PendingBridgeTransfer = {
+    ...transfer,
+    status: "complete",
+    error: undefined,
+    updatedAt: Date.now(),
+  };
 
   // Update local storage
   const existing = getFallbackTransfers();
   const idx = existing.findIndex((t) => t.id === transfer.id);
   if (idx >= 0) {
-    existing[idx] = {
-      ...existing[idx],
-      status: "complete",
-      error: undefined,
-      updatedAt: Date.now(),
-    };
+    addToHistory(completedTransfer);
+    existing.splice(idx, 1);
     setFallbackTransfers(existing);
     dispatchTransfersUpdated();
   }
@@ -576,11 +578,7 @@ export async function reconcileTransfer(
     console.warn(`[bridge-reconcile] Failed to update server for ${transfer.id}:`, err);
   }
 
-  return {
-    ...transfer,
-    status: "complete",
-    error: undefined,
-  };
+  return completedTransfer;
 }
 
 /**

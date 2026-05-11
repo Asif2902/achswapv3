@@ -854,6 +854,7 @@ async function saveTransferRecord(record) {
       throw lastError || new Error("Unknown Redis save failure");
     } catch (e) {
       console.error("[bridge] Redis save error:", e);
+      setMemoryTransfer(recordWithTimestamp);
       throw new StorageError("Bridge persistence unavailable");
     }
   }
@@ -1543,7 +1544,6 @@ async function handleGet(req, res) {
 }
 
 async function handleUpsertBurn(req, res) {
-  const storageStatus = await getStorageStatus();
   const record = normalizeTransferRecord(req.body?.transfer);
   if (!record) return res.status(400).json({ error: "Invalid transfer payload" });
 
@@ -1610,13 +1610,18 @@ async function handleUpsertBurn(req, res) {
   };
 
   const persisted = await saveTransferRecordBestEffort(merged, "upsert_burn");
+  const redisConfigured = HAS_REDIS;
+  const redisHealthy = redisConfigured ? Boolean(redisHealthCache?.ok) : false;
+  const storage = persisted
+    ? (redisHealthy ? "redis" : redisConfigured ? "degraded" : "memory")
+    : "degraded";
   return res.status(200).json({
     ok: true,
     persisted,
-    storage: persisted ? storageStatus.storage : "degraded",
-    redisConfigured: storageStatus.redisConfigured,
-    redisHealthy: persisted ? storageStatus.redisHealthy : false,
-    redisHost: storageStatus.redisHost,
+    storage,
+    redisConfigured,
+    redisHealthy,
+    redisHost: getRedisHost(),
   });
 }
 
