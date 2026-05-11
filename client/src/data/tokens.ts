@@ -1,27 +1,206 @@
 import { Token } from "@shared/schema";
-import { Contract, JsonRpcProvider } from "ethers";
+import { Contract } from "ethers";
 import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
 import { createAlchemyProvider } from "@/lib/config";
+import { getTokenLogoUrl } from "@/lib/token-logo";
 
 export interface CommunityToken extends Token {
   community: true;
   nativeAdded: string; // formatted USDC
 }
 
-const COMMUNITY_CACHE_TTL = 5 * 60 * 1000; // 5 min
-let _communityCache: { tokens: CommunityToken[]; ts: number } | null = null;
+type CommunityCacheEntry = { tokens: CommunityToken[]; ts: number };
 
-// Ensure gateway URL is consistent with LaunchToken
-function getGatewayUrlFromCid(cidOrUrl: string): string {
-  if (!cidOrUrl) return "/img/logos/unknown-token.png";
-  // Handle local paths (already in correct format)
-  if (cidOrUrl.startsWith("/img/") || cidOrUrl.startsWith("data:")) return cidOrUrl;
-  if (cidOrUrl.startsWith("http")) return cidOrUrl;
-  if (cidOrUrl.startsWith("ipfs://")) {
-    return cidOrUrl.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
+const COMMUNITY_FULL_CACHE_TTL = 5 * 60 * 1000; // 5 min
+const COMMUNITY_SEED_CACHE_TTL = 30 * 60 * 1000; // 30 min
+const COMMUNITY_API_TIMEOUT_MS = 9000;
+const COMMUNITY_DIRECT_TIMEOUT_MS = 9000;
+const communityCache = new Map<number, CommunityCacheEntry>();
+const communityInFlight = new Map<number, Promise<CommunityToken[]>>();
+const communitySeedCache = new Map<number, CommunityCacheEntry>();
+const COMMUNITY_CACHE_STORAGE_PREFIX = "achswap_community_tokens_v1:";
+const COMMUNITY_SEED_STORAGE_PREFIX = "achswap_community_seed_v1:";
+
+function getCommunityCacheStorageKey(chainId: number): string {
+  return `${COMMUNITY_CACHE_STORAGE_PREFIX}${chainId}`;
+}
+
+function getCommunitySeedStorageKey(chainId: number): string {
+  return `${COMMUNITY_SEED_STORAGE_PREFIX}${chainId}`;
+}
+
+function normalizeCommunityTokenLogo(token: CommunityToken): CommunityToken {
+  return {
+    ...token,
+    logoURI: getTokenLogoUrl(token.logoURI),
+  };
+}
+
+function readPersistedCommunityCache(
+  chainId: number,
+  storageKey: string,
+  ttlMs: number,
+  targetCache: Map<number, CommunityCacheEntry>,
+): CommunityToken[] | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return null;
+
+    const parsed = JSON.parse(raw) as { tokens?: CommunityToken[]; ts?: number };
+    if (!parsed || !Array.isArray(parsed.tokens) || !Number.isFinite(parsed.ts)) return null;
+    if (Date.now() - Number(parsed.ts) >= ttlMs) return null;
+
+    const normalizedTokens = parsed.tokens.map(normalizeCommunityTokenLogo);
+    targetCache.set(chainId, { tokens: normalizedTokens, ts: Number(parsed.ts) });
+    return normalizedTokens;
+  } catch {
+    return null;
   }
-  // Handle direct CID without protocol
-  return `https://gateway.pinata.cloud/ipfs/${cidOrUrl}`;
+}
+
+function persistCommunityCache(storageKey: string, tokens: CommunityToken[]): void {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(
+      storageKey,
+      JSON.stringify({ tokens, ts: Date.now() }),
+    );
+  } catch {
+    // Ignore storage quota and serialization issues.
+  }
+}
+
+function formatCommunityNativeAdded(raw: unknown): string {
+  try {
+    const asBigInt = typeof raw === "bigint" ? raw : BigInt(String(raw ?? 0));
+    const unit = 10n ** 18n;
+    const whole = asBigInt / unit;
+    const remainder = asBigInt % unit;
+    const roundedCents = (remainder * 100n + unit / 2n) / unit;
+    const finalWhole = roundedCents === 100n ? whole + 1n : whole;
+    const cents = roundedCents === 100n ? 0n : roundedCents;
+    return `${finalWhole.toString()}.${cents.toString().padStart(2, "0")}`;
+  } catch {
+    return "0";
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = globalThis.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== undefined) {
+      globalThis.clearTimeout(timeoutId);
+    }
+  });
+}
+
+function createCommunityToken(info: any, nativeAddedSource: unknown): CommunityToken {
+  return {
+    address: info.tokenAddress,
+    name: info.name || info.symbol || `Token …${String(info.tokenAddress || "").slice(-4)}`,
+    symbol: info.symbol || `${String(info.tokenAddress || "").slice(0, 6)}…${String(info.tokenAddress || "").slice(-4)}`,
+    decimals: 18,
+    logoURI: getTokenLogoUrl(info.logoUrl),
+    verified: false,
+    chainId: 5042002,
+    community: true,
+    nativeAdded: formatCommunityNativeAdded(nativeAddedSource),
+  };
+}
+
+function updateCommunityCaches(chainId: number, tokens: CommunityToken[]): CommunityToken[] {
+  const normalizedTokens = tokens.map(normalizeCommunityTokenLogo);
+  communityCache.set(chainId, { tokens: normalizedTokens, ts: Date.now() });
+  persistCommunityCache(getCommunityCacheStorageKey(chainId), normalizedTokens);
+  communitySeedCache.set(chainId, { tokens: normalizedTokens, ts: Date.now() });
+  persistCommunityCache(getCommunitySeedStorageKey(chainId), normalizedTokens);
+  return normalizedTokens;
+}
+
+function normalizeApiCommunityToken(row: unknown): CommunityToken | null {
+  if (!row || typeof row !== "object") return null;
+
+  const token = row as Partial<CommunityToken>;
+  if (typeof token.address !== "string" || !token.address) return null;
+  if (typeof token.symbol !== "string" || !token.symbol) return null;
+  if (typeof token.name !== "string" || !token.name) return null;
+
+  return normalizeCommunityTokenLogo({
+    address: token.address,
+    name: token.name,
+    symbol: token.symbol,
+    decimals: typeof token.decimals === "number" ? token.decimals : 18,
+    logoURI: typeof token.logoURI === "string" ? token.logoURI : "",
+    verified: false,
+    chainId: typeof token.chainId === "number" ? token.chainId : 5042002,
+    community: true,
+    nativeAdded: typeof token.nativeAdded === "string" ? token.nativeAdded : "0",
+  });
+}
+
+async function fetchCommunityTokensFromApi(chainId: number): Promise<CommunityToken[] | null> {
+  if (typeof window === "undefined") return null;
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), COMMUNITY_API_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`/api/community-tokens?chainId=${chainId}`, {
+      headers: {
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Community API returned ${response.status}`);
+    }
+
+    const parsed = await response.json() as { tokens?: unknown[] };
+    if (!parsed || !Array.isArray(parsed.tokens)) {
+      throw new Error("Community API returned an invalid payload");
+    }
+
+    const tokens = parsed.tokens
+      .map(normalizeApiCommunityToken)
+      .filter((token): token is CommunityToken => token !== null);
+
+    return tokens;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function fetchCommunityTokensDirect(chainId: number): Promise<CommunityToken[]> {
+  const provider = createAlchemyProvider(chainId);
+  const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
+
+  const [infos, liquidities] = await withTimeout(
+    factory.getAllTokensLiquidity(),
+    COMMUNITY_DIRECT_TIMEOUT_MS,
+    "Community token RPC",
+  );
+
+  const result: CommunityToken[] = [];
+  for (let i = 0; i < infos.length; i++) {
+    const info = infos[i];
+    const liq = liquidities[i];
+    if (!liq.hasEnoughLiquidity) continue;
+
+    result.push(createCommunityToken(info, liq.nativeReserve));
+  }
+
+  return result;
 }
 
 export async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> {
@@ -29,44 +208,114 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
   if (chainId !== 5042002) return [];
 
   // Use cache if fresh
-  if (_communityCache && Date.now() - _communityCache.ts < COMMUNITY_CACHE_TTL) {
-    return _communityCache.tokens;
+  const cached = communityCache.get(chainId);
+  if (cached && Date.now() - cached.ts < COMMUNITY_FULL_CACHE_TTL) {
+    return cached.tokens;
   }
 
-  try {
-    // Use the batch provider for better performance
-    const provider = createAlchemyProvider(chainId);
-    const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
+  const persisted = readPersistedCommunityCache(
+    chainId,
+    getCommunityCacheStorageKey(chainId),
+    COMMUNITY_FULL_CACHE_TTL,
+    communityCache,
+  );
+  if (persisted) {
+    return persisted;
+  }
 
-    const [infos, liquidities] = await factory.getAllTokensLiquidity();
+  const inFlight = communityInFlight.get(chainId);
+  if (inFlight) {
+    return inFlight;
+  }
 
-    const result: CommunityToken[] = [];
-    for (let i = 0; i < infos.length; i++) {
-      const info = infos[i];
-      const liq = liquidities[i];
-      if (!liq.hasEnoughLiquidity) continue; // ≥500 USDC threshold
-
-      result.push({
-        address: info.tokenAddress,
-        name: info.name || info.symbol || `Token …${info.tokenAddress.slice(-4)}`,
-        symbol: info.symbol || `${info.tokenAddress.slice(0, 6)}…${info.tokenAddress.slice(-4)}`,
-        decimals: 18,
-        logoURI: info.logoUrl ? getGatewayUrlFromCid(info.logoUrl) : "/img/logos/unknown-token.png",
-        verified: false,
-        chainId: 5042002,
-        community: true,
-        nativeAdded: parseFloat(
-          (Number(liq.nativeReserve) / 1e18).toFixed(2)
-        ).toString(),
-      });
+  const request = (async () => {
+    try {
+      const apiTokens = await fetchCommunityTokensFromApi(chainId);
+      if (apiTokens !== null) {
+        return updateCommunityCaches(chainId, apiTokens);
+      }
+    } catch (error) {
+      console.warn("[community-tokens] Community API fetch failed, falling back to direct RPC", error);
     }
 
-    _communityCache = { tokens: result, ts: Date.now() };
-    return result;
-  } catch (err) {
-    console.warn("[Tokens] Community fetch failed:", err);
-    return [];
+    const fallbackTokens = await fetchCommunityTokensDirect(chainId);
+    return updateCommunityCaches(chainId, fallbackTokens);
+  })().finally(() => {
+      communityInFlight.delete(chainId);
+    });
+
+  communityInFlight.set(chainId, request);
+  return request;
+}
+
+export function getCachedCommunityTokens(chainId: number): CommunityToken[] | null {
+  const cached = communityCache.get(chainId);
+  if (cached && Date.now() - cached.ts < COMMUNITY_FULL_CACHE_TTL) {
+    return cached.tokens;
   }
+
+  return readPersistedCommunityCache(
+    chainId,
+    getCommunityCacheStorageKey(chainId),
+    COMMUNITY_FULL_CACHE_TTL,
+    communityCache,
+  );
+}
+
+export async function fetchCommunityTokenSeed(chainId: number): Promise<CommunityToken[]> {
+  if (chainId !== 5042002) return [];
+
+  const fullCached = getCachedCommunityTokens(chainId);
+  if (fullCached) {
+    return fullCached;
+  }
+
+  const cached = communitySeedCache.get(chainId);
+  if (cached && Date.now() - cached.ts < COMMUNITY_SEED_CACHE_TTL) {
+    return cached.tokens;
+  }
+
+  const persisted = readPersistedCommunityCache(
+    chainId,
+    getCommunitySeedStorageKey(chainId),
+    COMMUNITY_SEED_CACHE_TTL,
+    communitySeedCache,
+  );
+  if (persisted) {
+    return persisted;
+  }
+
+  return fetchCommunityTokens(chainId);
+}
+
+export function getCachedCommunityTokenSeed(chainId: number): CommunityToken[] | null {
+  const fullCached = getCachedCommunityTokens(chainId);
+  if (fullCached) {
+    return fullCached;
+  }
+
+  const cached = communitySeedCache.get(chainId);
+  if (cached && Date.now() - cached.ts < COMMUNITY_SEED_CACHE_TTL) {
+    return cached.tokens;
+  }
+
+  return readPersistedCommunityCache(
+    chainId,
+    getCommunitySeedStorageKey(chainId),
+    COMMUNITY_SEED_CACHE_TTL,
+    communitySeedCache,
+  );
+}
+
+export function preloadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
+  return fetchCommunityTokenSeed(chainId)
+    .catch(() => getCachedCommunityTokenSeed(chainId) ?? [])
+    .then((seed) => {
+      void fetchCommunityTokens(chainId).catch(() => {
+        // Full liquidity refresh is best-effort; seed is enough for bootstrap.
+      });
+      return seed;
+    });
 }
 
 
@@ -78,6 +327,15 @@ const arcTestnetTokens: Token[] = [
     symbol: "USDC",
     decimals: 18,
     logoURI: "/img/usdc.webp",
+    verified: true,
+    chainId: 5042002
+  },
+  {
+    address: "0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a",
+    name: "EURC",
+    symbol: "EURC",
+    decimals: 6,
+    logoURI: "/img/eurc.png",
     verified: true,
     chainId: 5042002
   },
@@ -105,7 +363,7 @@ const arcTestnetTokens: Token[] = [
     name: "Synth Apple Inc.",
     symbol: "sAAPL",
     decimals: 18,
-    logoURI: "/img/logos/rwa-aapl.svg",
+     logoURI: "/img/logos/aapl.png",
     verified: true,
     chainId: 5042002,
     rwa: true,
@@ -148,18 +406,79 @@ const arcTestnetTokens: Token[] = [
     rwaPairId: 4,
     rwaCategory: "Commodity",
   },
-  {
-    address: "0x80Ca3b18F75702B0626Eb7441aCaA33a8e24100d",
-    name: "Synth Silver",
-    symbol: "sSILVER",
-    decimals: 18,
-    logoURI: "/img/logos/rwa-silver.svg",
-    verified: true,
-    chainId: 5042002,
-    rwa: true,
-    rwaPairId: 5,
-    rwaCategory: "Commodity",
-  },
+   {
+     address: "0x80Ca3b18F75702B0626Eb7441aCaA33a8e24100d",
+     name: "Synth Silver",
+     symbol: "sSILVER",
+     decimals: 18,
+     logoURI: "/img/logos/rwa-silver.svg",
+     verified: true,
+     chainId: 5042002,
+     rwa: true,
+     rwaPairId: 5,
+     rwaCategory: "Commodity",
+   },
+   // ── New RWA Synth Tokens ────────────────────────────────────────────────
+   {
+     address: "0x4fb69F9521b84be62da5dEC21E5e93D8e3fE6204",
+     name: "Synth Microsoft Corp.",
+     symbol: "sMSFT",
+     decimals: 18,
+      logoURI: "/img/logos/msft.png",
+     verified: true,
+     chainId: 5042002,
+     rwa: true,
+     rwaPairId: 6,
+     rwaCategory: "Stock",
+   },
+   {
+     address: "0xf1f19cE22Fb971a61B12F9494D100E72F9C3956E",
+     name: "Synth Tesla Inc.",
+     symbol: "sTSLA",
+     decimals: 18,
+      logoURI: "/img/logos/tsla.jpeg",
+     verified: true,
+     chainId: 5042002,
+     rwa: true,
+     rwaPairId: 7,
+     rwaCategory: "Stock",
+   },
+   {
+     address: "0x83C4571fDeB1e22975d3769EAE0bb713Bdd33452",
+     name: "Synth Natural Gas",
+     symbol: "sNATGAS",
+     decimals: 18,
+     logoURI: "/img/logos/rwa-natgas.svg",
+     verified: true,
+     chainId: 5042002,
+     rwa: true,
+     rwaPairId: 8,
+     rwaCategory: "Commodity",
+   },
+   {
+     address: "0x8f9A9ac6F16f4677beB730293C8E75694a458084",
+     name: "Synth NVIDIA Corp.",
+     symbol: "sNVDA",
+     decimals: 18,
+      logoURI: "/img/logos/nvda.jpeg",
+     verified: true,
+     chainId: 5042002,
+     rwa: true,
+     rwaPairId: 9,
+     rwaCategory: "Stock",
+   },
+   {
+     address: "0xAbE89F3C1b78b00703c93737BAF7E04543B5939d",
+     name: "Synth GBP/USD",
+     symbol: "sGBPUSD",
+     decimals: 18,
+      logoURI: "/img/logos/gbpusd.jpeg",
+     verified: true,
+     chainId: 5042002,
+     rwa: true,
+     rwaPairId: 10,
+     rwaCategory: "Forex",
+   },
 ];
 
 // Wrapped token mappings: native -> wrapped address
@@ -219,7 +538,7 @@ export function getTokensByChainId(chainId: number): Token[] {
 
 export async function fetchTokensWithCommunity(chainId: number): Promise<Token[]> {
   const defaults = getTokensByChainId(chainId);
-  const communities = await fetchCommunityTokens(chainId);
+  const communities = await fetchCommunityTokens(chainId).catch(() => []);
   // combine, ensuring communities don't override defaults
   const defaultsSet = new Set(defaults.map(t => t.address.toLowerCase()));
   const filteredCommunities = communities.filter(t => !defaultsSet.has(t.address.toLowerCase()));
@@ -229,7 +548,7 @@ export async function fetchTokensWithCommunity(chainId: number): Promise<Token[]
   // Ensure ALL tokens have their IPFS/gateway URLs properly formatted
   return allTokens.map(t => ({
     ...t,
-    logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : "/img/logos/unknown-token.png"
+    logoURI: getTokenLogoUrl(t.logoURI)
   }));
 }
 

@@ -57,6 +57,11 @@ function TokenBadge({ token }: { token: Token }) {
           src={token.logoURI}
           alt={token.symbol}
           className="w-4 h-4 rounded-full"
+          loading="lazy"
+          decoding="async"
+          fetchPriority="low"
+          width={16}
+          height={16}
           onError={(e) => {
             e.currentTarget.src = "/img/logos/unknown-token.png";
           }}

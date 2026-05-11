@@ -20,7 +20,7 @@ import { getCachedQuote, setCachedQuote } from "@/lib/quote-cache";
 import { SWAP_ROUTER_V3_ABI } from "@/lib/abis/v3";
 import { RWA_VAULT_ABI } from "@/lib/abis/rwa";
 import { createAlchemyProvider } from "@/lib/config";
-import { getErrorForToast } from "@/lib/error-utils";
+import { getErrorForToast, parseError } from "@/lib/error-utils";
 import {
   checkPermit2Approval,
   approvePermit2,
@@ -232,6 +232,37 @@ export default function Swap() {
 
   const openExplorer = (txHash: string) => { if (contracts) window.open(`${contracts.explorer}${txHash}`, "_blank"); };
 
+  const isRetryableWalletSendError = (error: unknown): boolean => {
+    const normalized = parseError(error).rawError.toLowerCase();
+    return (
+      normalized.includes("could not coalesce error") ||
+      normalized.includes("error processing the transaction") ||
+      normalized.includes("unknown_error") ||
+      normalized.includes("internal error")
+    );
+  };
+
+  const sendWithWalletFeeFallback = async (
+    sendTx: (...args: any[]) => Promise<any>,
+    args: any[],
+    baseOverrides: Record<string, bigint>,
+    provider: BrowserProvider,
+    label: string,
+  ) => {
+    const feeOverrides = await getFastTxOverrides(provider);
+
+    try {
+      return await sendTx(...args, { ...baseOverrides, ...feeOverrides });
+    } catch (error) {
+      if (!Object.keys(feeOverrides).length || !isRetryableWalletSendError(error)) {
+        throw error;
+      }
+
+      console.warn(`${label} failed with explicit fee overrides; retrying with wallet-managed fees`, error);
+      return sendTx(...args, baseOverrides);
+    }
+  };
+
   const getFastTxOverrides = async (provider: BrowserProvider): Promise<{
     maxFeePerGas?: bigint;
     maxPriorityFeePerGas?: bigint;
@@ -241,9 +272,9 @@ export default function Swap() {
       const feeData = await provider.getFeeData();
       const bump = 150n;
 
-      if (feeData.maxFeePerGas !== null || feeData.maxPriorityFeePerGas !== null) {
-        const basePriority = feeData.maxPriorityFeePerGas ?? 1_500_000_000n;
-        const baseMax = feeData.maxFeePerGas ?? (feeData.gasPrice !== null ? feeData.gasPrice * 2n : basePriority * 2n);
+      if (feeData.maxFeePerGas !== null && feeData.maxPriorityFeePerGas !== null) {
+        const basePriority = feeData.maxPriorityFeePerGas;
+        const baseMax = feeData.maxFeePerGas;
         const maxPriorityFeePerGas = (basePriority * bump) / 100n + 1n;
         const bumpedMax = (baseMax * bump) / 100n + 1n;
         const minMax = maxPriorityFeePerGas * 2n;
@@ -427,18 +458,13 @@ export default function Swap() {
       if (!addr || addr.length !== 42 || !addr.startsWith("0x")) throw new Error("Invalid token address format");
       const exists = tokens.find(t => t.address.toLowerCase() === addr.toLowerCase());
       if (exists) { toast({ title: "Token already added", description: `${exists.symbol} is already in your list` }); return exists; }
-      const provider = new BrowserProvider({
-        request: async ({ method, params }: any) => {
-          const r = await fetch("https://rpc.testnet.arc.network", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
-          const d = await r.json(); if (d.error) throw new Error(d.error.message); return d.result;
-        },
-      });
+      if (!chainId) throw new Error("Chain ID not available");
+      const provider = createAlchemyProvider(chainId);
       const contract = new Contract(addr, ERC20_ABI, provider);
       const [name, symbol, decimals] = await Promise.race([
         Promise.all([contract.name(), contract.symbol(), contract.decimals()]),
         new Promise<never>((_, r) => setTimeout(() => r(new Error("timeout")), 10000)),
       ]) as [string, string, bigint];
-      if (!chainId) throw new Error("Chain ID not available");
       const newToken: Token = { address: addr, name, symbol, decimals: Number(decimals), logoURI: "/img/logos/unknown-token.png", verified: false, chainId };
       const key = `importedTokens:${chainId}`;
       const raw = localStorage.getItem(key);
@@ -736,9 +762,15 @@ export default function Swap() {
           // USDC → RWA: vault.buy(pairId, minSynth) with msg.value
           const minSynth = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Buying RWA token…", description: `Buying ${toToken.symbol} with USDC` });
-          const feeOverrides = await getFastTxOverrides(provider);
+          await vault.buy.staticCall(rwaQuoteResult.pairId, minSynth, { value: amountIn });
           const g = await vault.buy.estimateGas(rwaQuoteResult.pairId, minSynth, { value: amountIn });
-          const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, gasLimit: g * 150n / 100n, ...feeOverrides });
+          const tx = await sendWithWalletFeeFallback(
+            vault.buy,
+            [rwaQuoteResult.pairId, minSynth],
+            { value: amountIn, gasLimit: g * 150n / 100n },
+            provider,
+            "RWA buy",
+          );
           const receipt = await ensureTxSucceeded(tx, "RWA buy");
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
@@ -756,9 +788,15 @@ export default function Swap() {
           // RWA → USDC: vault.redeem burns directly from balanceOf (no approve needed)
           const minUsdc = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Redeeming RWA token…", description: `Redeeming ${fromToken.symbol} for USDC` });
-          const feeOverrides = await getFastTxOverrides(provider);
+          await vault.redeem.staticCall(rwaQuoteResult.pairId, amountIn, minUsdc);
           const g = await vault.redeem.estimateGas(rwaQuoteResult.pairId, amountIn, minUsdc);
-          const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { gasLimit: g * 150n / 100n, ...feeOverrides });
+          const tx = await sendWithWalletFeeFallback(
+            vault.redeem,
+            [rwaQuoteResult.pairId, amountIn, minUsdc],
+            { gasLimit: g * 150n / 100n },
+            provider,
+            "RWA redeem",
+          );
           const receipt = await ensureTxSucceeded(tx, "RWA redeem");
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);

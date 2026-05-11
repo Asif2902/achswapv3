@@ -7,14 +7,22 @@ import {
   walletConnectWallet,
 } from '@rainbow-me/rainbowkit/wallets';
 import { createConfig, http } from 'wagmi';
-import { defineChain } from 'viem';
-import { RPC_CONFIG } from './config';
+import { createTransport, defineChain } from 'viem';
+import {
+  ARC_TESTNET_CHAIN_ID,
+  getManagedRpcAttempts,
+  getRpcUrl,
+  getRpcUrls,
+  reportRpcFailure,
+  reportRpcSuccess,
+  isRetryableRpcError,
+} from './config';
 
-const ARC_WALLET_ADD_RPC = RPC_CONFIG.arcTestnet;
+const ARC_WALLET_ADD_RPC = getRpcUrl(ARC_TESTNET_CHAIN_ID);
 
 // Define ARC Testnet chain
 export const arcTestnet = defineChain({
-  id: 5042002,
+  id: ARC_TESTNET_CHAIN_ID,
   name: 'ARC Testnet',
   nativeCurrency: {
     decimals: 18,
@@ -54,10 +62,67 @@ const connectors = connectorsForWallets(
   { appName: 'Achswap', projectId }
 );
 
+type TransportInstance = ReturnType<ReturnType<typeof http>>;
+
+const transportCache = new Map<string, TransportInstance>();
+
+function createManagedHttpTransport(chainId: number) {
+  return ((params: any) =>
+    createTransport(
+      {
+        key: 'managedHttp',
+        name: 'Managed HTTP',
+        retryCount: 0,
+        type: 'managedHttp',
+        request: (async ({ method, params: rpcParams }: any) => {
+          let lastError: unknown = null;
+          const attempts = getManagedRpcAttempts(chainId);
+
+          if (attempts.length === 0) {
+            throw new Error(`RPC transport failed for chain ${chainId}: no RPC attempts configured`);
+          }
+
+          for (const attempt of attempts) {
+            const transportCacheKey = `${chainId}::${attempt.url}::${attempt.timeoutMs}`;
+            let transportInstance = transportCache.get(transportCacheKey);
+            if (!transportInstance) {
+              const transport = http(attempt.url, {
+                batch: { batchSize: 20, wait: 10 },
+                retryCount: 0,
+                timeout: attempt.timeoutMs,
+              });
+              transportInstance = transport(params);
+              transportCache.set(transportCacheKey, transportInstance);
+            }
+
+            try {
+              const result = await transportInstance.request({ method, params: rpcParams } as any);
+              reportRpcSuccess(chainId, attempt.url);
+              return result;
+            } catch (error) {
+              if (!isRetryableRpcError(error)) {
+                throw error;
+              }
+              lastError = error;
+              reportRpcFailure(chainId, attempt.url);
+            }
+          }
+
+          if (lastError == null) {
+            throw new Error(`RPC transport failed for chain ${chainId}: all attempts exhausted without an error`);
+          }
+
+          throw new Error(`RPC transport failed for chain ${chainId}`, { cause: lastError });
+        }) as any,
+      },
+      { get urls() { return getRpcUrls(chainId); } },
+    )) as any;
+}
+
 export const config = createConfig({
   connectors,
   chains: supportedChains as any,
   transports: {
-    [arcTestnet.id]: http(),
+    [arcTestnet.id]: createManagedHttpTransport(ARC_TESTNET_CHAIN_ID),
   },
 });

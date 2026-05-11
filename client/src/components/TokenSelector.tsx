@@ -4,37 +4,47 @@ import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
-import { fetchCommunityTokens, type CommunityToken } from "@/data/tokens";
+import { fetchCommunityTokens, getCachedCommunityTokenSeed, getCachedCommunityTokens, type CommunityToken } from "@/data/tokens";
 
 const MAX_RENDER_ITEMS_PER_SECTION = 80;
-const INITIAL_RENDER_ITEMS_PER_SECTION = 8;
-const MAX_RENDER_COMMUNITY_ITEMS = 30;
+const INITIAL_RENDER_ITEMS_PER_SECTION = 6;
+const MAX_RENDER_COMMUNITY_ITEMS = 24;
 const BALANCE_QUERY_BATCH_SIZE = 12;
-const communityTokenCache = new Map<number, CommunityToken[]>();
-const communityTokenInFlight = new Map<number, Promise<CommunityToken[]>>();
+const CONTENT_HYDRATE_DELAY_MS = 40;
+const BALANCE_HYDRATE_DELAY_MS = 420;
+const COMMUNITY_REFRESH_DELAY_MS = 280;
 
-function loadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
-  const cached = communityTokenCache.get(chainId);
-  if (cached) {
-    return Promise.resolve(cached);
+function scheduleIdleTask(task: () => void, fallbackDelayMs = COMMUNITY_REFRESH_DELAY_MS): () => void {
+  if (typeof window === "undefined") return () => {};
+
+  let cancelled = false;
+  const browser = globalThis as Window & typeof globalThis;
+
+  if ("requestIdleCallback" in browser) {
+    const idleId = browser.requestIdleCallback(() => {
+      if (!cancelled) {
+        task();
+      }
+    }, { timeout: fallbackDelayMs + 500 });
+
+    return () => {
+      cancelled = true;
+      if ("cancelIdleCallback" in browser) {
+        browser.cancelIdleCallback(idleId);
+      }
+    };
   }
 
-  const inFlight = communityTokenInFlight.get(chainId);
-  if (inFlight) {
-    return inFlight;
-  }
+  const timeoutId = globalThis.setTimeout(() => {
+    if (!cancelled) {
+      task();
+    }
+  }, fallbackDelayMs);
 
-  const request = fetchCommunityTokens(chainId)
-    .then((rows) => {
-      communityTokenCache.set(chainId, rows);
-      return rows;
-    })
-    .finally(() => {
-      communityTokenInFlight.delete(chainId);
-    });
-
-  communityTokenInFlight.set(chainId, request);
-  return request;
+  return () => {
+    cancelled = true;
+    globalThis.clearTimeout(timeoutId);
+  };
 }
 
 interface TokenSelectorProps {
@@ -58,6 +68,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const [importError, setImportError] = useState("");
   const [visible, setVisible] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [contentReady, setContentReady] = useState(false);
   const [communityTokens, setCommunityTokens] = useState<CommunityToken[]>([]);
   const [loadingCommunity, setLoadingCommunity] = useState(false);
   const [hiddenCommunity, setHiddenCommunity] = useState<Set<string>>(new Set());
@@ -71,6 +82,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   const chainId = useChainId();
 
   const hiddenKey = `hiddenCommunityTokens:${chainId ?? ""}`;
+  const shouldRender = mounted || open;
 
   useEffect(() => {
     try {
@@ -82,16 +94,25 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   // Animate in/out
   useEffect(() => {
     let balanceTimer: number | null = null;
+    let contentTimer: number | null = null;
+    let initialRenderTimer: number | null = null;
+    let focusTimer: number | null = null;
     let cancelled = false;
 
     if (open) {
       communityFetchStartedRef.current = false;
       setMounted(true);
+      setContentReady(false);
       requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
       setBalancesReady(false);
       setInitialRenderMode(true);
       setBalanceBatchIndex(0);
-      window.setTimeout(() => {
+      contentTimer = window.setTimeout(() => {
+        if (!cancelled) {
+          setContentReady(true);
+        }
+      }, CONTENT_HYDRATE_DELAY_MS);
+      initialRenderTimer = window.setTimeout(() => {
         if (!cancelled) {
           setInitialRenderMode(false);
         }
@@ -100,24 +121,25 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         if (!cancelled) {
           setBalancesReady(true);
         }
-      }, 120);
+      }, BALANCE_HYDRATE_DELAY_MS);
 
       const isDesktop = window.matchMedia("(pointer: fine)").matches;
       if (isDesktop) {
-        setTimeout(() => inputRef.current?.focus(), 120);
+        focusTimer = window.setTimeout(() => inputRef.current?.focus(), 120);
       }
 
       // Fetch community tokens
       if (chainId && !rwaOnly) {
         // Keep open interaction lightweight; hydrate community after panel is visible
-        setCommunityTokens([]);
+        setCommunityTokens(getCachedCommunityTokens(chainId) ?? getCachedCommunityTokenSeed(chainId) ?? []);
         setLoadingCommunity(false);
-      } else if (rwaOnly) {
+      } else if (rwaOnly || !chainId) {
         setCommunityTokens([]);
         setLoadingCommunity(false);
       }
     } else {
       setVisible(false);
+      setContentReady(false);
       communityFetchStartedRef.current = false;
       setBalanceBatchIndex(0);
       setResetHoldingKey(k => k + 1);
@@ -128,8 +150,17 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       }, 300);
       return () => {
         cancelled = true;
+        if (contentTimer !== null) {
+          window.clearTimeout(contentTimer);
+        }
+        if (initialRenderTimer !== null) {
+          window.clearTimeout(initialRenderTimer);
+        }
         if (balanceTimer !== null) {
           window.clearTimeout(balanceTimer);
+        }
+        if (focusTimer !== null) {
+          window.clearTimeout(focusTimer);
         }
         clearTimeout(t);
       };
@@ -137,34 +168,60 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
     return () => {
       cancelled = true;
+      if (contentTimer !== null) {
+        window.clearTimeout(contentTimer);
+      }
+      if (initialRenderTimer !== null) {
+        window.clearTimeout(initialRenderTimer);
+      }
       if (balanceTimer !== null) {
         window.clearTimeout(balanceTimer);
+      }
+      if (focusTimer !== null) {
+        window.clearTimeout(focusTimer);
       }
     };
   }, [open, chainId, rwaOnly]);
 
   useEffect(() => {
-    if (!open || !visible) return;
+    if (!open || !visible || !contentReady) return;
     if (!chainId || rwaOnly) return;
-    if (communityTokens.length > 0) return;
-    if (communityFetchStartedRef.current) return;
 
+    const fullCached = getCachedCommunityTokens(chainId);
+    if (fullCached) {
+      startTransition(() => {
+        setCommunityTokens(fullCached);
+      });
+      setLoadingCommunity(false);
+      return;
+    }
+
+    const seedCached = getCachedCommunityTokenSeed(chainId);
+    if (seedCached && communityTokens.length === 0) {
+      startTransition(() => {
+        setCommunityTokens(seedCached);
+      });
+    }
+
+    if (communityFetchStartedRef.current) return;
     communityFetchStartedRef.current = true;
 
-    let loadTimer: number | null = null;
     let cancelled = false;
-
-    loadTimer = window.setTimeout(() => {
+    const cancelScheduledTask = scheduleIdleTask(() => {
       if (cancelled) return;
 
       setLoadingCommunity(true);
-      loadCommunityTokens(chainId)
+      fetchCommunityTokens(chainId)
         .then((rows) => {
           if (!cancelled) {
             startTransition(() => {
               setCommunityTokens(rows);
             });
-
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            console.warn("[token-selector] Failed to refresh community tokens; keeping cached rows", error);
           }
         })
         .finally(() => {
@@ -172,15 +229,13 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             setLoadingCommunity(false);
           }
         });
-    }, 180);
+    });
 
     return () => {
       cancelled = true;
-      if (loadTimer !== null) {
-        window.clearTimeout(loadTimer);
-      }
+      cancelScheduledTask();
     };
-  }, [open, visible, chainId, rwaOnly, communityTokens.length]);
+  }, [open, visible, contentReady, chainId, rwaOnly, communityTokens.length]);
 
   useEffect(() => {
     if (!open) return;
@@ -191,22 +246,22 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
   // Build deduplicated list of community tokens (exclude what's already in the regular list)
   const regularAddresses = useMemo(
-    () => new Set(tokens.map(t => t.address.toLowerCase())),
-    [tokens]
+    () => contentReady ? new Set(tokens.map(t => t.address.toLowerCase())) : new Set<string>(),
+    [tokens, contentReady]
   );
   const filteredCommunityTokens = useMemo(() => {
-    if (rwaOnly) return [];
+    if (!contentReady || rwaOnly) return [];
     if (!communityTokens.length) return [];
     const q = searchQuery.toLowerCase().trim();
     return communityTokens
       .filter(t => !regularAddresses.has(t.address.toLowerCase()))
       .filter(t => !hiddenCommunity.has(t.address.toLowerCase()))
       .filter(t => !q || t.symbol.toLowerCase().includes(q) || t.name.toLowerCase().includes(q) || t.address.toLowerCase().includes(q));
-  }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity, rwaOnly]);
+  }, [communityTokens, regularAddresses, searchQuery, hiddenCommunity, rwaOnly, contentReady]);
 
   const favoriteAddressSet = useMemo(
-    () => new Set(favoriteTokens.map((token) => token.address.toLowerCase())),
-    [favoriteTokens],
+    () => contentReady ? new Set(favoriteTokens.map((token) => token.address.toLowerCase())) : new Set<string>(),
+    [favoriteTokens, contentReady],
   );
 
   const normalizedQuery = searchQuery.toLowerCase().trim();
@@ -247,6 +302,17 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     filteredImported,
     filteredRWA,
   } = useMemo(() => {
+    if (!contentReady) {
+      return {
+        filteredFavorites: [] as Token[],
+        filteredRecent: [] as Token[],
+        filteredCommunity: [] as CommunityToken[],
+        filteredVerified: [] as Token[],
+        filteredImported: [] as Token[],
+        filteredRWA: [] as Token[],
+      };
+    }
+
     const visibleRecents = recentTokens
       .filter((t) => tokenPassesActiveFilters(t))
       .filter((t) => !favoriteAddressSet.has(t.address.toLowerCase()))
@@ -311,7 +377,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       filteredImported: imported,
         filteredRWA: rwa,
       };
-  }, [tokens, favoriteTokens, recentTokens, filteredCommunityTokens, rwaOnly, matchesSearch, tokenPassesActiveFilters, initialRenderMode, favoriteAddressSet]);
+  }, [tokens, favoriteTokens, recentTokens, filteredCommunityTokens, rwaOnly, matchesSearch, tokenPassesActiveFilters, initialRenderMode, favoriteAddressSet, contentReady]);
 
   const isValidAddress = Boolean(searchQuery.trim() && isAddress(searchQuery.trim()));
   const tokenExists =
@@ -388,9 +454,9 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
     filteredCommunity.length,
   ]);
 
-  if (!mounted) return null;
+  if (!shouldRender) return null;
 
-  const totalCount = tokens.length + filteredCommunityTokens.length;
+  const totalCount = contentReady ? tokens.length + filteredCommunityTokens.length : 0;
   const showRowBalances = showBalances && balancesReady;
   const showCommunityBalances = showRowBalances;
   const hasRecentSection = filteredRecent.length > 0;
@@ -562,6 +628,41 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             className="flex-1 overflow-y-auto overscroll-contain px-3 py-2"
             style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
           >
+            {!contentReady && (
+              <div style={{ padding: "8px 8px 16px" }}>
+                {Array.from({ length: 6 }).map((_, index) => (
+                  <div
+                    key={index}
+                    className="flex items-center gap-3 px-3 py-2.5"
+                    style={{ opacity: 0.9 }}
+                  >
+                    <div
+                      className="w-9 h-9 rounded-full"
+                      style={{ background: "rgba(255,255,255,0.06)" }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className="h-3 rounded-full"
+                        style={{
+                          width: `${42 + (index % 3) * 12}%`,
+                          background: "rgba(255,255,255,0.08)",
+                        }}
+                      />
+                      <div
+                        className="h-2.5 rounded-full mt-2"
+                        style={{
+                          width: `${62 + (index % 2) * 10}%`,
+                          background: "rgba(255,255,255,0.05)",
+                        }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {contentReady && (
+              <>
             {/* ── Favorites section ── */}
             {filteredFavorites.length > 0 && (
               <>
@@ -735,6 +836,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             )}
 
             <div className="h-safe-area-bottom h-4 sm:h-2" />
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -887,6 +990,53 @@ export const HoldToRevealRow: React.FC<{
 
 // ─── Token Row (existing/listed tokens) ──────────────────────────────────────
 
+function TokenBalanceText({
+  userAddress,
+  tokenAddress,
+  isNativeToken = false,
+  dataTestId,
+}: {
+  userAddress: string;
+  tokenAddress: string;
+  isNativeToken?: boolean;
+  dataTestId?: string;
+}) {
+  const { data: balance } = useBalance({
+    address: userAddress as `0x${string}`,
+    ...(isNativeToken ? {} : { token: tokenAddress as `0x${string}` }),
+  });
+
+  let displayBalance = "";
+  try {
+    if (balance) {
+      const formatted = formatAmount(balance.value, balance.decimals);
+      const num = parseFloat(formatted);
+      displayBalance =
+        num > 0
+          ? num < 0.0001 ? "<0.0001"
+          : num >= 1000 ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
+          : formatted
+          : "";
+    }
+  } catch {
+    displayBalance = "";
+  }
+
+  if (!displayBalance) {
+    return null;
+  }
+
+  return (
+    <p
+      className="text-xs font-mono font-medium tabular-nums text-right"
+      data-testid={dataTestId}
+      style={{ color: "rgba(255,255,255,0.7)" }}
+    >
+      {displayBalance}
+    </p>
+  );
+}
+
 function TokenRow({
   token,
   userAddress,
@@ -911,25 +1061,6 @@ function TokenRow({
   onToggleFavorite?: () => void;
 }) {
   const isNativeToken = token.address === "0x0000000000000000000000000000000000000000";
-  const shouldQueryBalance = Boolean(showBalance && userAddress);
-  const { data: balance } = useBalance({
-    address: shouldQueryBalance ? (userAddress as `0x${string}`) : undefined,
-    ...(isNativeToken || !shouldQueryBalance ? {} : { token: token.address as `0x${string}` }),
-  });
-
-  let displayBalance = "";
-  try {
-    if (balance && userAddress && showBalance) {
-      const formatted = formatAmount(balance.value, balance.decimals);
-      const num = parseFloat(formatted);
-      displayBalance =
-        num > 0
-          ? num < 0.0001 ? "<0.0001"
-          : num >= 1000 ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
-          : formatted
-          : "";
-    }
-  } catch { /**/ }
 
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
@@ -983,6 +1114,10 @@ function TokenRow({
                 className="w-full h-full object-cover"
                 onError={() => setImgError(true)}
                 loading="lazy"
+                decoding="async"
+                fetchPriority="low"
+                width={36}
+                height={36}
               />
             </div>
             {token.verified && (
@@ -1026,10 +1161,13 @@ function TokenRow({
           </div>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-          {!!(showBalance && userAddress && displayBalance) && (
-            <p className="text-xs font-mono font-medium tabular-nums text-right" data-testid={`text-balance-${token.symbol}`} style={{ color: "rgba(255,255,255,0.7)" }}>
-              {displayBalance}
-            </p>
+          {showBalance && userAddress && (
+            <TokenBalanceText
+              userAddress={userAddress}
+              tokenAddress={token.address}
+              isNativeToken={isNativeToken}
+              dataTestId={`text-balance-${token.symbol}`}
+            />
           )}
           {onToggleFavorite && (
             <button
@@ -1077,21 +1215,6 @@ function CommunityTokenRow({
   isFavorite?: boolean;
   onToggleFavorite?: () => void;
 }) {
-  const shouldQueryBalance = Boolean(showBalance && userAddress);
-  const { data: balance } = useBalance({
-    address: shouldQueryBalance ? (userAddress as `0x${string}`) : undefined,
-    ...(shouldQueryBalance ? { token: token.address as `0x${string}` } : {}),
-  });
-
-  let displayBalance = "";
-  try {
-    if (balance && userAddress && showBalance) {
-      const formatted = formatAmount(balance.value, balance.decimals);
-      const num = parseFloat(formatted);
-      displayBalance = num > 0 ? (num < 0.0001 ? "<0.0001" : num >= 1000 ? num.toLocaleString(undefined, { maximumFractionDigits: 2 }) : formatted) : "";
-    }
-  } catch { /**/ }
-
   const [imgError, setImgError] = useState(false);
   const [pressed, setPressed] = useState(false);
 
@@ -1143,6 +1266,10 @@ function CommunityTokenRow({
                 className="w-full h-full object-cover"
                 onError={() => setImgError(true)}
                 loading="lazy"
+                decoding="async"
+                fetchPriority="low"
+                width={36}
+                height={36}
               />
             </div>
             <div
@@ -1172,10 +1299,11 @@ function CommunityTokenRow({
           </div>
         </div>
         <div className="flex items-center gap-1 flex-shrink-0 ml-2">
-          {showBalance && userAddress && displayBalance && (
-            <p className="text-xs font-mono font-medium tabular-nums text-right" style={{ color: "rgba(255,255,255,0.7)" }}>
-              {displayBalance}
-            </p>
+          {showBalance && userAddress && (
+            <TokenBalanceText
+              userAddress={userAddress}
+              tokenAddress={token.address}
+            />
           )}
           {onToggleFavorite && (
             <button

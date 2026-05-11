@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { TokenSelector } from "@/components/TokenSelector";
-import { getGatewayUrlFromCid } from "@/pages/LaunchToken";
+import { getTokenLogoUrl } from "@/lib/token-logo";
 import { useAccount, useChainId } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
 import type { Token } from "@shared/schema";
@@ -229,7 +229,7 @@ export function AddLiquidityV3Advanced() {
 
     const combinedTokens = [...chainTokens, ...importedTokens.filter(t => t.chainId === chainId)].map(t => ({
       ...t,
-      logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : t.logoURI
+      logoURI: getTokenLogoUrl(t.logoURI)
     }));
     setTokens(combinedTokens);
   }, [chainId]);

@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { useAccount } from "wagmi";
 import { useToast } from "@/hooks/use-toast";
-import { Contract, JsonRpcProvider, BrowserProvider, zeroPadValue, getAddress, parseUnits, Interface } from "ethers";
+import { Contract, BrowserProvider, zeroPadValue, parseUnits, formatUnits, Interface } from "ethers";
 import {
   CCTP_TESTNET_CHAINS,
   CCTP_ATTESTATION_API,
@@ -21,9 +21,16 @@ import {
 import {
   savePendingTransfer,
   updateTransferStatus,
-  getPendingTransfers,
-  getResumableTransfers,
+  fetchPendingTransfers,
+  getCachedPendingTransfersForWallet,
+  getCachedHistoryForWallet,
+  getTransferStatusRank,
+  isBridgeTransferApiAvailable,
   removeTransfer,
+  getFallbackTransfers,
+  setFallbackTransfers,
+  addToHistory,
+  dispatchTransfersUpdated,
   type PendingBridgeTransfer,
 } from "@/lib/bridge-transfers";
 
@@ -31,6 +38,9 @@ const TOKEN_MESSENGER_V2_INTERFACE = new Interface([
   "function depositForBurn(uint256 amount, uint32 destinationDomain, bytes32 mintRecipient, address burnToken, bytes32 destinationCaller, uint256 maxFee, uint32 minFinalityThreshold)",
   "event DepositForBurn(address indexed burnToken, uint256 amount, address indexed depositor, bytes32 mintRecipient, uint32 destinationDomain, bytes32 destinationTokenMessenger, bytes32 destinationCaller, uint256 maxFee, uint32 indexed minFinalityThreshold, bytes hookData)",
 ]);
+const MESSAGE_TRANSMITTER_V2_INTERFACE = new Interface(MESSAGE_TRANSMITTER_V2_ABI);
+
+const PRIORITY_FEE_PER_GAS = BigInt(10e9);
 
 // ── Transfer status steps ────────────────────────────────────────────────────
 type BridgeStep = "idle" | "approving" | "burning" | "attesting" | "minting" | "complete" | "error";
@@ -47,6 +57,317 @@ interface AttestationPollResult {
   message: string;
   attestation: string;
   destinationDomain?: number;
+}
+
+const CCTP_MESSAGE_NONCE_OFFSET_BYTES = 12;
+const CCTP_MESSAGE_NONCE_LENGTH_BYTES = 32;
+
+function extractCCTPMessageNonce(message: string): `0x${string}` | null {
+  const normalized = message.trim().toLowerCase();
+  if (!/^0x[0-9a-f]+$/.test(normalized)) return null;
+
+  const start = 2 + CCTP_MESSAGE_NONCE_OFFSET_BYTES * 2;
+  const end = start + CCTP_MESSAGE_NONCE_LENGTH_BYTES * 2;
+  if (normalized.length < end) return null;
+
+  return `0x${normalized.slice(start, end)}` as `0x${string}`;
+}
+
+async function isTransferClaimedOnDestination(
+  dstChain: CCTPChain,
+  attestationMessage: string,
+  options?: { runner?: BrowserProvider },
+): Promise<boolean> {
+  const messageNonce = extractCCTPMessageNonce(attestationMessage);
+  if (!messageNonce) return false;
+
+  try {
+    const provider = options?.runner ?? await getWorkingProvider(dstChain);
+    const messageTransmitter = new Contract(
+      dstChain.messageTransmitterV2,
+      MESSAGE_TRANSMITTER_V2_ABI,
+      provider,
+    );
+
+    const [nonceState, nonceUsedValue] = await Promise.all([
+      messageTransmitter.usedNonces(messageNonce) as Promise<bigint>,
+      messageTransmitter.NONCE_USED() as Promise<bigint>,
+    ]);
+
+    return nonceUsedValue > 0n
+      ? nonceState === nonceUsedValue
+      : nonceState > 0n;
+  } catch (err) {
+    console.warn("Destination claimed-state check failed", err);
+    return false;
+  }
+}
+
+async function prepareMintTransaction(
+  dstChain: CCTPChain,
+  signerAddress: string,
+  attestation: { message: string; attestation: string },
+): Promise<{ data: `0x${string}`; gasLimit: bigint }> {
+  const provider = await getWorkingProvider(dstChain);
+  const data = MESSAGE_TRANSMITTER_V2_INTERFACE.encodeFunctionData("receiveMessage", [
+    attestation.message,
+    attestation.attestation,
+  ]) as `0x${string}`;
+
+  const txRequest = {
+    from: signerAddress,
+    to: dstChain.messageTransmitterV2,
+    data,
+  };
+
+  // Preflight through a public RPC so we get clearer errors than wallet
+  // providers usually return for failed gas estimation.
+  await provider.call(txRequest);
+
+  const estimatedGas = await provider.estimateGas(txRequest);
+  const gasLimit = estimatedGas * 120n / 100n;
+  return { data, gasLimit };
+}
+
+async function resolveMintErrorMessage(
+  dstChain: CCTPChain,
+  signerAddress: string,
+  attestation: { message: string; attestation: string },
+  originalError: unknown,
+): Promise<string> {
+  const originalText = extractErrorText(originalError).trim();
+  const normalizedOriginal = originalText.toLowerCase();
+
+  if (originalText && !normalizedOriginal.includes("missing revert data")) {
+    return originalText;
+  }
+
+  try {
+    await prepareMintTransaction(dstChain, signerAddress, attestation);
+  } catch (simulationError) {
+    const simulationText = extractErrorText(simulationError).trim();
+    if (simulationText) return simulationText;
+  }
+
+  if (originalText) return originalText;
+  return "Mint transaction could not be estimated. The message may already be claimed or not yet mintable on the destination chain.";
+}
+
+async function detectClaimedAfterMintFailure(
+  dstChain: CCTPChain,
+  attestationMessage: string,
+  walletProvider?: BrowserProvider,
+): Promise<boolean> {
+  const checkClaimed = async (): Promise<boolean> => {
+    if (await isTransferClaimedOnDestination(dstChain, attestationMessage)) {
+      return true;
+    }
+
+    if (walletProvider) {
+      return isTransferClaimedOnDestination(dstChain, attestationMessage, { runner: walletProvider });
+    }
+
+    return false;
+  };
+
+  if (await checkClaimed()) return true;
+
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  return checkClaimed();
+}
+
+function extractErrorCode(error: unknown): number | string | null {
+  if (!error || typeof error !== "object") return null;
+
+  const maybeError = error as {
+    code?: unknown;
+    error?: { code?: unknown };
+    data?: { originalError?: { code?: unknown } };
+    info?: { error?: { code?: unknown } };
+  };
+
+  const rawCode =
+    maybeError.code ??
+    maybeError.error?.code ??
+    maybeError.data?.originalError?.code ??
+    maybeError.info?.error?.code;
+
+  return typeof rawCode === "number" || typeof rawCode === "string" ? rawCode : null;
+}
+
+function extractErrorText(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (!error || typeof error !== "object") return "";
+
+  const maybeError = error as {
+    message?: unknown;
+    reason?: unknown;
+    shortMessage?: unknown;
+    details?: unknown;
+    data?: unknown;
+    error?: { message?: unknown; reason?: unknown; data?: unknown };
+    info?: { error?: { message?: unknown; reason?: unknown; data?: unknown } };
+  };
+
+  return [
+    maybeError.message,
+    maybeError.reason,
+    maybeError.shortMessage,
+    maybeError.details,
+    maybeError.error?.message,
+    maybeError.error?.reason,
+    maybeError.info?.error?.message,
+    maybeError.info?.error?.reason,
+    maybeError.data,
+    maybeError.error?.data,
+    maybeError.info?.error?.data,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join(" ");
+}
+
+function isUserRejectedRequestError(error: unknown): boolean {
+  const code = extractErrorCode(error);
+  if (code === 4001 || code === "4001" || code === "ACTION_REJECTED") return true;
+
+  const normalized = extractErrorText(error).toLowerCase();
+  return (
+    normalized.includes("user rejected") ||
+    normalized.includes("user denied") ||
+    normalized.includes("request rejected") ||
+    normalized.includes("rejected by user")
+  );
+}
+
+function isChainNotAddedError(error: unknown): boolean {
+  const code = extractErrorCode(error);
+  if (code === 4902 || code === "4902") return true;
+
+  const normalized = extractErrorText(error).toLowerCase();
+  return (
+    normalized.includes("unrecognized chain") ||
+    normalized.includes("unknown chain") ||
+    normalized.includes("chain not added") ||
+    normalized.includes("unsupported chain") ||
+    normalized.includes("wallet_addethereumchain") ||
+    normalized.includes("does not exist")
+  );
+}
+
+function isAlreadyClaimedError(error: unknown): boolean {
+  const errorText = extractErrorText(error);
+
+  if (!errorText) return false;
+
+  const normalized = errorText.toLowerCase();
+  return (
+    normalized.includes("already claimed") ||
+    normalized.includes("already received") ||
+    normalized.includes("already processed") ||
+    normalized.includes("message already") ||
+    normalized.includes("nonce already used") ||
+    normalized.includes("nonce was already used") ||
+    (normalized.includes("nonce") && normalized.includes("used"))
+  );
+}
+
+const CHAIN_SWITCH_VERIFY_TIMEOUT_MS = 6000;
+const CHAIN_SWITCH_VERIFY_POLL_MS = 120;
+
+async function waitForWalletChain(chainId: number): Promise<boolean> {
+  if (!window.ethereum) return false;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < CHAIN_SWITCH_VERIFY_TIMEOUT_MS) {
+    try {
+      const rawChainId = await window.ethereum.request({ method: "eth_chainId" });
+      const currentChainId = typeof rawChainId === "string"
+        ? Number.parseInt(rawChainId, 16)
+        : Number(rawChainId);
+      if (currentChainId === chainId) {
+        return true;
+      }
+    } catch {
+      // wallet/provider may still be switching
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, CHAIN_SWITCH_VERIFY_POLL_MS));
+  }
+
+  return false;
+}
+
+async function switchToChain(targetChain: CCTPChain, purposeLabel: string): Promise<void> {
+  if (!window.ethereum) throw new Error("No wallet connected");
+
+  const targetChainHex = `0x${targetChain.chainId.toString(16)}`;
+
+  try {
+    await window.ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: targetChainHex }],
+    });
+  } catch (switchErr) {
+    if (isUserRejectedRequestError(switchErr)) {
+      throw new Error(`Chain switch cancelled. Please switch to ${targetChain.name} to ${purposeLabel}.`);
+    }
+
+    if (isChainNotAddedError(switchErr)) {
+      try {
+        await window.ethereum.request({
+          method: "wallet_addEthereumChain",
+          params: [{
+            chainId: targetChainHex,
+            chainName: targetChain.name,
+            nativeCurrency: targetChain.nativeCurrency,
+            rpcUrls: targetChain.rpcUrls,
+            blockExplorerUrls: [targetChain.explorerUrl],
+          }],
+        });
+      } catch (addErr) {
+        if (isUserRejectedRequestError(addErr)) {
+          throw new Error(`Network add cancelled. Please add ${targetChain.name} in your wallet, then try again.`);
+        }
+
+        const addErrorText = extractErrorText(addErr);
+        throw new Error(
+          addErrorText
+            ? `Failed to add ${targetChain.name}: ${addErrorText}`
+            : `Failed to add ${targetChain.name}. Please add it in your wallet, then try again.`
+        );
+      }
+
+      try {
+        await window.ethereum.request({
+          method: "wallet_switchEthereumChain",
+          params: [{ chainId: targetChainHex }],
+        });
+      } catch (switchAfterAddErr) {
+        if (isUserRejectedRequestError(switchAfterAddErr)) {
+          throw new Error(`Chain switch cancelled. Please switch to ${targetChain.name} to ${purposeLabel}.`);
+        }
+
+        const switchErrorText = extractErrorText(switchAfterAddErr);
+        throw new Error(
+          switchErrorText
+            ? `Failed to switch to ${targetChain.name}: ${switchErrorText}`
+            : `Failed to switch to ${targetChain.name}. Please switch manually in your wallet and retry.`
+        );
+      }
+    } else {
+      const switchErrorText = extractErrorText(switchErr);
+      throw new Error(
+        switchErrorText
+          ? `Failed to switch to ${targetChain.name}: ${switchErrorText}`
+          : `Please switch to ${targetChain.name} to ${purposeLabel}`
+      );
+    }
+  }
+
+  const switched = await waitForWalletChain(targetChain.chainId);
+  if (!switched) {
+    throw new Error(`Chain switch to ${targetChain.name} did not complete. Please try again.`);
+  }
 }
 
 function resolveDestinationChain(
@@ -355,7 +676,8 @@ export default function Bridge() {
   const [sourceBalanceRaw, setSourceBalanceRaw] = useState<bigint | null>(null);
   const [isLoadingBalance, setIsLoadingBalance] = useState(false);
   const [useFastTransfer, setUseFastTransfer] = useState(true);
-  const [balanceRefreshKey, setBalanceRefreshKey] = useState(0);
+  const balanceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const balanceFetchVersionRef = useRef(0);
 
   // Transfer state
   const [transfer, setTransfer] = useState<TransferState>(INITIAL_STATE);
@@ -365,6 +687,7 @@ export default function Bridge() {
   // Notification panel state (full-screen modal like TransactionHistory)
   const [notifOpen, setNotifOpen] = useState(false);
   const [allTransfers, setAllTransfers] = useState<PendingBridgeTransfer[]>([]);
+  const [transferHistory, setTransferHistory] = useState<PendingBridgeTransfer[]>([]);
   const [notifVisible, setNotifVisible] = useState(false);
   const [notifMounted, setNotifMounted] = useState(false);
 
@@ -372,35 +695,165 @@ export default function Bridge() {
   const [manualClaimOpen, setManualClaimOpen] = useState(false);
   const [manualClaimTxHash, setManualClaimTxHash] = useState("");
   const [manualClaimLoading, setManualClaimLoading] = useState(false);
+
   const [manualClaimTxHashValid, setManualClaimTxHashValid] = useState(false);
   const [manualClaimSourceChain, setManualClaimSourceChain] = useState<CCTPChain | null>(null);
   const [manualClaimDestChain, setManualClaimDestChain] = useState<CCTPChain | null>(null);
   const [manualClaimAttestation, setManualClaimAttestation] = useState<{ message: string; attestation: string } | null>(null);
   const [manualClaimStatus, setManualClaimStatus] = useState<"idle" | "fetching" | "ready" | "not_found" | "error">("idle");
+  const [isBridgeDbAvailable, setIsBridgeDbAvailable] = useState(true);
 
   const isTransferring = transfer.step !== "idle" && transfer.step !== "complete" && transfer.step !== "error";
 
   // ── Load resumable transfers ───────────────────────────────────────────────
-  const refreshPendingTransfers = useCallback(() => {
-    if (address) {
-      setAllTransfers(
-        getPendingTransfers().filter(
-          t => t.userAddress.toLowerCase() === address.toLowerCase()
-        )
-      );
-    } else {
+  const refreshPendingTransfers = useCallback(async () => {
+    if (!address) {
       setAllTransfers([]);
+      setTransferHistory([]);
+      return;
+    }
+
+    try {
+      const transfers = await fetchPendingTransfers(address);
+      setAllTransfers(transfers);
+    } catch (e) {
+      console.error("[bridge] Failed to fetch pending transfers; using cached fallback", e);
+      setAllTransfers(
+        getCachedPendingTransfersForWallet(address),
+      );
+    }
+
+    setTransferHistory(getCachedHistoryForWallet(address));
+  }, [address]);
+
+  const probeBridgeAvailability = useCallback(async (): Promise<boolean> => {
+    if (!address) {
+      setIsBridgeDbAvailable(true);
+      return true;
+    }
+
+    try {
+      const ok = await isBridgeTransferApiAvailable(address);
+      setIsBridgeDbAvailable(ok);
+      return ok;
+    } catch (e) {
+      console.error("[bridge] Bridge DB availability probe failed", e);
+      setIsBridgeDbAvailable(false);
+      return false;
     }
   }, [address]);
 
-  useEffect(() => { refreshPendingTransfers(); }, [refreshPendingTransfers]);
+  const savePendingTransferWithProbe = useCallback(async (
+    transfer: PendingBridgeTransfer,
+    options?: { strict?: boolean },
+  ): Promise<boolean> => {
+    try {
+      const ok = await savePendingTransfer(transfer, options);
+      if (!ok) {
+        void probeBridgeAvailability();
+      }
+      return ok;
+    } catch (err) {
+      void probeBridgeAvailability();
+      throw err;
+    }
+  }, [probeBridgeAvailability]);
+
+  useEffect(() => {
+    if (!notifOpen) return;
+    setTransferHistory(getCachedHistoryForWallet(address || ""));
+    void refreshPendingTransfers();
+  }, [notifOpen, address]);
+
+  useEffect(() => {
+    if (!address) return;
+    void refreshPendingTransfers();
+  }, [address]);
 
   // Listen for bridge-transfers-updated events (from persistence layer)
   useEffect(() => {
-    const handler = () => refreshPendingTransfers();
+    const handler = () => { void refreshPendingTransfers(); };
     window.addEventListener("bridge-transfers-updated", handler);
     return () => window.removeEventListener("bridge-transfers-updated", handler);
   }, [refreshPendingTransfers]);
+
+  useEffect(() => {
+    if (!address) return;
+
+    let interval: ReturnType<typeof setInterval> | null = null;
+    let lastPollTime = 0;
+
+    const poll = () => {
+      const now = Date.now();
+      if (now - lastPollTime < 5000) return;
+      lastPollTime = now;
+      void refreshPendingTransfers();
+      void probeBridgeAvailability();
+    };
+
+    const startPoll = () => {
+      if (interval) return;
+      const intervalMs = document.visibilityState !== "visible" ? 30000 : 12000;
+      interval = setInterval(poll, intervalMs);
+    };
+
+    const stopPoll = () => {
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+    };
+
+    const onVisibilityChange = () => {
+      stopPoll();
+      if (document.visibilityState === "visible") {
+        poll();
+        startPoll();
+      } else {
+        startPoll();
+      }
+    };
+
+    startPoll();
+    poll();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("focus", poll);
+
+    return () => {
+      stopPoll();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("focus", poll);
+    };
+  }, [address, probeBridgeAvailability, refreshPendingTransfers]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const runProbe = async () => {
+      const ok = await probeBridgeAvailability();
+      if (!mounted) return;
+      setIsBridgeDbAvailable(ok);
+      void refreshPendingTransfers();
+    };
+
+    void runProbe();
+
+    const onFocus = () => { void runProbe(); };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void runProbe();
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      mounted = false;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [probeBridgeAvailability, refreshPendingTransfers]);
 
   // Animate notification panel in/out (same pattern as TransactionHistory)
   useEffect(() => {
@@ -439,11 +892,21 @@ export default function Bridge() {
     return () => window.removeEventListener("bridge-resume-transfer", handler);
   }, []); // handler is stable; ref gives it access to the latest resumeTransfer
 
-  const resumableCount = address ? getResumableTransfers(address).length : 0;
+  const resumableCount = allTransfers.filter(
+    (tx) => tx.status === "attesting" || tx.status === "ready_to_mint",
+  ).length;
 
-  const handleDismiss = (id: string) => {
-    removeTransfer(id);
-    refreshPendingTransfers();
+  const handleDismiss = async (id: string) => {
+    const removed = await removeTransfer(id);
+    if (!removed) {
+      toast({
+        title: "Unable to dismiss",
+        description: "Only failed or completed transfers can be dismissed.",
+        variant: "warning",
+      });
+      return;
+    }
+    void refreshPendingTransfers();
   };
 
   const getStatusInfo = (status: PendingBridgeTransfer["status"]) => {
@@ -459,6 +922,8 @@ export default function Bridge() {
 
   // ── Fetch USDC balance on source chain ──────────────────────────────────────
   const fetchBalance = useCallback(async () => {
+    const fetchVersion = ++balanceFetchVersionRef.current;
+
     if (!address || !sourceChain) {
       setSourceBalance(null);
       setSourceBalanceRaw(null);
@@ -470,39 +935,61 @@ export default function Bridge() {
       const provider = await getWorkingProvider(sourceChain);
 
       if (sourceChain.isNativeUSDC) {
-        // Arc Testnet: USDC is the native gas token (18 decimals for native balance)
+        // Arc Testnet: USDC is the native gas token
         const nativeBal = await provider.getBalance(address);
-        const formatted = (Number(nativeBal) / 1e18).toFixed(4);
+        if (fetchVersion !== balanceFetchVersionRef.current) return;
+        const formatted = Number(formatUnits(nativeBal, sourceChain.nativeCurrency.decimals)).toFixed(4);
         setSourceBalance(formatted);
         setSourceBalanceRaw(nativeBal);
       } else {
         // Standard ERC-20 USDC (6 decimals)
         const usdc = new Contract(sourceChain.usdcAddress, ERC20_ABI, provider);
         const bal: bigint = await usdc.balanceOf(address);
+        if (fetchVersion !== balanceFetchVersionRef.current) return;
         const decimals = sourceChain.usdcDecimals;
-        const formatted = (Number(bal) / 10 ** decimals).toFixed(decimals > 4 ? 4 : decimals);
+        const formatted = Number(formatUnits(bal, decimals)).toFixed(decimals > 4 ? 4 : decimals);
         setSourceBalance(formatted);
         setSourceBalanceRaw(bal);
       }
     } catch (e) {
+      if (fetchVersion !== balanceFetchVersionRef.current) return;
       console.error("Balance fetch error:", e);
       setSourceBalance(null);
       setSourceBalanceRaw(null);
     } finally {
-      setIsLoadingBalance(false);
+      if (fetchVersion === balanceFetchVersionRef.current) {
+        setIsLoadingBalance(false);
+      }
     }
-  }, [address, sourceChain, balanceRefreshKey]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => { fetchBalance(); }, [fetchBalance]);
-
-  // Poll balance every 20 seconds when wallet is connected
-  useEffect(() => {
-    if (!address || !sourceChain) return;
-    const interval = setInterval(() => {
-      setBalanceRefreshKey(k => k + 1);
-    }, 20000);
-    return () => clearInterval(interval);
   }, [address, sourceChain]);
+
+  // Poll balance every 8 seconds while connected
+  useEffect(() => {
+    if (!address || !sourceChain) {
+      if (balanceIntervalRef.current) {
+        clearInterval(balanceIntervalRef.current);
+        balanceIntervalRef.current = null;
+      }
+      return;
+    }
+
+    fetchBalance();
+
+    if (balanceIntervalRef.current) {
+      clearInterval(balanceIntervalRef.current);
+    }
+
+    balanceIntervalRef.current = setInterval(() => {
+      fetchBalance();
+    }, 8000);
+
+    return () => {
+      if (balanceIntervalRef.current) {
+        clearInterval(balanceIntervalRef.current);
+        balanceIntervalRef.current = null;
+      }
+    };
+  }, [address, sourceChain, fetchBalance]);
 
   // ── Swap source/dest ────────────────────────────────────────────────────────
   const handleSwapChains = () => {
@@ -531,17 +1018,29 @@ export default function Bridge() {
 
     try {
       if (pendingTx.status === "attesting") {
-        // Resume from attestation polling
-        setTransfer({
-          step: "attesting",
-          burnTxHash: pendingTx.burnTxHash,
-          mintTxHash: null,
-          attestation: null,
-          error: null,
-        });
+        let attestationResult: AttestationPollResult;
 
-        toast({ title: "Resuming transfer...", description: "Polling for attestation" });
-        const attestationResult = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
+        // If we already have attestation, use it directly (don't poll again)
+        if (pendingTx.attestation?.message && pendingTx.attestation?.attestation) {
+          toast({ title: "Resuming transfer...", description: "Using existing attestation" });
+          attestationResult = {
+            message: pendingTx.attestation.message,
+            attestation: pendingTx.attestation.attestation,
+            destinationDomain: pendingTx.destDomain || 0,
+          };
+        } else {
+          // Resume from attestation polling
+          setTransfer({
+            step: "attesting",
+            burnTxHash: pendingTx.burnTxHash,
+            mintTxHash: null,
+            attestation: null,
+            error: null,
+          });
+
+          toast({ title: "Resuming transfer...", description: "Polling for attestation" });
+          attestationResult = await pollForAttestation(srcChain.domain, pendingTx.burnTxHash);
+        }
 
         if (abortRef.current) return;
 
@@ -559,7 +1058,7 @@ export default function Bridge() {
           attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
           destDomain: resolvedDst.domain,
           destChainId: resolvedDst.chainId,
-        });
+        }).catch(e => console.error("Failed server update for ready_to_mint:", e));
         setDestChain(resolvedDst);
         setTransfer(prev => ({
           ...prev,
@@ -593,10 +1092,10 @@ export default function Bridge() {
       const isTimeout = /timeout/i.test(message);
       if (isTimeout) {
         // Keep transfer resumable — don't mark as failed
-        updateTransferStatus(pendingTx.id, { status: "attesting", error: message });
+        updateTransferStatus(pendingTx.id, { status: "attesting", error: message }).catch(e => console.error("Server update failed:", e));
         setTransfer(prev => ({ ...prev, step: "error", error: message }));
       } else {
-        updateTransferStatus(pendingTx.id, { status: "failed", error: message });
+        updateTransferStatus(pendingTx.id, { status: "failed", error: message }).catch(e => console.error("Server update failed:", e));
         setTransfer(prev => ({ ...prev, step: "error", error: message }));
       }
       toast({
@@ -617,75 +1116,108 @@ export default function Bridge() {
   ) => {
     if (!window.ethereum) throw new Error("No wallet connected");
 
-    updateTransferStatus(transferId, { status: "minting" });
+    updateTransferStatus(transferId, { status: "minting" }).catch(e => console.error("Server update failed:", e));
 
     try {
-      // Switch to destination chain
-      try {
-        await window.ethereum.request({
-          method: "wallet_switchEthereumChain",
-          params: [{ chainId: "0x" + dstChain.chainId.toString(16) }],
-        });
-      } catch (switchErr: any) {
-        if (switchErr.code === 4902) {
-          await window.ethereum.request({
-            method: "wallet_addEthereumChain",
-            params: [{
-              chainId: "0x" + dstChain.chainId.toString(16),
-              chainName: dstChain.name,
-              nativeCurrency: dstChain.nativeCurrency,
-              rpcUrls: [dstChain.rpcUrls[0]],
-              blockExplorerUrls: [dstChain.explorerUrl],
-            }],
-          });
-        } else {
-          throw new Error(`Please switch to ${dstChain.name} to receive USDC`);
-        }
-      }
-
-      // Wait for chain switch to stabilize
-      await new Promise(r => setTimeout(r, 1500));
-
-      // Verify the chain actually switched
-      const verifyProvider = new BrowserProvider(window.ethereum);
-      const verifiedChainId = await verifyProvider.getNetwork().then(n => Number(n.chainId));
-      if (verifiedChainId !== dstChain.chainId) {
-        throw new Error(`Chain switch to ${dstChain.name} did not complete. Please try again.`);
-      }
+      await switchToChain(dstChain, "receive USDC");
 
       const destProvider = new BrowserProvider(window.ethereum);
       const destSigner = await destProvider.getSigner();
+      const signerAddress = await destSigner.getAddress();
 
       toast({ title: "Minting USDC...", description: `On ${dstChain.name}` });
-      const messageTransmitter = new Contract(
-        dstChain.messageTransmitterV2,
-        MESSAGE_TRANSMITTER_V2_ABI,
-        destSigner
-      );
-
-      // Estimate gas and apply 150% boost for slow chains
-      const gasEstimate = await messageTransmitter.receiveMessage.estimateGas(
+      const nonceAlreadyUsed = await detectClaimedAfterMintFailure(
+        dstChain,
         attestation.message,
-        attestation.attestation
+        destProvider,
       );
-      const boostedGas = gasEstimate * 150n / 100n;
+      if (nonceAlreadyUsed) {
+        // Non-blocking server update
+        updateTransferStatus(transferId, { status: "complete" }).catch(e => console.error("Failed server update for complete:", e));
+        
+        // Update local state directly
+        const existing = getFallbackTransfers();
+        const idx = existing.findIndex((t) => t.id === transferId);
+        if (idx >= 0) {
+          const completed: PendingBridgeTransfer = {
+            ...existing[idx],
+            status: "complete",
+            error: undefined,
+            updatedAt: Date.now(),
+          };
+          addToHistory(completed);
+          existing.splice(idx, 1);
+          setFallbackTransfers(existing);
+          dispatchTransfersUpdated();
+        }
+        setTransfer(prev => ({
+          ...prev,
+          step: "complete",
+          error: null,
+        }));
+        toast({
+          title: "Already Claimed",
+          description: "This transfer was already claimed on the destination chain.",
+        });
+        fetchBalance();
+        return;
+      }
 
-      const mintTx = await messageTransmitter.receiveMessage(
-        attestation.message,
-        attestation.attestation,
-        { gasLimit: boostedGas }
-      );
+      const { data, gasLimit } = await prepareMintTransaction(dstChain, signerAddress, attestation);
+      const mintTx = await destSigner.sendTransaction({
+        to: dstChain.messageTransmitterV2,
+        data,
+        gasLimit,
+        maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS,
+      });
       const mintReceipt = await mintTx.wait();
 
       if (!mintReceipt || mintReceipt.status !== 1) {
         const errorMsg = mintReceipt ? "Mint transaction failed" : "Failed to get mint receipt";
-        updateTransferStatus(transferId, { status: "failed", mintTxHash: mintReceipt?.hash });
+        // Update local state directly (don't rely on updateTransferStatus)
+        const existing = getFallbackTransfers();
+        const idx = existing.findIndex((t) => t.id === transferId);
+        if (idx >= 0) {
+          existing[idx] = {
+            ...existing[idx],
+            status: "failed",
+            error: errorMsg,
+            updatedAt: Date.now(),
+          };
+          setFallbackTransfers(existing);
+          dispatchTransfersUpdated();
+        }
         setTransfer(prev => ({ ...prev, step: "error", error: errorMsg }));
         toast({ title: "Mint Failed", description: errorMsg, variant: "destructive" });
         return;
       }
 
-      updateTransferStatus(transferId, { status: "complete", mintTxHash: mintReceipt.hash });
+      // Update local state directly to "complete"
+      const existing = getFallbackTransfers();
+      const idx = existing.findIndex((t) => t.id === transferId);
+      if (idx >= 0) {
+        const completed: PendingBridgeTransfer = {
+          ...existing[idx],
+          status: "complete",
+          mintTxHash: mintReceipt.hash,
+          error: undefined,
+          updatedAt: Date.now(),
+        };
+        addToHistory(completed);
+        existing.splice(idx, 1);
+        setFallbackTransfers(existing);
+        dispatchTransfersUpdated();
+      }
+
+      // Try server update (non-blocking)
+      updateTransferStatus(transferId, {
+        status: "complete",
+        mintTxHash: mintReceipt.hash,
+        attestation,
+      }).catch((err) => {
+        console.warn("[bridge] Server update failed for complete:", err);
+      });
+
       setTransfer(prev => ({
         ...prev,
         step: "complete",
@@ -700,9 +1232,59 @@ export default function Bridge() {
       fetchBalance();
 
     } catch (mintErr: any) {
+      let walletProvider: BrowserProvider | undefined = undefined;
+      if (window.ethereum) {
+        try {
+          const provider = new BrowserProvider(window.ethereum);
+          const network = await provider.getNetwork();
+          if (Number(network.chainId) === dstChain.chainId) {
+            walletProvider = provider;
+          }
+        } catch (networkErr) {
+          console.warn("[bridge] Failed to inspect wallet network after mint error:", networkErr);
+        }
+      }
+      const claimedOnDestination = await detectClaimedAfterMintFailure(
+        dstChain,
+        attestation.message,
+        walletProvider,
+      );
+      if (claimedOnDestination || isAlreadyClaimedError(mintErr)) {
+        // Non-blocking server update
+        updateTransferStatus(transferId, { status: "complete" }).catch(e => console.error("Failed server update for complete:", e));
+        
+        // Update local state directly
+        const existing = getFallbackTransfers();
+        const idx = existing.findIndex((t) => t.id === transferId);
+        if (idx >= 0) {
+          const completed: PendingBridgeTransfer = {
+            ...existing[idx],
+            status: "complete",
+            error: undefined,
+            updatedAt: Date.now(),
+          };
+          addToHistory(completed);
+          existing.splice(idx, 1);
+          setFallbackTransfers(existing);
+          dispatchTransfersUpdated();
+        }
+        setTransfer(prev => ({
+          ...prev,
+          step: "complete",
+          error: null,
+        }));
+        toast({
+          title: "Already Claimed",
+          description: "This transfer was already claimed on the destination chain.",
+        });
+        fetchBalance();
+        return;
+      }
+
       // Mint failed or was cancelled — keep transfer resumable with attestation intact
-      const msg = mintErr?.message || mintErr?.reason || "Mint failed";
-      updateTransferStatus(transferId, { status: "ready_to_mint", attestation, error: msg });
+      const signerAddress = address || "";
+      const msg = await resolveMintErrorMessage(dstChain, signerAddress, attestation, mintErr);
+      updateTransferStatus(transferId, { status: "ready_to_mint", attestation, error: msg }).catch(e => console.error("Server update failed:", e));
       setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({
         title: "Mint Failed — Your Funds Are Safe",
@@ -727,6 +1309,8 @@ export default function Bridge() {
 
     setManualClaimLoading(true);
     try {
+      currentTransferIdRef.current = null;
+
       if (!manualClaimSourceChain) {
         throw new Error("Please select the source chain where the burn transaction was made");
       }
@@ -863,7 +1447,7 @@ export default function Bridge() {
       let amount = "0";
 
       try {
-        amount = (Number(decodedDepositForBurn.amount) / 1000000).toString();
+        amount = formatUnits(decodedDepositForBurn.amount, 6);
       } catch {
         amount = "0";
       }
@@ -880,10 +1464,10 @@ export default function Bridge() {
             // Transfer(address,address,uint256) - topic[0] is signature
             // Check if it's a burn (to address is 0)
             try {
-              const parsed = usdcIface.parseLog({ topics: log.topics, data: log.data });
+              const parsed = usdcIface.parseLog({ topics: log.topics as string[], data: log.data });
               if (parsed && parsed.args.to === "0x0000000000000000000000000000000000000000") {
                 const amountWei = parsed.args.value as bigint;
-                amount = (Number(amountWei) / 1000000).toString();
+                amount = formatUnits(amountWei, 6);
                 break;
               }
             } catch { continue; }
@@ -905,7 +1489,7 @@ export default function Bridge() {
         throw new Error("Burn transaction destination chain is not supported");
       }
 
-      let destChain: CCTPChain | undefined = decodedDestinationChain;
+       let resolvedDestChain: CCTPChain | undefined = decodedDestinationChain;
       let attestation: { message: string; attestation: string } | undefined;
 
       try {
@@ -935,7 +1519,9 @@ export default function Bridge() {
               Number.isFinite(apiDestinationDomain) &&
               Number(apiDestinationDomain) !== decodedDestinationDomain
             ) {
-              throw new Error("Attestation destination does not match burn transaction");
+              const errorMsg = `Destination domain mismatch: expected ${decodedDestinationDomain}, got ${apiDestinationDomain}`;
+              setTransfer(prev => ({ ...prev, step: "error", error: errorMsg }));
+              throw new Error(errorMsg);
             }
 
             if (msg.status === "complete" && msg.attestation) {
@@ -943,28 +1529,23 @@ export default function Bridge() {
                 message: msg.message,
                 attestation: msg.attestation,
               };
-              
-              // Try to get amount from the message if available
-              if (msg.message && amount === "0") {
-                try {
-                  // Message format: contains amount at specific offset
-                  // Skip if already has amount
-                } catch { /* ignore */ }
-              }
-            }
+               
+               // Extract amount from message if missing
+               if (msg.message && amount === "0") {
+                 const match = msg.message.match(/amount[:\s]+(\d+)/i);
+                 if (match) amount = match[1];
+               }
+             }
           }
         }
       } catch (apiErr) {
         console.log("API fetch failed, will poll for attestation:", apiErr);
       }
 
-      if (!destChain) throw new Error("Could not resolve destination chain from burn transaction");
-
       // Update UI like resume system does - IMMEDIATELY
       setSourceChain(manualClaimSourceChain);
-      setDestChain(destChain);
+      setDestChain(resolvedDestChain);
       setAmount(amount);
-      currentTransferIdRef.current = txHash;
       abortRef.current = false;
 
       if (attestation) {
@@ -977,21 +1558,25 @@ export default function Bridge() {
           error: null,
         });
 
-        savePendingTransfer({
+        void savePendingTransferWithProbe({
           id: txHash,
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
           sourceChainId: manualClaimSourceChain.chainId,
-          destDomain: destChain.domain,
-          destChainId: destChain.chainId,
+          destDomain: resolvedDestChain.domain,
+          destChainId: resolvedDestChain.chainId,
           amount,
           userAddress: address,
           timestamp: Date.now(),
           status: "ready_to_mint",
           attestation,
+        }, { strict: isBridgeDbAvailable }).catch((err) => {
+          console.error("[bridge] Failed to persist ready_to_mint transfer in background:", err);
         });
 
-        await executeMint(destChain, attestation, txHash, amount);
+        currentTransferIdRef.current = txHash;
+
+        await executeMint(resolvedDestChain, attestation, txHash, amount);
       } else {
         // No attestation yet - go to attesting and poll
         setTransfer({
@@ -1002,18 +1587,22 @@ export default function Bridge() {
           error: null,
         });
 
-        savePendingTransfer({
+        void savePendingTransferWithProbe({
           id: txHash,
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
           sourceChainId: manualClaimSourceChain.chainId,
-          destDomain: destChain.domain,
-          destChainId: destChain.chainId,
+          destDomain: resolvedDestChain.domain,
+          destChainId: resolvedDestChain.chainId,
           amount,
           userAddress: address,
           timestamp: Date.now(),
           status: "attesting",
+        }, { strict: isBridgeDbAvailable }).catch((err) => {
+          console.error("[bridge] Failed to persist attesting transfer in background:", err);
         });
+
+        currentTransferIdRef.current = txHash;
 
         toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
         
@@ -1028,7 +1617,7 @@ export default function Bridge() {
           updateTransferStatus(txHash, {
             status: "attesting",
             error: "Attestation destination does not match burn transaction",
-          });
+          }).catch(e => console.error("Server update failed:", e));
           setTransfer(prev => ({ ...prev, step: "error", error: "Attestation destination does not match burn transaction" }));
           toast({
             title: "Destination mismatch",
@@ -1038,16 +1627,16 @@ export default function Bridge() {
           return;
         }
 
-        const resolvedDestChain = resolveDestinationChain(
+        resolvedDestChain = resolveDestinationChain(
           decodedDestinationDomain,
-          destChain,
+          resolvedDestChain,
         );
 
       if (!resolvedDestChain) {
         updateTransferStatus(txHash, {
             status: "attesting",
             error: "Attestation did not provide a valid destination chain",
-          });
+          }).catch(e => console.error("Server update failed:", e));
           setTransfer(prev => ({ ...prev, step: "error", error: "Attestation did not provide a valid destination chain" }));
 
           toast({
@@ -1066,7 +1655,7 @@ export default function Bridge() {
           },
           destDomain: resolvedDestChain.domain,
           destChainId: resolvedDestChain.chainId,
-        });
+        }).catch(e => console.error("Server update failed:", e));
         
         // Use destination resolved from attestation when available
         setDestChain(resolvedDestChain);
@@ -1091,12 +1680,33 @@ export default function Bridge() {
         );
       }
 
+      fetchBalance();
+
     } catch (err: any) {
       const msg = err?.message || "Manual claim failed";
-      updateTransferStatus(txHash, {
-        status: "attesting",
-        error: msg,
-      });
+      if (currentTransferIdRef.current === txHash) {
+        let shouldDowngradeToAttesting = true;
+        try {
+          const latestTransfers = await fetchPendingTransfers(address);
+          const persisted = latestTransfers.find((t) => t.id === currentTransferIdRef.current);
+          if (persisted && getTransferStatusRank(persisted.status) > getTransferStatusRank("attesting")) {
+            shouldDowngradeToAttesting = false;
+          }
+        } catch {
+          const cached = getCachedPendingTransfersForWallet(address)
+            .find((t) => t.id === currentTransferIdRef.current);
+          if (cached && getTransferStatusRank(cached.status) > getTransferStatusRank("attesting")) {
+            shouldDowngradeToAttesting = false;
+          }
+        }
+
+        if (shouldDowngradeToAttesting) {
+          updateTransferStatus(currentTransferIdRef.current, {
+            status: "attesting",
+            error: msg,
+          }).catch(e => console.error("Server update failed:", e));
+        }
+      }
       setTransfer(prev => ({ ...prev, step: "error", error: msg }));
       toast({ title: "Claim Failed", description: msg, variant: "destructive" });
     } finally {
@@ -1138,38 +1748,7 @@ export default function Bridge() {
       const preProvider = new BrowserProvider(window.ethereum);
       const currentChainId = await preProvider.getNetwork().then(n => Number(n.chainId));
       if (currentChainId !== sourceChain.chainId) {
-        try {
-          await window.ethereum.request({
-            method: "wallet_switchEthereumChain",
-            params: [{ chainId: "0x" + sourceChain.chainId.toString(16) }],
-          });
-        } catch (switchErr: any) {
-          // If chain not added, try adding it
-          if (switchErr.code === 4902) {
-            await window.ethereum.request({
-              method: "wallet_addEthereumChain",
-              params: [{
-                chainId: "0x" + sourceChain.chainId.toString(16),
-                chainName: sourceChain.name,
-                nativeCurrency: sourceChain.nativeCurrency,
-                rpcUrls: [sourceChain.rpcUrls[0]],
-                blockExplorerUrls: [sourceChain.explorerUrl],
-              }],
-            });
-          } else {
-            throw new Error(`Please switch to ${sourceChain.name} to continue`);
-          }
-        }
-
-        // Wait for chain switch to stabilize before creating provider/signer
-        await new Promise(r => setTimeout(r, 1500));
-
-        // Verify the chain actually switched
-        const verifyProvider = new BrowserProvider(window.ethereum);
-        const newChainId = await verifyProvider.getNetwork().then(n => Number(n.chainId));
-        if (newChainId !== sourceChain.chainId) {
-          throw new Error(`Chain switch to ${sourceChain.name} did not complete. Please try again.`);
-        }
+        await switchToChain(sourceChain, "continue");
       }
 
       // ── Create fresh provider/signer AFTER chain switch ─────────────────
@@ -1182,8 +1761,9 @@ export default function Bridge() {
       const currentAllowance: bigint = await usdcContract.allowance(address, sourceChain.tokenMessengerV2);
 
       if (currentAllowance < amountWei) {
-        const approveGas = await usdcContract.approve.estimateGas(sourceChain.tokenMessengerV2, amountWei);
-        const approveTx = await usdcContract.approve(sourceChain.tokenMessengerV2, amountWei, { gasLimit: approveGas * 150n / 100n });
+        const approveTx = await usdcContract.approve(sourceChain.tokenMessengerV2, amountWei, {
+          maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS,
+        });
         await approveTx.wait();
       }
 
@@ -1201,15 +1781,6 @@ export default function Bridge() {
         signer
       );
 
-      const burnGas = await tokenMessenger.depositForBurn.estimateGas(
-        amountWei,
-        destChain.domain,
-        mintRecipient,
-        sourceChain.usdcAddress,
-        destCallerBytes32,
-        maxFee,
-        minFinalityThreshold
-      );
       const burnTx = await tokenMessenger.depositForBurn(
         amountWei,
         destChain.domain,
@@ -1218,18 +1789,13 @@ export default function Bridge() {
         destCallerBytes32,
         maxFee,
         minFinalityThreshold,
-        { gasLimit: burnGas * 150n / 100n }
+        { maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS }
       );
-      const burnReceipt = await burnTx.wait();
-      const burnTxHash = burnReceipt.hash;
-
-      if (abortRef.current) return;
-      setTransfer(prev => ({ ...prev, step: "attesting", burnTxHash }));
-
-      // ── Persist the transfer after successful burn ──────────────────────
+      const burnTxHash = burnTx.hash;
       const transferId = burnTxHash;
       currentTransferIdRef.current = transferId;
-      savePendingTransfer({
+      setTransfer(prev => ({ ...prev, step: "attesting", burnTxHash }));
+      void savePendingTransferWithProbe({
         id: transferId,
         burnTxHash,
         sourceDomain: sourceChain.domain,
@@ -1240,7 +1806,18 @@ export default function Bridge() {
         userAddress: address,
         timestamp: Date.now(),
         status: "attesting",
+      }, { strict: isBridgeDbAvailable }).catch((err) => {
+        console.error("[bridge] Failed to persist post-burn transfer in background:", err);
       });
+
+      const burnReceipt = await burnTx.wait();
+      if (burnReceipt?.status === 0) {
+        throw new Error("Burn transaction failed on-chain");
+      }
+
+      if (abortRef.current) return;
+
+      fetchBalance();
 
       // ── Step 3: Poll for attestation ────────────────────────────────────
       toast({ title: "Waiting for attestation...", description: "This may take 1-20 minutes" });
@@ -1262,7 +1839,7 @@ export default function Bridge() {
         attestation: { message: attestationResult.message, attestation: attestationResult.attestation },
         destDomain: resolvedDestChain.domain,
         destChainId: resolvedDestChain.chainId,
-      });
+      }).catch(e => console.error("Server update failed:", e));
       setDestChain(resolvedDestChain);
       setTransfer(prev => ({
         ...prev,
@@ -1286,9 +1863,9 @@ export default function Bridge() {
       if (currentTransferIdRef.current) {
         if (isTimeout) {
           // Keep transfer resumable — don't mark as failed
-          updateTransferStatus(currentTransferIdRef.current, { status: "attesting", error: message });
+          updateTransferStatus(currentTransferIdRef.current, { status: "attesting", error: message }).catch(e => console.error("Server update failed:", e));
         } else {
-          updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message });
+          updateTransferStatus(currentTransferIdRef.current, { status: "failed", error: message }).catch(e => console.error("Server update failed:", e));
         }
       }
       setTransfer(prev => ({ ...prev, step: "error", error: message }));
@@ -1793,11 +2370,24 @@ export default function Bridge() {
                     <Zap className="w-3 h-3" />
                     Manual Claim
                   </button>
-                  {allTransfers.length > 0 && (
+
+                  {allTransfers.some((tx) => tx.status === "complete" || tx.status === "failed") && (
                     <button
-                      onClick={() => {
-                        allTransfers.forEach(tx => { removeTransfer(tx.id); });
-                        refreshPendingTransfers();
+                      onClick={async () => {
+                        const dismissible = allTransfers.filter((tx) => tx.status === "complete" || tx.status === "failed");
+                        const results = await Promise.all(
+                          dismissible.map(async (tx) => removeTransfer(tx.id)),
+                        );
+                        const removedCount = results.filter(Boolean).length;
+                        const total = dismissible.length;
+                        if (removedCount !== total) {
+                          toast({
+                            title: "Some transfers were kept",
+                            description: `${removedCount}/${total} completed or failed transfers dismissed.`,
+                            variant: "warning",
+                          });
+                        }
+                        void refreshPendingTransfers();
                       }}
                       title="Clear all"
                       className="w-8 h-8 rounded-xl flex items-center justify-center text-white/30 hover:text-red-400 hover:bg-red-500/10 transition-all"
@@ -1822,7 +2412,7 @@ export default function Bridge() {
                 className="flex-1 overflow-y-auto overscroll-contain px-5 py-4"
                 style={{ scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}
               >
-                {allTransfers.length === 0 ? (
+                {allTransfers.length === 0 && transferHistory.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-16 gap-3">
                     <div
                       className="w-14 h-14 rounded-2xl flex items-center justify-center"
@@ -1830,8 +2420,8 @@ export default function Bridge() {
                     >
                       <Clock className="w-6 h-6 text-white/15" />
                     </div>
-                    <p className="text-sm text-white/30">No transfers yet</p>
-                    <p className="text-[11px] text-white/20">Your bridge transfers will appear here</p>
+                    <p className="text-sm text-white/30">No pending transfers</p>
+                    <p className="text-[11px] text-white/20">Completed transfers appear in history</p>
                   </div>
                 ) : (
                   <div className="space-y-2.5">
@@ -1959,7 +2549,7 @@ export default function Bridge() {
                               )}
                               {canDismiss && (
                                 <button
-                                  onClick={() => handleDismiss(tx.id)}
+                                  onClick={async () => handleDismiss(tx.id)}
                                   className="text-[11px] text-white/30 px-2 py-1 rounded-lg hover:text-white/50 hover:bg-white/5 transition-all"
                                   style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.06)" }}
                                 >
@@ -1972,6 +2562,58 @@ export default function Bridge() {
                       );
                     })}
                   </div>
+                )}
+
+                {transferHistory.length > 0 && (
+                  <>
+                    <div className="flex items-center gap-2 mt-6 mb-3">
+                      <div className="h-px flex-1" style={{ background: "rgba(255,255,255,0.06)" }} />
+                      <span className="text-[11px] text-white/30 font-medium uppercase tracking-wider">History</span>
+                      <div className="h-px flex-1" style={{ background: "rgba(255,255,255,0.06)" }} />
+                    </div>
+                    <div className="space-y-2.5">
+                      {transferHistory.map((tx, i) => {
+                        const srcChain = getChainByDomain(tx.sourceDomain);
+                        const dstChain = getChainByDomain(tx.destDomain);
+                        const { label, color, Icon } = getStatusInfo(tx.status);
+                        const age = Date.now() - (tx.updatedAt || tx.timestamp);
+                        const ageStr = age < 60000 ? "<1m ago"
+                          : age < 3600000 ? `${Math.floor(age / 60000)}m ago`
+                          : age < 86400000 ? `${Math.floor(age / 3600000)}h ago`
+                          : `${Math.floor(age / 86400000)}d ago`;
+                        const canDismiss = tx.status === "complete" || tx.status === "failed";
+
+                        return (
+                          <div
+                            key={tx.id}
+                            className="rounded-2xl p-4 transition-all opacity-60 hover:opacity-80"
+                            style={{
+                              background: "rgba(255,255,255,0.015)",
+                              border: "1px solid rgba(255,255,255,0.04)",
+                            }}
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className="w-9 h-9 rounded-full overflow-hidden flex-shrink-0 flex items-center justify-center" style={{ background: `linear-gradient(135deg, ${srcChain?.color || "#666"}33, ${srcChain?.color || "#666"}66)` }}>
+                                {srcChain?.logo ? <img src={srcChain.logo} alt={srcChain.shortName} className="w-full h-full object-cover" /> : <span style={{ fontSize: 14, fontWeight: 800, color: srcChain?.color || "#888" }}>{srcChain?.shortName.charAt(0) || "?"}</span>}
+                              </div>
+                              <ArrowRight className="w-4 h-4 text-white/20" />
+                              <div className="w-9 h-9 rounded-full overflow-hidden flex-shrink-0 flex items-center justify-center" style={{ background: `linear-gradient(135deg, ${dstChain?.color || "#666"}33, ${dstChain?.color || "#666"}66)` }}>
+                                {dstChain?.logo ? <img src={dstChain.logo} alt={dstChain.shortName} className="w-full h-full object-cover" /> : <span style={{ fontSize: 14, fontWeight: 800, color: dstChain?.color || "#888" }}>{dstChain?.shortName.charAt(0) || "?"}</span>}
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-semibold text-white truncate">{tx.amount} USDC</p>
+                                <p className="text-[11px] text-white/30 truncate">{ageStr}</p>
+                              </div>
+                              <div className="flex items-center gap-1.5" style={{ color }}>
+                                <Icon className="w-3 h-3" />
+                                <span className="text-[11px] font-semibold">{label}</span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
                 )}
 
                 {/* Bottom safe area */}
