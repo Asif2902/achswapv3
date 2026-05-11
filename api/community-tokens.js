@@ -14,6 +14,7 @@ const COMMUNITY_FACTORY_ABI = [
 ];
 
 const communityCache = new Map();
+const communityInFlight = new Map();
 
 function getRpcUrls() {
   const primaryAlchemyKey = process.env.VITE_ALCHEMY_KEY || process.env.ALCHEMY_KEY;
@@ -101,19 +102,31 @@ async function fetchCommunityTokensFromRpc(url) {
 }
 
 async function loadCommunityTokens(chainId) {
-  let lastError = null;
-
-  for (const url of getRpcUrls()) {
-    try {
-      const tokens = await fetchCommunityTokensFromRpc(url);
-      setCache(chainId, tokens);
-      return tokens;
-    } catch (error) {
-      lastError = error;
-    }
+  const existing = communityInFlight.get(chainId);
+  if (existing) {
+    return existing;
   }
 
-  throw lastError || new Error("Failed to load community tokens");
+  const request = (async () => {
+    let lastError = null;
+
+    for (const url of getRpcUrls()) {
+      try {
+        const tokens = await fetchCommunityTokensFromRpc(url);
+        setCache(chainId, tokens);
+        return tokens;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError || new Error("Failed to load community tokens");
+  })().finally(() => {
+    communityInFlight.delete(chainId);
+  });
+
+  communityInFlight.set(chainId, request);
+  return request;
 }
 
 function sendJson(res, statusCode, payload, extraHeaders = {}) {
@@ -160,7 +173,11 @@ export default async function handler(req, res) {
       });
     }
 
-    console.error("[community-tokens] failed to load community tokens", error);
+    const scrubbed = {
+      message: error?.message,
+      code: error?.code,
+    };
+    console.error("[community-tokens] failed to load community tokens", scrubbed);
     return sendJson(res, 502, { error: "Failed to load community tokens" });
   }
 }

@@ -95,6 +95,8 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   useEffect(() => {
     let balanceTimer: number | null = null;
     let contentTimer: number | null = null;
+    let initialRenderTimer: number | null = null;
+    let focusTimer: number | null = null;
     let cancelled = false;
 
     if (open) {
@@ -110,7 +112,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
           setContentReady(true);
         }
       }, CONTENT_HYDRATE_DELAY_MS);
-      window.setTimeout(() => {
+      initialRenderTimer = window.setTimeout(() => {
         if (!cancelled) {
           setInitialRenderMode(false);
         }
@@ -123,7 +125,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
 
       const isDesktop = window.matchMedia("(pointer: fine)").matches;
       if (isDesktop) {
-        setTimeout(() => inputRef.current?.focus(), 120);
+        focusTimer = window.setTimeout(() => inputRef.current?.focus(), 120);
       }
 
       // Fetch community tokens
@@ -151,8 +153,14 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
         if (contentTimer !== null) {
           window.clearTimeout(contentTimer);
         }
+        if (initialRenderTimer !== null) {
+          window.clearTimeout(initialRenderTimer);
+        }
         if (balanceTimer !== null) {
           window.clearTimeout(balanceTimer);
+        }
+        if (focusTimer !== null) {
+          window.clearTimeout(focusTimer);
         }
         clearTimeout(t);
       };
@@ -163,8 +171,14 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       if (contentTimer !== null) {
         window.clearTimeout(contentTimer);
       }
+      if (initialRenderTimer !== null) {
+        window.clearTimeout(initialRenderTimer);
+      }
       if (balanceTimer !== null) {
         window.clearTimeout(balanceTimer);
+      }
+      if (focusTimer !== null) {
+        window.clearTimeout(focusTimer);
       }
     };
   }, [open, chainId, rwaOnly]);

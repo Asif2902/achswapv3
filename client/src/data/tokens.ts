@@ -14,6 +14,7 @@ type CommunityCacheEntry = { tokens: CommunityToken[]; ts: number };
 const COMMUNITY_FULL_CACHE_TTL = 5 * 60 * 1000; // 5 min
 const COMMUNITY_SEED_CACHE_TTL = 30 * 60 * 1000; // 30 min
 const COMMUNITY_API_TIMEOUT_MS = 9000;
+const COMMUNITY_DIRECT_TIMEOUT_MS = 9000;
 const communityCache = new Map<number, CommunityCacheEntry>();
 const communityInFlight = new Map<number, Promise<CommunityToken[]>>();
 const communitySeedCache = new Map<number, CommunityCacheEntry>();
@@ -81,6 +82,22 @@ function formatCommunityNativeAdded(raw: unknown): string {
   } catch {
     return "0";
   }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof globalThis.setTimeout> | undefined;
+
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = globalThis.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== undefined) {
+      globalThis.clearTimeout(timeoutId);
+    }
+  });
 }
 
 function createCommunityToken(info: any, nativeAddedSource: unknown): CommunityToken {
@@ -164,7 +181,11 @@ async function fetchCommunityTokensDirect(chainId: number): Promise<CommunityTok
   const provider = createAlchemyProvider(chainId);
   const factory = new Contract(FACTORY_ADDRESS, ACH_TOKEN_FACTORY_ABI, provider);
 
-  const [infos, liquidities] = await factory.getAllTokensLiquidity();
+  const [infos, liquidities] = await withTimeout(
+    factory.getAllTokensLiquidity(),
+    COMMUNITY_DIRECT_TIMEOUT_MS,
+    "Community token RPC",
+  );
 
   const result: CommunityToken[] = [];
   for (let i = 0; i < infos.length; i++) {
@@ -283,12 +304,14 @@ export function getCachedCommunityTokenSeed(chainId: number): CommunityToken[] |
 }
 
 export function preloadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
-  return fetchCommunityTokenSeed(chainId).then((seed) => {
-    void fetchCommunityTokens(chainId).catch(() => {
-      // Full liquidity refresh is best-effort; seed is enough for bootstrap.
+  return fetchCommunityTokenSeed(chainId)
+    .catch(() => getCachedCommunityTokenSeed(chainId) ?? [])
+    .then((seed) => {
+      void fetchCommunityTokens(chainId).catch(() => {
+        // Full liquidity refresh is best-effort; seed is enough for bootstrap.
+      });
+      return seed;
     });
-    return seed;
-  });
 }
 
 

@@ -10,12 +10,21 @@ let currentPhase: AppBootstrapPhase | null = null;
 const phaseListeners = new Set<(phase: AppBootstrapPhase) => void>();
 
 function canUseSessionStorage(): boolean {
-  return typeof window !== "undefined" && !!window.sessionStorage;
+  if (typeof window === "undefined") return false;
+  try {
+    return !!window.sessionStorage;
+  } catch {
+    return false;
+  }
 }
 
 export function hasCompletedAppBootstrap(): boolean {
   if (!canUseSessionStorage()) return false;
-  return window.sessionStorage.getItem(APP_BOOTSTRAP_SESSION_KEY) === "1";
+  try {
+    return window.sessionStorage.getItem(APP_BOOTSTRAP_SESSION_KEY) === "1";
+  } catch {
+    return false;
+  }
 }
 
 function markAppBootstrapComplete() {
@@ -70,11 +79,10 @@ export function bootstrapAppReadiness(
   if (!bootstrapPromise) {
     bootstrapPromise = (async () => {
       setPhase("rpc");
-      const warmRpcPromise = warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch((error) => {
-        console.error("[app-bootstrap] RPC warmup failed", error);
-      });
-
       try {
+        const warmRpcPromise = warmRpcProvider(ARC_TESTNET_CHAIN_ID).catch((error) => {
+          console.error("[app-bootstrap] RPC warmup failed", error);
+        });
         await Promise.race([
           warmRpcPromise,
           sleep(BOOTSTRAP_RPC_TIMEOUT_MS),
