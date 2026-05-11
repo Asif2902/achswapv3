@@ -4,7 +4,7 @@ import { isAddress } from "ethers";
 import { useAccount, useBalance, useChainId } from "wagmi";
 import type { Token } from "@shared/schema";
 import { formatAmount } from "@/lib/decimal-utils";
-import { fetchCommunityTokens, getCachedCommunityTokens, type CommunityToken } from "@/data/tokens";
+import { fetchCommunityTokens, getCachedCommunityTokenSeed, getCachedCommunityTokens, type CommunityToken } from "@/data/tokens";
 
 const MAX_RENDER_ITEMS_PER_SECTION = 80;
 const INITIAL_RENDER_ITEMS_PER_SECTION = 8;
@@ -84,7 +84,7 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
       // Fetch community tokens
       if (chainId && !rwaOnly) {
         // Keep open interaction lightweight; hydrate community after panel is visible
-        setCommunityTokens(getCachedCommunityTokens(chainId) ?? []);
+        setCommunityTokens(getCachedCommunityTokens(chainId) ?? getCachedCommunityTokenSeed(chainId) ?? []);
         setLoadingCommunity(false);
       } else if (rwaOnly || !chainId) {
         setCommunityTokens([]);
@@ -120,18 +120,24 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
   useEffect(() => {
     if (!open || !visible) return;
     if (!chainId || rwaOnly) return;
-    if (communityTokens.length > 0) return;
-    if (communityFetchStartedRef.current) return;
 
-    const cached = getCachedCommunityTokens(chainId);
-    if (cached) {
+    const fullCached = getCachedCommunityTokens(chainId);
+    if (fullCached) {
       startTransition(() => {
-        setCommunityTokens(cached);
+        setCommunityTokens(fullCached);
       });
       setLoadingCommunity(false);
       return;
     }
 
+    const seedCached = getCachedCommunityTokenSeed(chainId);
+    if (seedCached && communityTokens.length === 0) {
+      startTransition(() => {
+        setCommunityTokens(seedCached);
+      });
+    }
+
+    if (communityFetchStartedRef.current) return;
     communityFetchStartedRef.current = true;
 
     let loadTimer: number | null = null;
@@ -147,6 +153,11 @@ export function TokenSelector({ open, onClose, onSelect, tokens, onImport, onDel
             startTransition(() => {
               setCommunityTokens(rows);
             });
+          }
+        })
+        .catch((error) => {
+          if (!cancelled) {
+            console.warn("[token-selector] Failed to refresh community tokens; keeping cached rows", error);
           }
         })
         .finally(() => {

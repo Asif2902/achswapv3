@@ -1,9 +1,9 @@
-import { getCachedCommunityTokens, preloadCommunityTokens } from "@/data/tokens";
+import { getCachedCommunityTokenSeed, getCachedCommunityTokens, preloadCommunityTokens } from "@/data/tokens";
 import { ARC_TESTNET_CHAIN_ID, warmRpcProvider } from "@/lib/config";
 
 const APP_BOOTSTRAP_SESSION_KEY = "achswap_app_bootstrap_v1";
 const BOOTSTRAP_RPC_TIMEOUT_MS = 1000;
-const BOOTSTRAP_COMMUNITY_TIMEOUT_MS = 2200;
+const BOOTSTRAP_COMMUNITY_TIMEOUT_MS = 1200;
 const COMMUNITY_PRELOAD_START_DELAY_MS = 24;
 
 export type AppBootstrapPhase = "rpc" | "community" | "ready";
@@ -17,7 +17,10 @@ function canUseSessionStorage(): boolean {
 }
 
 function hasWarmCommunityTokenCache(): boolean {
-  return getCachedCommunityTokens(ARC_TESTNET_CHAIN_ID) !== null;
+  return (
+    getCachedCommunityTokens(ARC_TESTNET_CHAIN_ID) !== null
+    || getCachedCommunityTokenSeed(ARC_TESTNET_CHAIN_ID) !== null
+  );
 }
 
 export function hasCompletedAppBootstrap(): boolean {

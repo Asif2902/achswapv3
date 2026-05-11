@@ -9,13 +9,22 @@ export interface CommunityToken extends Token {
   nativeAdded: string; // formatted USDC
 }
 
-const COMMUNITY_CACHE_TTL = 5 * 60 * 1000; // 5 min
-const communityCache = new Map<number, { tokens: CommunityToken[]; ts: number }>();
+type CommunityCacheEntry = { tokens: CommunityToken[]; ts: number };
+
+const COMMUNITY_FULL_CACHE_TTL = 5 * 60 * 1000; // 5 min
+const COMMUNITY_SEED_CACHE_TTL = 30 * 60 * 1000; // 30 min
+const communityCache = new Map<number, CommunityCacheEntry>();
 const communityInFlight = new Map<number, Promise<CommunityToken[]>>();
+const communitySeedCache = new Map<number, CommunityCacheEntry>();
 const COMMUNITY_CACHE_STORAGE_PREFIX = "achswap_community_tokens_v1:";
+const COMMUNITY_SEED_STORAGE_PREFIX = "achswap_community_seed_v1:";
 
 function getCommunityCacheStorageKey(chainId: number): string {
   return `${COMMUNITY_CACHE_STORAGE_PREFIX}${chainId}`;
+}
+
+function getCommunitySeedStorageKey(chainId: number): string {
+  return `${COMMUNITY_SEED_STORAGE_PREFIX}${chainId}`;
 }
 
 function normalizeCommunityTokenLogo(token: CommunityToken): CommunityToken {
@@ -25,36 +34,66 @@ function normalizeCommunityTokenLogo(token: CommunityToken): CommunityToken {
   };
 }
 
-function readPersistedCommunityCache(chainId: number): CommunityToken[] | null {
+function readPersistedCommunityCache(
+  chainId: number,
+  storageKey: string,
+  ttlMs: number,
+  targetCache: Map<number, CommunityCacheEntry>,
+): CommunityToken[] | null {
   if (typeof window === "undefined") return null;
 
   try {
-    const raw = window.localStorage.getItem(getCommunityCacheStorageKey(chainId));
+    const raw = window.localStorage.getItem(storageKey);
     if (!raw) return null;
 
     const parsed = JSON.parse(raw) as { tokens?: CommunityToken[]; ts?: number };
     if (!parsed || !Array.isArray(parsed.tokens) || !Number.isFinite(parsed.ts)) return null;
-    if (Date.now() - Number(parsed.ts) >= COMMUNITY_CACHE_TTL) return null;
+    if (Date.now() - Number(parsed.ts) >= ttlMs) return null;
 
     const normalizedTokens = parsed.tokens.map(normalizeCommunityTokenLogo);
-    communityCache.set(chainId, { tokens: normalizedTokens, ts: Number(parsed.ts) });
+    targetCache.set(chainId, { tokens: normalizedTokens, ts: Number(parsed.ts) });
     return normalizedTokens;
   } catch {
     return null;
   }
 }
 
-function persistCommunityCache(chainId: number, tokens: CommunityToken[]): void {
+function persistCommunityCache(storageKey: string, tokens: CommunityToken[]): void {
   if (typeof window === "undefined") return;
 
   try {
     window.localStorage.setItem(
-      getCommunityCacheStorageKey(chainId),
+      storageKey,
       JSON.stringify({ tokens, ts: Date.now() }),
     );
   } catch {
     // Ignore storage quota and serialization issues.
   }
+}
+
+function formatCommunityNativeAdded(raw: unknown): string {
+  try {
+    const asBigInt = typeof raw === "bigint" ? raw : BigInt(String(raw ?? 0));
+    const asNumber = Number(asBigInt);
+    if (!Number.isFinite(asNumber)) return "0";
+    return parseFloat((asNumber / 1e18).toFixed(2)).toString();
+  } catch {
+    return "0";
+  }
+}
+
+function createCommunityToken(info: any, nativeAddedSource: unknown): CommunityToken {
+  return {
+    address: info.tokenAddress,
+    name: info.name || info.symbol || `Token …${String(info.tokenAddress || "").slice(-4)}`,
+    symbol: info.symbol || `${String(info.tokenAddress || "").slice(0, 6)}…${String(info.tokenAddress || "").slice(-4)}`,
+    decimals: 18,
+    logoURI: getTokenLogoUrl(info.logoUrl),
+    verified: false,
+    chainId: 5042002,
+    community: true,
+    nativeAdded: formatCommunityNativeAdded(nativeAddedSource),
+  };
 }
 
 export async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> {
@@ -63,11 +102,16 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
 
   // Use cache if fresh
   const cached = communityCache.get(chainId);
-  if (cached && Date.now() - cached.ts < COMMUNITY_CACHE_TTL) {
+  if (cached && Date.now() - cached.ts < COMMUNITY_FULL_CACHE_TTL) {
     return cached.tokens;
   }
 
-  const persisted = readPersistedCommunityCache(chainId);
+  const persisted = readPersistedCommunityCache(
+    chainId,
+    getCommunityCacheStorageKey(chainId),
+    COMMUNITY_FULL_CACHE_TTL,
+    communityCache,
+  );
   if (persisted) {
     return persisted;
   }
@@ -90,28 +134,16 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
       const liq = liquidities[i];
       if (!liq.hasEnoughLiquidity) continue; // ≥500 USDC threshold
 
-      result.push({
-        address: info.tokenAddress,
-        name: info.name || info.symbol || `Token …${info.tokenAddress.slice(-4)}`,
-        symbol: info.symbol || `${info.tokenAddress.slice(0, 6)}…${info.tokenAddress.slice(-4)}`,
-        decimals: 18,
-        logoURI: getTokenLogoUrl(info.logoUrl),
-        verified: false,
-        chainId: 5042002,
-        community: true,
-        nativeAdded: parseFloat(
-          (Number(liq.nativeReserve) / 1e18).toFixed(2)
-        ).toString(),
-      });
+      result.push(createCommunityToken(info, liq.nativeReserve));
     }
 
     const normalizedResult = result.map(normalizeCommunityTokenLogo);
     communityCache.set(chainId, { tokens: normalizedResult, ts: Date.now() });
-    persistCommunityCache(chainId, normalizedResult);
+    persistCommunityCache(getCommunityCacheStorageKey(chainId), normalizedResult);
+    communitySeedCache.set(chainId, { tokens: normalizedResult, ts: Date.now() });
+    persistCommunityCache(getCommunitySeedStorageKey(chainId), normalizedResult);
     return normalizedResult;
-  })()
-    .catch(() => [])
-    .finally(() => {
+  })().finally(() => {
       communityInFlight.delete(chainId);
     });
 
@@ -121,15 +153,70 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
 
 export function getCachedCommunityTokens(chainId: number): CommunityToken[] | null {
   const cached = communityCache.get(chainId);
-  if (cached && Date.now() - cached.ts < COMMUNITY_CACHE_TTL) {
+  if (cached && Date.now() - cached.ts < COMMUNITY_FULL_CACHE_TTL) {
     return cached.tokens;
   }
 
-  return readPersistedCommunityCache(chainId);
+  return readPersistedCommunityCache(
+    chainId,
+    getCommunityCacheStorageKey(chainId),
+    COMMUNITY_FULL_CACHE_TTL,
+    communityCache,
+  );
+}
+
+export async function fetchCommunityTokenSeed(chainId: number): Promise<CommunityToken[]> {
+  if (chainId !== 5042002) return [];
+
+  const fullCached = getCachedCommunityTokens(chainId);
+  if (fullCached) {
+    return fullCached;
+  }
+
+  const cached = communitySeedCache.get(chainId);
+  if (cached && Date.now() - cached.ts < COMMUNITY_SEED_CACHE_TTL) {
+    return cached.tokens;
+  }
+
+  const persisted = readPersistedCommunityCache(
+    chainId,
+    getCommunitySeedStorageKey(chainId),
+    COMMUNITY_SEED_CACHE_TTL,
+    communitySeedCache,
+  );
+  if (persisted) {
+    return persisted;
+  }
+
+  return fetchCommunityTokens(chainId);
+}
+
+export function getCachedCommunityTokenSeed(chainId: number): CommunityToken[] | null {
+  const fullCached = getCachedCommunityTokens(chainId);
+  if (fullCached) {
+    return fullCached;
+  }
+
+  const cached = communitySeedCache.get(chainId);
+  if (cached && Date.now() - cached.ts < COMMUNITY_SEED_CACHE_TTL) {
+    return cached.tokens;
+  }
+
+  return readPersistedCommunityCache(
+    chainId,
+    getCommunitySeedStorageKey(chainId),
+    COMMUNITY_SEED_CACHE_TTL,
+    communitySeedCache,
+  );
 }
 
 export function preloadCommunityTokens(chainId: number): Promise<CommunityToken[]> {
-  return fetchCommunityTokens(chainId);
+  return fetchCommunityTokenSeed(chainId).then((seed) => {
+    void fetchCommunityTokens(chainId).catch(() => {
+      // Full liquidity refresh is best-effort; seed is enough for bootstrap.
+    });
+    return seed;
+  });
 }
 
 
@@ -352,7 +439,7 @@ export function getTokensByChainId(chainId: number): Token[] {
 
 export async function fetchTokensWithCommunity(chainId: number): Promise<Token[]> {
   const defaults = getTokensByChainId(chainId);
-  const communities = await fetchCommunityTokens(chainId);
+  const communities = await fetchCommunityTokens(chainId).catch(() => []);
   // combine, ensuring communities don't override defaults
   const defaultsSet = new Set(defaults.map(t => t.address.toLowerCase()));
   const filteredCommunities = communities.filter(t => !defaultsSet.has(t.address.toLowerCase()));
