@@ -965,6 +965,10 @@ function TokenRow({
                 className="w-full h-full object-cover"
                 onError={() => setImgError(true)}
                 loading="lazy"
+                decoding="async"
+                fetchPriority="low"
+                width={36}
+                height={36}
               />
             </div>
             {token.verified && (
@@ -1125,6 +1129,10 @@ function CommunityTokenRow({
                 className="w-full h-full object-cover"
                 onError={() => setImgError(true)}
                 loading="lazy"
+                decoding="async"
+                fetchPriority="low"
+                width={36}
+                height={36}
               />
             </div>
             <div

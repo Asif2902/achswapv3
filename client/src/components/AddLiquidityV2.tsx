@@ -12,7 +12,7 @@ import { formatAmount, parseAmount, calculateRatio, getMaxAmount } from "@/lib/d
 import { getContractsForChain } from "@/lib/contracts";
 import { getErrorForToast } from "@/lib/error-utils";
 import { createAlchemyProvider } from "@/lib/config";
-import { getGatewayUrlFromCid } from "@/pages/LaunchToken";
+import { getTokenLogoUrl } from "@/lib/token-logo";
 
 const ERC20_ABI = [
   "function name() view returns (string)",
@@ -341,8 +341,8 @@ export function AddLiquidityV2() {
         }
       } catch { importedTokens = []; }
       setTokens([
-        ...chainTokens.map(t => ({ ...t, logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : `/img/logos/unknown-token.png` })),
-        ...importedTokens.map((t: Token) => ({ ...t, logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : `/img/logos/unknown-token.png` }))
+        ...chainTokens.map(t => ({ ...t, logoURI: getTokenLogoUrl(t.logoURI) })),
+        ...importedTokens.map((t: Token) => ({ ...t, logoURI: getTokenLogoUrl(t.logoURI) }))
       ]);
     } catch (error) { console.error('Failed to load tokens:', error); }
   };

@@ -11,15 +11,11 @@ import { getContractsForChain } from "@/lib/contracts";
 import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
 import { uploadToIPFS } from "@/lib/ipfs-upload";
 import { compressImage } from "@/lib/image-utils";
+import { getTokenLogoUrl } from "@/lib/token-logo";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-export function getGatewayUrlFromCid(url: string) {
-  if (url.startsWith("ipfs://")) {
-    return url.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
-  }
-  return url;
-}
+export const getGatewayUrlFromCid = getTokenLogoUrl;
 
 function fmt(n: number, dp = 4): string {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;

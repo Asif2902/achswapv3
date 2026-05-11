@@ -1,7 +1,8 @@
 import { Token } from "@shared/schema";
-import { Contract, JsonRpcProvider } from "ethers";
+import { Contract } from "ethers";
 import { ACH_TOKEN_FACTORY_ABI, FACTORY_ADDRESS } from "@/lib/factory-abi";
 import { createAlchemyProvider } from "@/lib/config";
+import { getTokenLogoUrl } from "@/lib/token-logo";
 
 export interface CommunityToken extends Token {
   community: true;
@@ -17,6 +18,13 @@ function getCommunityCacheStorageKey(chainId: number): string {
   return `${COMMUNITY_CACHE_STORAGE_PREFIX}${chainId}`;
 }
 
+function normalizeCommunityTokenLogo(token: CommunityToken): CommunityToken {
+  return {
+    ...token,
+    logoURI: getTokenLogoUrl(token.logoURI),
+  };
+}
+
 function readPersistedCommunityCache(chainId: number): CommunityToken[] | null {
   if (typeof window === "undefined") return null;
 
@@ -28,8 +36,9 @@ function readPersistedCommunityCache(chainId: number): CommunityToken[] | null {
     if (!parsed || !Array.isArray(parsed.tokens) || !Number.isFinite(parsed.ts)) return null;
     if (Date.now() - Number(parsed.ts) >= COMMUNITY_CACHE_TTL) return null;
 
-    communityCache.set(chainId, { tokens: parsed.tokens, ts: Number(parsed.ts) });
-    return parsed.tokens;
+    const normalizedTokens = parsed.tokens.map(normalizeCommunityTokenLogo);
+    communityCache.set(chainId, { tokens: normalizedTokens, ts: Number(parsed.ts) });
+    return normalizedTokens;
   } catch {
     return null;
   }
@@ -46,19 +55,6 @@ function persistCommunityCache(chainId: number, tokens: CommunityToken[]): void 
   } catch {
     // Ignore storage quota and serialization issues.
   }
-}
-
-// Ensure gateway URL is consistent with LaunchToken
-function getGatewayUrlFromCid(cidOrUrl: string): string {
-  if (!cidOrUrl) return "/img/logos/unknown-token.png";
-  // Handle local paths (already in correct format)
-  if (cidOrUrl.startsWith("/img/") || cidOrUrl.startsWith("data:")) return cidOrUrl;
-  if (cidOrUrl.startsWith("http")) return cidOrUrl;
-  if (cidOrUrl.startsWith("ipfs://")) {
-    return cidOrUrl.replace("ipfs://", "https://gateway.pinata.cloud/ipfs/");
-  }
-  // Handle direct CID without protocol
-  return `https://gateway.pinata.cloud/ipfs/${cidOrUrl}`;
 }
 
 export async function fetchCommunityTokens(chainId: number): Promise<CommunityToken[]> {
@@ -99,7 +95,7 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
         name: info.name || info.symbol || `Token …${info.tokenAddress.slice(-4)}`,
         symbol: info.symbol || `${info.tokenAddress.slice(0, 6)}…${info.tokenAddress.slice(-4)}`,
         decimals: 18,
-        logoURI: info.logoUrl ? getGatewayUrlFromCid(info.logoUrl) : "/img/logos/unknown-token.png",
+        logoURI: getTokenLogoUrl(info.logoUrl),
         verified: false,
         chainId: 5042002,
         community: true,
@@ -109,9 +105,10 @@ export async function fetchCommunityTokens(chainId: number): Promise<CommunityTo
       });
     }
 
-    communityCache.set(chainId, { tokens: result, ts: Date.now() });
-    persistCommunityCache(chainId, result);
-    return result;
+    const normalizedResult = result.map(normalizeCommunityTokenLogo);
+    communityCache.set(chainId, { tokens: normalizedResult, ts: Date.now() });
+    persistCommunityCache(chainId, normalizedResult);
+    return normalizedResult;
   })()
     .catch(() => [])
     .finally(() => {
@@ -365,7 +362,7 @@ export async function fetchTokensWithCommunity(chainId: number): Promise<Token[]
   // Ensure ALL tokens have their IPFS/gateway URLs properly formatted
   return allTokens.map(t => ({
     ...t,
-    logoURI: t.logoURI ? getGatewayUrlFromCid(t.logoURI) : "/img/logos/unknown-token.png"
+    logoURI: getTokenLogoUrl(t.logoURI)
   }));
 }
 
