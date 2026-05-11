@@ -46,6 +46,16 @@ const WRAPPED_TOKEN_ABI = [
   "function allowance(address owner, address spender) view returns (uint256)",
 ];
 
+const FAST_TX_OVERRIDES_TTL_MS = 15_000;
+
+type FastTxOverrides = {
+  maxFeePerGas?: bigint;
+  maxPriorityFeePerGas?: bigint;
+  gasPrice?: bigint;
+};
+
+type ApprovalState = "unknown" | "not_needed" | "ready" | "needs_approval";
+
 function fmtBal(raw: string): string {
   const n = parseFloat(raw);
   if (!n || isNaN(n)) return "0";
@@ -101,6 +111,7 @@ export default function Swap() {
   const [permit2Approved, setPermit2Approved] = useState(false);
   const [isCheckingPermit2, setIsCheckingPermit2] = useState(false);
   const [isApprovingPermit2, setIsApprovingPermit2] = useState(false);
+  const [regularApprovalState, setRegularApprovalState] = useState<ApprovalState>("unknown");
 
   const [smartRoutingResult, setSmartRoutingResult] = useState<SmartRoutingResult | null>(null);
   const [rwaQuoteResult, setRwaQuoteResult] = useState<RWAQuoteResult | null>(null);
@@ -113,6 +124,12 @@ export default function Swap() {
   const maxAmountWeiRef = useRef<bigint | null>(null);
   const maxJustClickedRef = useRef<boolean>(false);
   const quoteRefreshNonceRef = useRef<number>(0);
+  const fastTxOverridesCacheRef = useRef<{
+    address: string;
+    chainId: number;
+    fetchedAt: number;
+    overrides: FastTxOverrides;
+  } | null>(null);
   const [quoteRefreshNonce, setQuoteRefreshNonce] = useState(0);
 
   const { address, isConnected } = useAccount();
@@ -232,11 +249,7 @@ export default function Swap() {
 
   const openExplorer = (txHash: string) => { if (contracts) window.open(`${contracts.explorer}${txHash}`, "_blank"); };
 
-  const getFastTxOverrides = async (provider: BrowserProvider): Promise<{
-    maxFeePerGas?: bigint;
-    maxPriorityFeePerGas?: bigint;
-    gasPrice?: bigint;
-  }> => {
+  const loadFastTxOverrides = async (provider: BrowserProvider): Promise<FastTxOverrides> => {
     try {
       const feeData = await provider.getFeeData();
       const bump = 150n;
@@ -261,6 +274,29 @@ export default function Swap() {
     return {};
   };
 
+  const getFastTxOverrides = async (provider: BrowserProvider): Promise<FastTxOverrides> => {
+    const cached = fastTxOverridesCacheRef.current;
+    if (
+      cached &&
+      cached.chainId === chainId &&
+      cached.address === String(address || "").toLowerCase() &&
+      Date.now() - cached.fetchedAt < FAST_TX_OVERRIDES_TTL_MS
+    ) {
+      return cached.overrides;
+    }
+
+    const overrides = await loadFastTxOverrides(provider);
+    if (address && chainId) {
+      fastTxOverridesCacheRef.current = {
+        address: address.toLowerCase(),
+        chainId,
+        fetchedAt: Date.now(),
+        overrides,
+      };
+    }
+    return overrides;
+  };
+
   const ensureTxSucceeded = async (tx: { wait: () => Promise<any> }, context: string): Promise<any> => {
     const receipt = await tx.wait();
     if (!receipt || receipt.status === 0) {
@@ -272,12 +308,108 @@ export default function Swap() {
   useEffect(() => { loadTokens(); }, [chainId]);
 
   useEffect(() => {
+    if (!isConnected || !address || !chainId || !window.ethereum) {
+      fastTxOverridesCacheRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    let intervalId: number | null = null;
+
+    const warm = async () => {
+      try {
+        const provider = new BrowserProvider(window.ethereum);
+        const overrides = await loadFastTxOverrides(provider);
+        if (cancelled) return;
+        fastTxOverridesCacheRef.current = {
+          address: address.toLowerCase(),
+          chainId,
+          fetchedAt: Date.now(),
+          overrides,
+        };
+      } catch {
+        // Ignore warmup failures and fall back to on-demand loading.
+      }
+    };
+
+    void warm();
+    intervalId = window.setInterval(() => { void warm(); }, FAST_TX_OVERRIDES_TTL_MS);
+
+    return () => {
+      cancelled = true;
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
+    };
+  }, [address, chainId, isConnected]);
+
+  useEffect(() => {
     if (!gaslessMode || !address || !fromToken) {
       setPermit2Approved(false);
       return;
     }
     checkPermit2();
   }, [gaslessMode, address, fromToken?.address, chainId]);
+
+  useEffect(() => {
+    if (
+      !address ||
+      !window.ethereum ||
+      !fromToken ||
+      !contracts ||
+      !smartRoutingResult?.bestQuote ||
+      !smartRoutingResult.inputAmount ||
+      gaslessMode ||
+      isRWAPair ||
+      isWrapPair ||
+      isUnwrapPair
+    ) {
+      setRegularApprovalState("unknown");
+      return;
+    }
+
+    if (isNativeToken(fromToken.address)) {
+      setRegularApprovalState("not_needed");
+      return;
+    }
+
+    const spender = smartRoutingResult.bestQuote.protocol === "V3"
+      ? contracts.v3.swapRouter
+      : contracts.v2.router;
+
+    let cancelled = false;
+    setRegularApprovalState("unknown");
+
+    const warmApproval = async () => {
+      try {
+        const provider = new BrowserProvider(window.ethereum);
+        const signer = await provider.getSigner();
+        const tokenContract = new Contract(fromToken.address, ERC20_ABI, signer);
+        const allowance = await tokenContract.allowance(address, spender);
+        if (cancelled) return;
+        setRegularApprovalState(allowance >= smartRoutingResult.inputAmount ? "ready" : "needs_approval");
+      } catch {
+        if (!cancelled) {
+          setRegularApprovalState("unknown");
+        }
+      }
+    };
+
+    void warmApproval();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    address,
+    contracts,
+    fromToken,
+    gaslessMode,
+    isRWAPair,
+    isUnwrapPair,
+    isWrapPair,
+    smartRoutingResult,
+  ]);
 
   const getGaslessTokenAddress = (tokenAddress: string) => {
     return isNativeToken(tokenAddress) ? NATIVE_TOKEN : tokenAddress;
@@ -626,8 +758,7 @@ export default function Swap() {
       const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
       toast({ title: "Wrapping…" });
       const feeOverrides = await getFastTxOverrides(provider);
-      const g = await wc.deposit.estimateGas({ value: amountBigInt });
-      const tx = await wc.deposit({ value: amountBigInt, gasLimit: g * 150n / 100n, ...feeOverrides });
+      const tx = await wc.deposit({ value: amountBigInt, ...feeOverrides });
       const receipt = await ensureTxSucceeded(tx, "Wrap");
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
@@ -649,8 +780,7 @@ export default function Swap() {
       const wc = new Contract(wrappedToken.address, WRAPPED_TOKEN_ABI, signer);
       toast({ title: "Unwrapping…" });
       const feeOverrides = await getFastTxOverrides(provider);
-      const g = await wc.withdraw.estimateGas(amountBigInt);
-      const tx = await wc.withdraw(amountBigInt, { gasLimit: g * 150n / 100n, ...feeOverrides });
+      const tx = await wc.withdraw(amountBigInt, { ...feeOverrides });
       const receipt = await ensureTxSucceeded(tx, "Unwrap");
       await Promise.all([refetchFromBalance(), refetchToBalance()]);
       setFromAmount(""); setToAmount("");
@@ -668,6 +798,32 @@ export default function Swap() {
     txs.unshift({ id: txHash, fromToken: from, toToken: to, fromAmount: fromAmt, toAmount: toAmt, timestamp: Date.now(), chainId });
     if (txs.length > 50) txs.pop();
     localStorage.setItem(key, JSON.stringify(txs));
+  };
+
+  const ensureRouterApproval = async (
+    signer: any,
+    tokenAddress: string,
+    spender: string,
+    amountIn: bigint,
+    provider: BrowserProvider,
+    approvalContext: string,
+  ) => {
+    const tokenContract = new Contract(tokenAddress, ERC20_ABI, signer);
+
+    let needsApproval = regularApprovalState === "needs_approval";
+    if (regularApprovalState !== "ready" && regularApprovalState !== "needs_approval") {
+      needsApproval = (await tokenContract.allowance(address, spender)) < amountIn;
+    }
+
+    if (!needsApproval) return;
+
+    toast({ title: "Approval needed" });
+    const approvalFeeOverrides = await getFastTxOverrides(provider);
+    await ensureTxSucceeded(
+      await tokenContract.approve(spender, amountIn, approvalFeeOverrides),
+      approvalContext,
+    );
+    setRegularApprovalState("ready");
   };
 
   // ── Main swap ──────────────────────────────────────────────────────────────
@@ -732,8 +888,7 @@ export default function Swap() {
           const minSynth = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Buying RWA token…", description: `Buying ${toToken.symbol} with USDC` });
           const feeOverrides = await getFastTxOverrides(provider);
-          const g = await vault.buy.estimateGas(rwaQuoteResult.pairId, minSynth, { value: amountIn });
-          const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, gasLimit: g * 150n / 100n, ...feeOverrides });
+          const tx = await vault.buy(rwaQuoteResult.pairId, minSynth, { value: amountIn, ...feeOverrides });
           const receipt = await ensureTxSucceeded(tx, "RWA buy");
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
@@ -752,8 +907,7 @@ export default function Swap() {
           const minUsdc = (rwaQuoteResult.outputAmount * (10000n - slippageBps)) / 10000n;
           toast({ title: "Redeeming RWA token…", description: `Redeeming ${fromToken.symbol} for USDC` });
           const feeOverrides = await getFastTxOverrides(provider);
-          const g = await vault.redeem.estimateGas(rwaQuoteResult.pairId, amountIn, minUsdc);
-          const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { gasLimit: g * 150n / 100n, ...feeOverrides });
+          const tx = await vault.redeem(rwaQuoteResult.pairId, amountIn, minUsdc, { ...feeOverrides });
           const receipt = await ensureTxSucceeded(tx, "RWA redeem");
           saveTransaction(fromToken, toToken, fromAmount, toAmount, receipt.hash);
           await Promise.all([refetchFromBalance(), refetchToBalance()]);
@@ -964,16 +1118,14 @@ export default function Swap() {
 
         // Approve input token if not native
         if (!fromNative) {
-          const tc = new Contract(fromERC20, ERC20_ABI, signer);
-          if (await tc.allowance(address, contracts.v3.swapRouter) < amountIn) {
-            toast({ title: "Approval needed" });
-            const ag = await tc.approve.estimateGas(contracts.v3.swapRouter, amountIn);
-            const approvalFeeOverrides = await getFastTxOverrides(provider);
-            await ensureTxSucceeded(
-              await tc.approve(contracts.v3.swapRouter, amountIn, { gasLimit: ag * 150n / 100n, ...approvalFeeOverrides }),
-              "V3 approval",
-            );
-          }
+          await ensureRouterApproval(
+            signer,
+            fromERC20,
+            contracts.v3.swapRouter,
+            amountIn,
+            provider,
+            "V3 approval",
+          );
         }
 
         const calls: string[] = [];
@@ -1005,8 +1157,7 @@ export default function Swap() {
           }
 
           const swapFeeOverrides = await getFastTxOverrides(provider);
-          const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue, ...swapFeeOverrides });
+          tx = await swapRouter.multicall(calls, { value: totalValue, ...swapFeeOverrides });
         } else {
           // Multi-hop V3 path
           const { encodePath } = await import("@/lib/v3-utils");
@@ -1036,8 +1187,7 @@ export default function Swap() {
           }
 
           const swapFeeOverrides = await getFastTxOverrides(provider);
-          const g = await swapRouter.multicall.estimateGas(calls, { value: totalValue });
-          tx = await swapRouter.multicall(calls, { gasLimit: g * 150n / 100n, value: totalValue, ...swapFeeOverrides });
+          tx = await swapRouter.multicall(calls, { value: totalValue, ...swapFeeOverrides });
         }
       } else {
         // ── V2 path ────────────────────────────────────────────────────────
@@ -1060,34 +1210,29 @@ export default function Swap() {
         }
         if (fromNative) {
           const swapFeeOverrides = await getFastTxOverrides(provider);
-          const g = await router.swapExactETHForTokens.estimateGas(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn });
-          tx = await router.swapExactETHForTokens(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn, gasLimit: g * 150n / 100n, ...swapFeeOverrides });
+          tx = await router.swapExactETHForTokens(minAmountOut, path, recipient, deadlineTimestamp, { value: amountIn, ...swapFeeOverrides });
         } else if (toNative) {
-          const tc = new Contract(fromToken.address, ERC20_ABI, signer);
-          if (await tc.allowance(address, contracts.v2.router) < amountIn) {
-            const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn);
-            const approvalFeeOverrides = await getFastTxOverrides(provider);
-            await ensureTxSucceeded(
-              await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n, ...approvalFeeOverrides }),
-              "V2 approval",
-            );
-          }
+          await ensureRouterApproval(
+            signer,
+            fromToken.address,
+            contracts.v2.router,
+            amountIn,
+            provider,
+            "V2 approval",
+          );
           const swapFeeOverrides = await getFastTxOverrides(provider);
-          const g = await router.swapExactTokensForETH.estimateGas(amountIn, minAmountOut, path, recipient, deadlineTimestamp);
-          tx = await router.swapExactTokensForETH(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n, ...swapFeeOverrides });
+          tx = await router.swapExactTokensForETH(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { ...swapFeeOverrides });
         } else {
-          const tc = new Contract(fromToken.address, ERC20_ABI, signer);
-          if (await tc.allowance(address, contracts.v2.router) < amountIn) {
-            const ag = await tc.approve.estimateGas(contracts.v2.router, amountIn);
-            const approvalFeeOverrides = await getFastTxOverrides(provider);
-            await ensureTxSucceeded(
-              await tc.approve(contracts.v2.router, amountIn, { gasLimit: ag * 150n / 100n, ...approvalFeeOverrides }),
-              "V2 approval",
-            );
-          }
+          await ensureRouterApproval(
+            signer,
+            fromToken.address,
+            contracts.v2.router,
+            amountIn,
+            provider,
+            "V2 approval",
+          );
           const swapFeeOverrides = await getFastTxOverrides(provider);
-          const g = await router.swapExactTokensForTokens.estimateGas(amountIn, minAmountOut, path, recipient, deadlineTimestamp);
-          tx = await router.swapExactTokensForTokens(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { gasLimit: g * 150n / 100n, ...swapFeeOverrides });
+          tx = await router.swapExactTokensForTokens(amountIn, minAmountOut, path, recipient, deadlineTimestamp, { ...swapFeeOverrides });
         }
       }
 
