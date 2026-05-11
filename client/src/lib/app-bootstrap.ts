@@ -84,7 +84,9 @@ export function bootstrapAppReadiness(
 
         setPhase("community");
         await sleep(COMMUNITY_PRELOAD_START_DELAY_MS);
-        await preloadCommunityTokens(ARC_TESTNET_CHAIN_ID);
+        void preloadCommunityTokens(ARC_TESTNET_CHAIN_ID).catch((error) => {
+          console.error("[app-bootstrap] community preload failed", error);
+        });
       } catch (error) {
         console.error("[app-bootstrap] bootstrap readiness failed", error);
       } finally {

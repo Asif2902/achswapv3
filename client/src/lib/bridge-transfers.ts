@@ -764,6 +764,11 @@ export async function updateTransferStatus(
       existing[idx] = updatedRecord;
       setFallbackTransfers(existing);
       dispatchTransfersUpdated();
+    } else {
+      addToHistory(updatedRecord);
+      existing.splice(idx, 1);
+      setFallbackTransfers(existing);
+      dispatchTransfersUpdated();
     }
   }
 
@@ -800,23 +805,6 @@ export async function updateTransferStatus(
           ownershipProof,
         }
       );
-    }
-  }
-
-  // Now perform the splice and history addition if status was terminal
-  if (serverOk && idx >= 0 && (status === "complete" || status === "failed")) {
-    const updatedRecord = {
-      ...snapshot!,
-      ...updates,
-      updatedAt: Date.now(),
-    };
-    addToHistory(updatedRecord);
-    const latestExisting = getFallbackTransfers();
-    const latestIdx = latestExisting.findIndex((t) => t.id === burnTxHash);
-    if (latestIdx >= 0) {
-      latestExisting.splice(latestIdx, 1);
-      setFallbackTransfers(latestExisting);
-      dispatchTransfersUpdated();
     }
   }
 

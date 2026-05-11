@@ -505,10 +505,13 @@ class BatchRpcProvider extends JsonRpcProvider {
     for (const endpoint of attempts) {
       try {
         const result = await fetchJsonRpc(endpoint, payload);
-        resetEndpointFailure(endpoint.url);
+        reportRpcSuccess(this.chainId, endpoint.url);
         return result;
       } catch (error) {
         lastError = error;
+        if (!isRetryableRpcError(error)) {
+          throw error;
+        }
         trackEndpointFailure(this.chainId, endpoint);
       }
     }

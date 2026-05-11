@@ -1234,10 +1234,14 @@ export default function Bridge() {
     } catch (mintErr: any) {
       let walletProvider: BrowserProvider | undefined = undefined;
       if (window.ethereum) {
-        const provider = new BrowserProvider(window.ethereum);
-        const network = await provider.getNetwork();
-        if (Number(network.chainId) === dstChain.chainId) {
-          walletProvider = provider;
+        try {
+          const provider = new BrowserProvider(window.ethereum);
+          const network = await provider.getNetwork();
+          if (Number(network.chainId) === dstChain.chainId) {
+            walletProvider = provider;
+          }
+        } catch (networkErr) {
+          console.warn("[bridge] Failed to inspect wallet network after mint error:", networkErr);
         }
       }
       const claimedOnDestination = await detectClaimedAfterMintFailure(
@@ -1554,7 +1558,7 @@ export default function Bridge() {
           error: null,
         });
 
-        await savePendingTransferWithProbe({
+        void savePendingTransferWithProbe({
           id: txHash,
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
@@ -1566,7 +1570,9 @@ export default function Bridge() {
           timestamp: Date.now(),
           status: "ready_to_mint",
           attestation,
-        }, { strict: isBridgeDbAvailable });
+        }, { strict: isBridgeDbAvailable }).catch((err) => {
+          console.error("[bridge] Failed to persist ready_to_mint transfer in background:", err);
+        });
 
         currentTransferIdRef.current = txHash;
 
@@ -1581,7 +1587,7 @@ export default function Bridge() {
           error: null,
         });
 
-        await savePendingTransferWithProbe({
+        void savePendingTransferWithProbe({
           id: txHash,
           burnTxHash: txHash,
           sourceDomain: manualClaimSourceChain.domain,
@@ -1592,7 +1598,9 @@ export default function Bridge() {
           userAddress: address,
           timestamp: Date.now(),
           status: "attesting",
-        }, { strict: isBridgeDbAvailable });
+        }, { strict: isBridgeDbAvailable }).catch((err) => {
+          console.error("[bridge] Failed to persist attesting transfer in background:", err);
+        });
 
         currentTransferIdRef.current = txHash;
 
@@ -1792,7 +1800,7 @@ export default function Bridge() {
       // ── Persist the transfer after successful burn ──────────────────────
       const transferId = burnTxHash;
       currentTransferIdRef.current = transferId;
-      await savePendingTransferWithProbe({
+      void savePendingTransferWithProbe({
         id: transferId,
         burnTxHash,
         sourceDomain: sourceChain.domain,
@@ -1803,7 +1811,9 @@ export default function Bridge() {
         userAddress: address,
         timestamp: Date.now(),
         status: "attesting",
-      }, { strict: isBridgeDbAvailable });
+      }, { strict: isBridgeDbAvailable }).catch((err) => {
+        console.error("[bridge] Failed to persist post-burn transfer in background:", err);
+      });
 
       fetchBalance();
 

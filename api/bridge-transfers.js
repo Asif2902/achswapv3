@@ -396,7 +396,7 @@ async function checkRateLimit(req) {
 
     const count = Number(countRaw);
     if (!Number.isFinite(count)) {
-      return false;
+      return checkRateLimitInMemory(clientKey, FALLBACK_RATE_LIMIT_PER_MINUTE);
     }
 
     return count <= RATE_LIMIT_PER_MINUTE;
