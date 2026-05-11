@@ -88,7 +88,7 @@ Important notes:
 1. Visit [Alchemy](https://www.alchemy.com/)
 2. Create a free account and a new app on ARC Testnet
 3. Copy your API Key
-4. If not provided, public RPC will be used as fallback
+4. If not provided, public RPC will be used as fallbacks
 
 ---
 
