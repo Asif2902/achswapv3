@@ -587,6 +587,14 @@ function selectProgressStatus(existingStatus, incomingStatus, incomingHasAttesta
   return incomingRank >= existingRank ? incoming : existing;
 }
 
+function selectInitialTransferStatus(incomingStatus, incomingHasAttestation) {
+  let status = normalizeTransferStatus(incomingStatus);
+  if (incomingHasAttestation && status === "attesting") {
+    status = "ready_to_mint";
+  }
+  return status;
+}
+
 function pruneMemoryTransferState() {
   const now = Date.now();
   const expiredHashes = [];
@@ -1591,7 +1599,7 @@ async function handleUpsertBurn(req, res) {
   const recordHasAttestation = Boolean(record.attestation?.message && record.attestation?.attestation);
   const mergedStatus = existing
     ? selectProgressStatus(existing.status, record.status, recordHasAttestation)
-    : "attesting";
+    : selectInitialTransferStatus(record.status, recordHasAttestation);
 
   const merged = {
     id: record.burnTxHash,
@@ -1603,9 +1611,9 @@ async function handleUpsertBurn(req, res) {
     amount: existing?.amount ?? record.amount,
     userAddress: existing?.userAddress ?? record.userAddress,
     timestamp: existing?.timestamp || record.timestamp,
-    attestation: existing ? mergeTransferField(existing.attestation, record.attestation) : undefined,
-    mintTxHash: existing ? mergeTransferField(existing.mintTxHash, record.mintTxHash) : undefined,
-    error: existing ? mergeTransferField(existing.error, record.error) : undefined,
+    attestation: mergeTransferField(existing?.attestation, record.attestation),
+    mintTxHash: mergeTransferField(existing?.mintTxHash, record.mintTxHash),
+    error: mergeTransferField(existing?.error, record.error),
     status: mergedStatus,
     expiresAt: Date.now() + TRANSFER_TTL_SECONDS * 1000,
     updatedAt: Date.now(),

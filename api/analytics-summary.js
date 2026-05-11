@@ -30,8 +30,6 @@ const MAX_RANK_CACHE_ENTRIES = readPositiveEnvNumber("ANALYTICS_RANK_CACHE_MAX",
 const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim();
 const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_SECONDS = Math.max(1, Math.floor(RATE_LIMIT_WINDOW_MS / 1000));
-const MAX_PAGINATION_PAGES = 250;
-
 import { serializeAndCompress, deserializeAndDecompress, monitorRedisHealth } from './utils/redis.js';
 
 const rateLimitByKey = new Map();
@@ -244,14 +242,8 @@ function normalizeAddressInput(value) {
 async function countEntityByPagination(token, entity, where = "") {
   let total = 0;
   let lastId = "";
-  let page = 0;
 
   while (true) {
-    page += 1;
-    if (page > MAX_PAGINATION_PAGES) {
-      throw new Error(`${entity} count exceeded ${MAX_PAGINATION_PAGES} pages`);
-    }
-
     const filter = buildWhereClause(where, lastId);
     const query = `query Count${entity} { ${entity}(first: 1000, orderBy: id, orderDirection: asc${filter}) { id } }`;
     const { response: upstream, json: payload } = await fetchSubgraph(token, query, {});
@@ -266,7 +258,11 @@ async function countEntityByPagination(token, entity, where = "") {
     const rows = payload?.data?.[entity] || [];
     total += rows.length;
     if (rows.length < 1000) break;
-    lastId = rows[rows.length - 1].id;
+    const nextLastId = rows[rows.length - 1]?.id;
+    if (!nextLastId || nextLastId === lastId) {
+      throw new Error(`${entity} count pagination stalled`);
+    }
+    lastId = nextLastId;
   }
 
   return total;

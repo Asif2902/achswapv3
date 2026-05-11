@@ -1,5 +1,6 @@
 import { JsonRpcProvider, Network } from "ethers";
 import type { JsonRpcPayload, JsonRpcResult } from "ethers";
+import { getChainByChainId } from "./cctp-config";
 
 export const ARC_TESTNET_CHAIN_ID = 5042002;
 const PUBLIC_ARC_RPC = "https://rpc.testnet.arc.network";
@@ -144,7 +145,18 @@ function getConfiguredRpcEndpoints(chainId: number): RpcEndpoint[] {
         { role: "public", timeoutMs: PUBLIC_TIMEOUT_MS, url: PUBLIC_ARC_RPC },
       ]);
     default:
-      return [];
+      {
+        const chain = getChainByChainId(chainId);
+        if (!chain) return [];
+
+        return uniqueEndpoints(
+          chain.rpcUrls.map((url, index) => ({
+            role: index === 0 ? "primary" : index === 1 ? "backup" : "public",
+            timeoutMs: PUBLIC_TIMEOUT_MS,
+            url,
+          })),
+        );
+      }
   }
 }
 
@@ -489,7 +501,7 @@ class BatchRpcProvider extends JsonRpcProvider {
     // Note: Constructor snapshots the first RPC endpoint for initial connection.
     // The _send() method re-evaluates getRpcAttemptOrder(this.chainId) on every request,
     // ensuring runtime failover order is always current and no external code reads stale connection URLs.
-    super(getRpcAttemptOrder(chainId)[0]?.url ?? getArcPrimaryUrl(), network, {
+    super(getRpcAttemptOrder(chainId)[0]?.url ?? getPublicRpcUrl(chainId), network, {
       batchMaxCount: 20,
       batchStallTime: 10,
       staticNetwork: network,
@@ -547,7 +559,11 @@ export function getPublicRpcUrl(chainId: number): string {
     case ARC_TESTNET_CHAIN_ID:
       return PUBLIC_ARC_RPC;
     default:
-      throw new Error(`Unsupported chainId for public RPC: ${chainId}`);
+      {
+        const chain = getChainByChainId(chainId);
+        if (chain?.rpcUrls?.[0]) return chain.rpcUrls[0];
+        throw new Error(`Unsupported chainId for public RPC: ${chainId}`);
+      }
   }
 }
 
