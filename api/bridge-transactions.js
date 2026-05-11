@@ -1,4 +1,4 @@
-import { serializeAndCompress, deserializeAndDecompress, monitorRedisHealth } from './utils/redis.js';
+import { serializeAndCompressAsync, deserializeAndDecompress, monitorRedisHealth } from './utils/redis.js';
 
 const TTL_SECONDS = 600; // 10 minutes
 const MAX_CACHED_TXS = 50;
@@ -33,14 +33,40 @@ function getCircleIrisBaseUrl() {
   return `https://${configuredHost}`;
 }
 
-function mapCircleMessageToTransaction(message) {
+function mapCircleMessageToTransaction(message, requestedTransactionHash = "") {
+  const decoded = parseCircleMessageBody(message?.decodedMessage?.messageBody);
   return {
-    hash: typeof message?.transactionHash === "string" ? message.transactionHash : "",
-    amount: message?.amount != null ? String(message.amount) : "0",
+    hash: decoded?.hash || message?.transactionHash || message?.txHash || requestedTransactionHash || "",
+    amount: decoded?.amount || (message?.amount != null ? String(message.amount) : "0"),
     timestamp: message?.blockTimestamp || message?.timestamp || message?.createdAt || null,
-    token: typeof message?.token === "string" && message.token ? message.token : "USDC",
+    token: decoded?.token || (typeof message?.token === "string" && message.token ? message.token : "USDC"),
     status: typeof message?.status === "string" && message.status ? message.status : "unknown",
+    rawMessage: message,
   };
+}
+
+function parseCircleMessageBody(messageBody) {
+  const normalized = typeof messageBody === "string" ? messageBody.trim().toLowerCase() : "";
+  if (!/^0x[0-9a-f]+$/.test(normalized)) return null;
+
+  try {
+    const body = normalized.slice(2);
+    const word = (index) => body.slice(index * 64, (index + 1) * 64);
+    const addressFromWord = (value) => {
+      if (!/^[0-9a-f]{64}$/.test(value)) return "";
+      return `0x${value.slice(24)}`;
+    };
+
+    const token = addressFromWord(word(0));
+    const amountWord = word(2);
+    const amount = /^[0-9a-f]{64}$/.test(amountWord)
+      ? BigInt(`0x${amountWord}`).toString()
+      : "0";
+
+    return { amount, hash: "", token };
+  } catch {
+    return null;
+  }
 }
 
 async function fetchBridgeTransactionsAPI(sourceDomainId, transactionHash, nonce) {
@@ -73,7 +99,7 @@ async function fetchBridgeTransactionsAPI(sourceDomainId, transactionHash, nonce
       throw new Error(`Invalid response shape from Circle Iris endpoint ${endpoint.pathname}: expected messages array`);
     }
 
-    const transactions = data.messages.map(mapCircleMessageToTransaction);
+    const transactions = data.messages.map((message) => mapCircleMessageToTransaction(message, transactionHash || ""));
     const totalVolume = transactions.reduce((sum, tx) => {
       const amount = Number(tx.amount);
       return Number.isFinite(amount) ? sum + amount : sum;
@@ -119,26 +145,26 @@ export default async function handler(req, res) {
     const transactionHash = String(rawTransactionHash || '').trim().toLowerCase();
     let rawNonce = req.query.nonce ?? req.body?.nonce ?? '';
     if (Array.isArray(rawNonce)) rawNonce = rawNonce[0] ?? '';
-    let nonce = typeof rawNonce === 'number'
-      ? String(rawNonce)
-      : (typeof rawNonce === 'string' ? rawNonce.trim() : rawNonce);
+    let nonce = '';
 
     if (transactionHash && !/^0x[a-f0-9]{64}$/.test(transactionHash)) {
       return res.status(400).json({ error: 'Invalid transactionHash' });
     }
 
-    if (!transactionHash) {
-      if (typeof rawNonce === 'number') {
-        nonce = String(rawNonce);
-      } else if (typeof rawNonce === 'string') {
-        nonce = rawNonce.trim();
-      } else {
-        return res.status(400).json({ error: 'Invalid nonce' });
-      }
+    if (typeof rawNonce === 'number') {
+      nonce = String(rawNonce);
+    } else if (typeof rawNonce === 'string') {
+      nonce = rawNonce.trim();
+    } else if (rawNonce != null && rawNonce !== '') {
+      return res.status(400).json({ error: 'Invalid nonce' });
+    }
 
-      if (nonce === '') {
+    if (!transactionHash) {
+      if (!/^\d+$/.test(nonce)) {
         return res.status(400).json({ error: 'Invalid nonce' });
       }
+    } else if (nonce && !/^\d+$/.test(nonce)) {
+      nonce = '';
     }
 
     if (!transactionHash && (nonce == null || nonce === '')) {
@@ -167,7 +193,7 @@ export default async function handler(req, res) {
 
     // 3. Set Cache
     try {
-      await serializeAndCompress(cacheKey, optimizedData, TTL_SECONDS);
+      serializeAndCompressAsync(cacheKey, optimizedData, TTL_SECONDS);
     } catch (e) {
       console.error(`[Redis] Cache Write Error:`, e.message);
     }

@@ -839,6 +839,7 @@ async function saveTransferRecord(record) {
         ]);
         redisHealthCache = { ok: true, checkedAt: Date.now() };
         console.log(`[bridge] Saved ${recordWithTimestamp.burnTxHash}:`, result);
+        setMemoryTransfer(recordWithTimestamp);
         return;
       } catch (e) {
         lastError = e;
@@ -909,6 +910,7 @@ async function deleteTransferRecord(burnTxHash, wallet) {
         await upstashPipeline([["DEL", txKey(burnTxHash)]]);
       }
       redisHealthCache = { ok: true, checkedAt: Date.now() };
+      deleteMemoryTransfer(burnTxHash, wallet);
       return true;
     } catch (e) {
       console.error("[bridge] Redis deleteTransferRecord error:", e);
@@ -1236,14 +1238,14 @@ async function verifyBurnTransaction(transfer) {
   }
 
   const decodedDepositor = canonicalAddress(
-    depositForBurnEvent.args?.depositor ?? depositForBurnEvent.args?.[3] ?? "",
+    depositForBurnEvent.args?.depositor ?? depositForBurnEvent.args?.[2] ?? "",
   );
   if (!decodedDepositor || decodedDepositor !== canonicalAddress(transfer.userAddress)) {
     throw new ValidationError("Burn transaction depositor mismatch");
   }
 
   const decodedAmount = normalizeTransferAmountToBaseUnits(
-    depositForBurnEvent.args?.amount ?? depositForBurnEvent.args?.[2],
+    depositForBurnEvent.args?.amount ?? depositForBurnEvent.args?.[1],
   );
   if (decodedAmount == null) {
     throw new ValidationError("Burn transaction amount is invalid");
@@ -1254,7 +1256,7 @@ async function verifyBurnTransaction(transfer) {
   }
 
   const decodedDestinationDomain = Number(
-    depositForBurnEvent.args?.destinationDomain ?? depositForBurnEvent.args?.[5],
+    depositForBurnEvent.args?.destinationDomain ?? depositForBurnEvent.args?.[4],
   );
   if (!Number.isFinite(decodedDestinationDomain) || decodedDestinationDomain !== Number(transfer.destDomain)) {
     throw new ValidationError("Burn transaction destination domain mismatch");

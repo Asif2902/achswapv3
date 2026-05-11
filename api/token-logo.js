@@ -117,12 +117,16 @@ function inferContentType(sourcePath) {
   return "application/octet-stream";
 }
 
-function sendLogo(res, payload) {
-  res.statusCode = 200;
+function writeImageHeaders(res, payload) {
   res.setHeader("Content-Type", payload.contentType);
   res.setHeader("Content-Length", String(payload.body.length));
   res.setHeader("Cache-Control", SUCCESS_CACHE_CONTROL);
   res.setHeader("X-Content-Type-Options", "nosniff");
+}
+
+function sendLogo(res, payload) {
+  res.statusCode = 200;
+  writeImageHeaders(res, payload);
   res.end(payload.body);
 }
 
@@ -155,12 +159,6 @@ async function fetchImageBuffer(url, sourcePath) {
       throw new Error(`Image too large: ${reportedLength}`);
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    const body = Buffer.from(arrayBuffer);
-    if (body.length > MAX_IMAGE_BYTES) {
-      throw new Error(`Image too large after download: ${body.length}`);
-    }
-
     const headerContentType = (response.headers.get("content-type") || "").split(";")[0].trim();
     const contentType = headerContentType.startsWith("image/")
       ? headerContentType
@@ -169,6 +167,37 @@ async function fetchImageBuffer(url, sourcePath) {
     if (!contentType.startsWith("image/")) {
       throw new Error(`Unsupported content type: ${headerContentType || "unknown"}`);
     }
+    if (contentType === "image/svg+xml") {
+      throw new Error("SVG token logos are not proxied");
+    }
+
+    if (!response.body?.getReader) {
+      throw new Error("Gateway response body is not stream-readable");
+    }
+
+    const reader = response.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+
+        totalBytes += value.byteLength;
+        if (totalBytes > MAX_IMAGE_BYTES) {
+          controller.abort();
+          await reader.cancel();
+          throw new Error(`Image too large after streamed download: ${totalBytes}`);
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+
+    const body = Buffer.concat(chunks, totalBytes);
 
     return { body, contentType };
   } finally {
@@ -212,10 +241,7 @@ export default async function handler(req, res) {
   if (cached) {
     if (req.method === "HEAD") {
       res.statusCode = 200;
-      res.setHeader("Content-Type", cached.contentType);
-      res.setHeader("Content-Length", String(cached.body.length));
-      res.setHeader("Cache-Control", SUCCESS_CACHE_CONTROL);
-      res.setHeader("X-Content-Type-Options", "nosniff");
+      writeImageHeaders(res, cached);
       return res.end();
     }
     return sendLogo(res, cached);
@@ -227,10 +253,7 @@ export default async function handler(req, res) {
 
     if (req.method === "HEAD") {
       res.statusCode = 200;
-      res.setHeader("Content-Type", resolved.contentType);
-      res.setHeader("Content-Length", String(resolved.body.length));
-      res.setHeader("Cache-Control", SUCCESS_CACHE_CONTROL);
-      res.setHeader("X-Content-Type-Options", "nosniff");
+      writeImageHeaders(res, resolved);
       return res.end();
     }
 

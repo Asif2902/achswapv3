@@ -37,10 +37,15 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: st
 
 async function probeRpcUrl(
   rpcUrl: string,
+  expectedChainId: number,
   timeoutMs: number,
 ): Promise<{ provider: JsonRpcProvider; rpcUrl: string; lastValidatedAt: number }> {
   const provider = new JsonRpcProvider(rpcUrl);
   await withTimeout(provider.getBlockNumber(), timeoutMs, `RPC probe timed out: ${rpcUrl}`);
+  const network = await withTimeout(provider.getNetwork(), timeoutMs, `RPC network probe timed out: ${rpcUrl}`);
+  if (network.chainId !== BigInt(expectedChainId)) {
+    throw new Error(`RPC chain mismatch for ${rpcUrl}: expected ${expectedChainId}, got ${network.chainId}`);
+  }
   return { provider, rpcUrl, lastValidatedAt: Date.now() };
 }
 
@@ -307,6 +312,14 @@ export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvi
         RPC_CACHED_PROVIDER_TIMEOUT_MS,
         `Cached RPC timed out: ${cached.rpcUrl}`,
       );
+      const network = await withTimeout(
+        cached.provider.getNetwork(),
+        RPC_CACHED_PROVIDER_TIMEOUT_MS,
+        `Cached RPC network probe timed out: ${cached.rpcUrl}`,
+      );
+      if (network.chainId !== BigInt(chain.chainId)) {
+        throw new Error(`Cached RPC chain mismatch for ${cached.rpcUrl}`);
+      }
       cached.lastValidatedAt = Date.now();
       return cached.provider;
     } catch {
@@ -327,7 +340,7 @@ export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvi
 
     try {
       const fastest = await Promise.any(
-        rpcUrls.map((rpcUrl) => probeRpcUrl(rpcUrl, RPC_PROBE_TIMEOUT_MS)),
+        rpcUrls.map((rpcUrl) => probeRpcUrl(rpcUrl, chain.chainId, RPC_PROBE_TIMEOUT_MS)),
       );
       providerCacheByChainId.set(chain.chainId, fastest);
       return fastest.provider;
@@ -337,7 +350,7 @@ export async function getWorkingProvider(chain: CCTPChain): Promise<JsonRpcProvi
 
     for (const rpcUrl of rpcUrls) {
       try {
-        const working = await probeRpcUrl(rpcUrl, RPC_FALLBACK_TIMEOUT_MS);
+        const working = await probeRpcUrl(rpcUrl, chain.chainId, RPC_FALLBACK_TIMEOUT_MS);
         providerCacheByChainId.set(chain.chainId, working);
         return working.provider;
       } catch {

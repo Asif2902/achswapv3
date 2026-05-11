@@ -573,8 +573,6 @@ export function reportRpcSuccess(chainId: number, url: string) {
 }
 
 function preferWarmRpcEndpoint(chainId: number, endpoint: RpcEndpoint) {
-  if (endpoint.role !== "primary" && endpoint.role !== "backup") return;
-
   const state = refreshFailoverState(chainId);
   saveFailoverState(chainId, {
     ...state,

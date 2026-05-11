@@ -30,6 +30,7 @@ const MAX_RANK_CACHE_ENTRIES = readPositiveEnvNumber("ANALYTICS_RANK_CACHE_MAX",
 const UPSTASH_REDIS_REST_URL = (process.env.UPSTASH_REDIS_REST_URL || "").trim();
 const UPSTASH_REDIS_REST_TOKEN = (process.env.UPSTASH_REDIS_REST_TOKEN || "").trim();
 const RATE_LIMIT_WINDOW_SECONDS = Math.max(1, Math.floor(RATE_LIMIT_WINDOW_MS / 1000));
+const MAX_PAGINATION_PAGES = 250;
 
 import { serializeAndCompress, deserializeAndDecompress, monitorRedisHealth } from './utils/redis.js';
 
@@ -243,19 +244,15 @@ function normalizeAddressInput(value) {
 async function countEntityByPagination(token, entity, where = "") {
   let total = 0;
   let lastId = "";
+  let page = 0;
 
   while (true) {
-    let filter = "";
-    if (where && lastId) {
-      // Safely inject id_gt into existing where clause without duplicating
-      const innerWhere = where.replace(/^\s*\{\s*/, '').replace(/\s*\}\s*$/, '');
-      filter = `, where: { id_gt: "${lastId}", ${innerWhere} }`;
-    } else if (where) {
-      filter = `, where: ${where}`;
-    } else if (lastId) {
-      filter = `, where: { id_gt: "${lastId}" }`;
+    page += 1;
+    if (page > MAX_PAGINATION_PAGES) {
+      throw new Error(`${entity} count exceeded ${MAX_PAGINATION_PAGES} pages`);
     }
 
+    const filter = buildWhereClause(where, lastId);
     const query = `query Count${entity} { ${entity}(first: 1000, orderBy: id, orderDirection: asc${filter}) { id } }`;
     const { response: upstream, json: payload } = await fetchSubgraph(token, query, {});
 
@@ -275,12 +272,19 @@ async function countEntityByPagination(token, entity, where = "") {
   return total;
 }
 
+function buildWhereClause(where, lastId) {
+  const clauses = [];
+  if (lastId) clauses.push(`id_gt: "${lastId}"`);
+  if (where) clauses.push(String(where).trim());
+  return clauses.length ? `, where: { ${clauses.join(", ")} }` : "";
+}
+
 async function buildAggregateSummary(token) {
   const [totalUsersCount, swapUsersCount, rwaUsersCount, outlierPoolsCount] = await Promise.all([
     countEntityByPagination(token, "users"),
-    countEntityByPagination(token, "users", "{ swapCount_gt: 0 }"),
-    countEntityByPagination(token, "users", "{ or: [{ rwaBuyCount_gt: 0 }, { rwaRedeemCount_gt: 0 }] }"),
-    countEntityByPagination(token, "pools", "{ flaggedLowLiquidityOutlier: true }"),
+    countEntityByPagination(token, "users", "swapCount_gt: 0"),
+    countEntityByPagination(token, "users", "or: [{ rwaBuyCount_gt: 0 }, { rwaRedeemCount_gt: 0 }]"),
+    countEntityByPagination(token, "pools", "flaggedLowLiquidityOutlier: true"),
   ]);
 
   return {
@@ -322,13 +326,13 @@ async function getUserRankByEffectiveVolume(token, wallet) {
   const higherCount = await countEntityByPagination(
     token,
     "users",
-    `{ totalEffectiveVolumeUsd_gt: ${encodedTargetVolume} }`,
+    `totalEffectiveVolumeUsd_gt: ${encodedTargetVolume}`,
   );
 
   const tiedLowerCount = await countEntityByPagination(
     token,
     "users",
-    `{ totalEffectiveVolumeUsd: ${encodedTargetVolume}, id_lt: ${encodedWallet} }`,
+    `totalEffectiveVolumeUsd: ${encodedTargetVolume}, id_lt: ${encodedWallet}`,
   );
 
   return higherCount + tiedLowerCount + 1;
@@ -361,7 +365,9 @@ export default async function handler(req, res) {
   const forceRefresh = req.body?.forceRefresh === true && isPrivileged(req);
 
   try {
-    monitorRedisHealth(); // Fire & forget
+    void monitorRedisHealth().catch((err) => {
+      console.error("monitorRedisHealth failed", { error: err });
+    });
     
     let aggregateSummary = null;
     let targetUserRank = null;
@@ -381,8 +387,15 @@ export default async function handler(req, res) {
       
       if (wallet) {
         try {
-          targetUserRank = await deserializeAndDecompress(rankCacheKey);
-          if (targetUserRank !== null) rankCached = true;
+          const cachedRankResult = await deserializeAndDecompress(rankCacheKey);
+          if (
+            cachedRankResult
+            && typeof cachedRankResult === "object"
+            && Object.prototype.hasOwnProperty.call(cachedRankResult, "cachedRank")
+          ) {
+            targetUserRank = cachedRankResult.cachedRank;
+            rankCached = true;
+          }
         } catch (err) {
           targetUserRank = null;
           rankCached = false;
@@ -397,10 +410,10 @@ export default async function handler(req, res) {
       } catch (err) {}
     }
 
-    if (wallet && targetUserRank === null) {
+    if (wallet && !rankCached) {
       targetUserRank = await getUserRankByEffectiveVolume(token, wallet);
       try {
-        await serializeAndCompress(rankCacheKey, targetUserRank, Math.floor(SUMMARY_CACHE_TTL_MS / 1000));
+        await serializeAndCompress(rankCacheKey, { cachedRank: targetUserRank }, Math.floor(SUMMARY_CACHE_TTL_MS / 1000));
       } catch (err) {}
     }
 

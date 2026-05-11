@@ -43,9 +43,13 @@ function withTimeout(promise, ms) {
 function formatCommunityNativeAdded(raw) {
   try {
     const asBigInt = typeof raw === "bigint" ? raw : BigInt(String(raw ?? 0));
-    const asNumber = Number(asBigInt);
-    if (!Number.isFinite(asNumber)) return "0";
-    return parseFloat((asNumber / 1e18).toFixed(2)).toString();
+    const unit = 10n ** 18n;
+    const whole = asBigInt / unit;
+    const remainder = asBigInt % unit;
+    const roundedCents = (remainder * 100n + unit / 2n) / unit;
+    const finalWhole = roundedCents === 100n ? whole + 1n : whole;
+    const cents = roundedCents === 100n ? 0n : roundedCents;
+    return `${finalWhole.toString()}.${cents.toString().padStart(2, "0")}`;
   } catch {
     return "0";
   }
@@ -68,7 +72,7 @@ function mapCommunityTokens(infos, liquidities) {
       verified: false,
       chainId: ARC_TESTNET_CHAIN_ID,
       community: true,
-      nativeAdded: formatCommunityNativeAdded(liquidity.nativeReserve),
+      nativeAdded: formatCommunityNativeAdded(info.nativeAdded),
     });
   }
 

@@ -13,7 +13,7 @@ const UPSTASH_TIMEOUT_MS = 5000;
 
 async function upstashRequest(command, ...args) {
   if (!HAS_REDIS) return null;
-  const url = `${UPSTASH_URL}/${command}`;
+  const url = `${UPSTASH_URL}/`;
   
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), UPSTASH_TIMEOUT_MS);
@@ -25,7 +25,7 @@ async function upstashRequest(command, ...args) {
         Authorization: `Bearer ${UPSTASH_TOKEN}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(args),
+      body: JSON.stringify([command, ...args]),
       signal: controller.signal,
     });
     if (!response.ok) {
@@ -64,6 +64,14 @@ export async function serializeAndCompress(cacheKey, dataObj, ttlSeconds) {
     const redactedKey = cacheKey.replace(/:[^:]+$/, ':<redacted>');
     console.error(`[Redis] Cache Write Error for ${redactedKey}:`, err.message);
   }
+}
+
+export function serializeAndCompressAsync(cacheKey, dataObj, ttlSeconds) {
+  if (!HAS_REDIS) return;
+  const redactedKey = cacheKey.replace(/:[^:]+$/, ':<redacted>');
+  serializeAndCompress(cacheKey, dataObj, ttlSeconds).catch((err) => {
+    console.error(`[Redis] Async Cache Write Error for ${redactedKey}:`, err.message);
+  });
 }
 
 export async function deserializeAndDecompress(cacheKey) {

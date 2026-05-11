@@ -550,7 +550,7 @@ export async function reconcileTransfer(
   const idx = existing.findIndex((t) => t.id === transfer.id);
   if (idx >= 0) {
     addToHistory(completedTransfer);
-    existing.splice(idx, 1);
+    existing[idx] = completedTransfer;
     setFallbackTransfers(existing);
     dispatchTransfersUpdated();
   }
@@ -573,6 +573,13 @@ export async function reconcileTransfer(
         timestamp: transfer.timestamp,
         ownershipProof,
       });
+      const latest = getFallbackTransfers();
+      const removeIdx = latest.findIndex((t) => t.id === transfer.id);
+      if (removeIdx >= 0) {
+        latest.splice(removeIdx, 1);
+        setFallbackTransfers(latest);
+        dispatchTransfersUpdated();
+      }
     }
   } catch (err) {
     console.warn(`[bridge-reconcile] Failed to update server for ${transfer.id}:`, err);

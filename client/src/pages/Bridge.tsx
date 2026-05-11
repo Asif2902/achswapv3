@@ -1791,15 +1791,10 @@ export default function Bridge() {
         minFinalityThreshold,
         { maxPriorityFeePerGas: PRIORITY_FEE_PER_GAS }
       );
-      const burnReceipt = await burnTx.wait();
-      const burnTxHash = burnReceipt.hash;
-
-      if (abortRef.current) return;
-      setTransfer(prev => ({ ...prev, step: "attesting", burnTxHash }));
-
-      // ── Persist the transfer after successful burn ──────────────────────
+      const burnTxHash = burnTx.hash;
       const transferId = burnTxHash;
       currentTransferIdRef.current = transferId;
+      setTransfer(prev => ({ ...prev, step: "attesting", burnTxHash }));
       void savePendingTransferWithProbe({
         id: transferId,
         burnTxHash,
@@ -1814,6 +1809,13 @@ export default function Bridge() {
       }, { strict: isBridgeDbAvailable }).catch((err) => {
         console.error("[bridge] Failed to persist post-burn transfer in background:", err);
       });
+
+      const burnReceipt = await burnTx.wait();
+      if (burnReceipt?.status === 0) {
+        throw new Error("Burn transaction failed on-chain");
+      }
+
+      if (abortRef.current) return;
 
       fetchBalance();
 
@@ -2369,18 +2371,19 @@ export default function Bridge() {
                     Manual Claim
                   </button>
 
-                  {allTransfers.length > 0 && (
+                  {allTransfers.some((tx) => tx.status === "complete" || tx.status === "failed") && (
                     <button
                       onClick={async () => {
+                        const dismissible = allTransfers.filter((tx) => tx.status === "complete" || tx.status === "failed");
                         const results = await Promise.all(
-                          allTransfers.map(async (tx) => removeTransfer(tx.id)),
+                          dismissible.map(async (tx) => removeTransfer(tx.id)),
                         );
                         const removedCount = results.filter(Boolean).length;
-                        const total = allTransfers.length;
+                        const total = dismissible.length;
                         if (removedCount !== total) {
                           toast({
                             title: "Some transfers were kept",
-                            description: `${removedCount}/${total} dismissed. Pending transfers stay until completion.`,
+                            description: `${removedCount}/${total} completed or failed transfers dismissed.`,
                             variant: "warning",
                           });
                         }
